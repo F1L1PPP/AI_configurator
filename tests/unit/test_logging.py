@@ -12,6 +12,7 @@ Two invariants we must never regress:
      break all subsequent output.
 """
 
+import contextlib
 import logging
 import sys
 
@@ -47,9 +48,18 @@ def fresh_root_logger():
 
     yield root
 
-    # Restore: peel off whatever the test added, put the original handlers back.
+    # Teardown: any handler currently on root was added during the test.
+    # configure_logging() installs a FileHandler against tmp_path; leaving it
+    # open holds the file descriptor and can block tmp_path cleanup on Windows.
+    # Mirror the production rule: close FileHandlers, NEVER close StreamHandlers
+    # (their stream might be sys.stderr / sys.stdout — closing it breaks output
+    # globally, same bug the production _remove_owned_handlers avoids).
     for handler in list(root.handlers):
         root.removeHandler(handler)
+        if isinstance(handler, logging.FileHandler):
+            with contextlib.suppress(Exception):
+                handler.close()
+
     for handler in saved_handlers:
         root.addHandler(handler)
     root.setLevel(saved_level)
