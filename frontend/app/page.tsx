@@ -1,3 +1,4 @@
+import MeshSphere from "@/components/mesh/MeshSphere";
 import BackendStatus from "@/components/status/BackendStatus";
 
 type StatProps = { label: string; value: string | number; sub?: string };
@@ -45,7 +46,10 @@ const ActionRow = ({ row }: { row: (typeof mockActions)[number] }) => (
 
 export default function DashboardPage() {
   return (
-    <div className="flex flex-col gap-4">
+    <div className="relative flex flex-col gap-4">
+      <div className="pointer-events-none absolute -right-10 -bottom-10 opacity-100">
+        <MeshSphere size={220} opacity={0.08} />
+      </div>
       <div className="grid grid-cols-3 gap-4">
         <StatCard label="Devices" value={1} sub="C1111 connected (mock)" />
         <StatCard label="Sessions today" value={3} sub="0 failed" />
