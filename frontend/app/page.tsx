@@ -1,3 +1,5 @@
+import BackendStatus from "@/components/status/BackendStatus";
+
 type StatProps = { label: string; value: string | number; sub?: string };
 const StatCard = ({ label, value, sub }: StatProps) => (
   <div className="border border-rule bg-surface p-4">
@@ -80,19 +82,13 @@ export default function DashboardPage() {
         </Panel>
       </div>
 
-      <Panel
-        title="Backend status"
-        right={
-          <span className="mono inline-flex items-center gap-1 text-[8px] tracking-wider text-ink-muted">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-ink" />
-            HEALTHZ OK (MOCK — DAY 2 WIRES REAL CALL)
-          </span>
-        }
-      >
+      <Panel title="Backend status" right={<BackendStatus pollMs={5000} />}>
         <p className="text-[10px] leading-relaxed text-ink-muted">
-          This dashboard renders mocked data on Day 1. On Day 2 the &quot;Recent Activity&quot;
-          panel reads from the structlog JSONL file at <span className="mono">logs/actions.log</span>,
-          and the backend status dot reflects a real call to <span className="mono">GET /healthz</span>.
+          The status dot above polls <span className="mono">GET /healthz</span> on the FastAPI
+          backend every 5 seconds. Start it with{" "}
+          <span className="mono">uvicorn backend.main:app --reload</span>. The
+          &quot;Recent Activity&quot; panel still uses mocked rows; Day 2 wires it to the
+          structlog JSONL stream at <span className="mono">logs/actions.log</span>.
         </p>
       </Panel>
     </div>

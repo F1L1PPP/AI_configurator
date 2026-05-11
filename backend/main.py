@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.core.logging import configure_logging, get_logger
 from backend.core.settings import get_settings
@@ -15,6 +16,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Cisco AI Config Agent", version="0.0.1", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/healthz")
