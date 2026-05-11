@@ -1,0 +1,50 @@
+# secrets & local config
+.env
+*.env
+
+# runtime artefacts (gitignored per PROJECT_PLAN §6)
+artifacts/
+logs/
+backups/
+knowledge_base/vectorstore/
+knowledge_base/docs/
+
+# screenshots & traces live only in artifacts/
+screenshots/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+htmlcov/
+.coverage
+*.cover
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+.npm
+*.tsbuildinfo
+next-env.d.ts
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+*.suo
+*.user
+.vscode/settings.json
