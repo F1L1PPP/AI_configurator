@@ -252,7 +252,7 @@ AI_configurator/
 ### 6.2 Tag sequence
 | Tag | Created on | What it contains |
 |---|---|---|
-| `v0.0.1-bootstrap` | Day 1 | Repo skeleton, CI, Pydantic settings, logging, GUI foundation (design tokens + Sidebar + Dashboard skeleton), prerequisites verified |
+| `v0.0.1-bootstrap` | Day 1 | Repo skeleton, CI, Pydantic settings, logging, GUI foundation (design tokens + Sidebar + Dashboard + Chat + Preview + WebUI Live screens), Playwright training ground, Copilot review fixes round 1+2. **NB:** initial tag created end of Day 1 (local-only); prerequisites-verified portion lands the next day via either `git tag -f v0.0.1-bootstrap` after the cabled session or a supplementary `v0.0.1.1-bootstrap-prereqs` tag — operator's choice. |
 | `v0.1.0-cli-core` | Day 3 | CLI read + safe write + HITL + pre/post snapshots + WebUI cert/login probe + Chat/Preview GUI skeletons |
 | `v0.2.0-agent-core` | Day 7 | Orchestrator + tool registry + RAG minimum + real-time WebSocket GUI (Chat + Action Timeline + Agent Live) |
 | `v0.3.0-webui-core` | Day 8 | Playwright login + hostname flow + VLAN flow + screenshots + verify + GUI polish |
