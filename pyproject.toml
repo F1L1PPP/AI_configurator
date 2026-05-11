@@ -23,5 +23,5 @@ known-first-party = ["backend"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
-
-[tool.pytest.ini_options.markers]
+# markers = ["slow: marks tests as slow (deselect with -m 'not slow')"]
+# uncomment + extend the list above when we register our first custom marker
