@@ -253,9 +253,9 @@ AI_configurator/
 | Tag | Created on | What it contains |
 |---|---|---|
 | `v0.0.1-bootstrap` | Day 1 | Repo skeleton, CI, Pydantic settings, logging, prerequisites verified |
-| `v0.1.0-cli-core` | Day 3 | CLI read + safe write + HITL + pre/post snapshots |
-| `v0.2.0-agent-core` | Day 5 | Orchestrator + tool registry + RAG minimum |
-| `v0.3.0-webui-core` | Day 9 | Playwright login + hostname flow + VLAN flow + screenshots + verify |
+| `v0.1.0-cli-core` | Day 3 | CLI read + safe write + HITL + pre/post snapshots + WebUI cert/login probe |
+| `v0.2.0-agent-core` | Day 7 | Orchestrator + tool registry + RAG minimum |
+| `v0.3.0-webui-core` | Day 8 | Playwright login + hostname flow + VLAN flow + screenshots + verify |
 | `v0.4.0-alpha.1` | **Day 10** | **First fully working end-to-end build → cut `release/alpha-1-freeze` immediately** |
 | `v0.4.1-alpha.1` | Day 11 | Bug bash fixes |
 | `v0.4.2-alpha.1` | Day 12 | CI hardening + repo protections |
@@ -311,23 +311,46 @@ Each day is split into **3 blocks**: 4h build / 1h test+bugfix / 1h commit+push+
 - Smoke: call each tool against real router, validate parsed structure
 - **Commit + push**
 
-**Day 3 — CLI write + HITL + snapshots**
+**Day 3 — CLI write + HITL + snapshots + WebUI probe**
 - `cli_agent/write_tools.py`: `set_hostname`, `set_interface_ip`
 - `cli_agent/snapshots.py`: pre + post snapshot helper
 - `orchestration/confirmations.py`: action_id state machine, server-enforced approval gate
 - Rollback helper: `restore_config(path)`
 - Smoke: change hostname on real router, verify, restore from backup
+- **30-min WebUI probe** at end of day (exploratory only, no production code):
+  - Playwright headed Chromium with `ignore_https_errors=True` against `https://<router>`
+  - Confirm login form submit lands on Dashboard (cert bypass works, no redirect loop)
+  - Quick `playwright codegen` capture of rough selectors for hostname + VLAN forms — input for Day 4
+  - Surfaces cert / login / version mismatch issues 4 days before Day 7 in the old plan
 - **Tag:** `v0.1.0-cli-core`
 
-**Day 4 — Orchestrator + tool registry**
-- `orchestration/planner.py` — direct Anthropic SDK, tool-use loop (Sonnet 4.6)
-- Tool schemas in Anthropic format; SK + EN system prompt
-- WebSocket broadcast: `agent_thinking`, `tool_call`, `tool_result`, `awaiting_approval`, `applied`, `verified`, `error`
-- Refusal path for unknown / unauthorized intents
-- Smoke: "show interfaces" → CLI agent → parsed reply; "change hostname to LAB-R1" → preview → approve → applied → verified
+**Day 4 — WebUI discovery**
+- Playwright codegen on real router: walk Login → Configuration → VLANs → Add VLAN + Administration → Device Properties
+- Fill `webui_agent/selectors/iosxe_default.yaml` with multiple strategies per element (role, text, css)
+- `webui_agent/browser.py` (headed in dev, `ignore_https_errors=True`, viewport pinned)
+- `webui_agent/login.py` — login flow as a class + session keepalive (Cisco WebUI times out ~5 min idle — relogin detection)
+- `wait_for_load_state("networkidle")` helper after each navigation
+- Confirm WebUI version recorded in `docs/router-prerequisites.md` (carry over from Day 1 pre-flight)
+- **Commit + push + Playwright trace as artifact**
+
+**Day 5 — WebUI hostname flow**
+- `pages/hostname_page.py` (POM) + `flows/change_hostname.py`
+- Screenshots before/after each step in `artifacts/screenshots/<session>/<step>.png`
+- Verify via CLI (`show running-config | i hostname`) — uses CLI tools from Days 2–3
+- Error handling: element not found → screenshot + DOM dump + abort (no auto-retry)
+- Smoke: change hostname via WebUI on real router, verify via CLI, restore from backup
 - **Commit + push**
 
-**Day 5 — RAG minimum**
+**Day 6 — Orchestrator + tool registry**
+- `orchestration/planner.py` — direct Anthropic SDK, tool-use loop (Sonnet 4.6)
+- Tool schemas in Anthropic format; SK + EN system prompt
+- Register CLI read/write tools + WebUI hostname flow as orchestrator tools
+- WebSocket broadcast: `agent_thinking`, `tool_call`, `tool_result`, `awaiting_approval`, `applied`, `verified`, `error`
+- Refusal path for unknown / unauthorized intents
+- Smoke: "show interfaces" → CLI agent → parsed reply; "change hostname to LAB-R1 via WebUI" → preview → approve → applied → verified
+- **Commit + push**
+
+**Day 7 — RAG minimum**
 - `knowledge_agent/ingest.py`: curated set (~50–100 MB) of C1111 + IOS XE 17.x guides scoped to VLANs, hostname, WebUI nav, interfaces
 - Heading-aware chunking, ~500 tok with 50-tok overlap
 - Embeddings via `all-MiniLM-L6-v2`, persist to ChromaDB
@@ -337,33 +360,19 @@ Each day is split into **3 blocks**: 4h build / 1h test+bugfix / 1h commit+push+
 - Smoke: 10 test queries hand-graded for relevance (≥7/10 passes)
 - **Tag:** `v0.2.0-agent-core`
 
-**Day 6 — Verification, parsers, smoke harness**
-- TextFSM templates checked for required commands
-- `tests/smoke/` — 6 scenarios from §2 wired as runnable scripts
-- Fix any planner edge cases surfaced
-- **Commit + push + artifacts upload**
-
-**Day 7 — WebUI discovery**
-- Playwright codegen on real router: walk Login → Configuration → VLANs → Add VLAN + Administration → Device Properties
-- Fill `webui_agent/selectors/iosxe_default.yaml` with multiple strategies per element (role, text, css)
-- `webui_agent/browser.py` (headed in dev, `ignore_https_errors=True`, viewport pinned)
-- Login flow + session keepalive (Cisco WebUI times out ~5 min idle — relogin detection)
-- `wait_for_load_state("networkidle")` after each navigation
-- Document the WebUI version in `docs/router-prerequisites.md`
-- **Commit + push + Playwright trace as artifact**
-
-**Day 8 — WebUI hostname flow**
-- `pages/hostname_page.py` (POM) + `flows/change_hostname.py`
-- Screenshots before/after each step in `artifacts/screenshots/<session>/<step>.png`
-- Verify via CLI (`show running-config | i hostname`)
-- Error handling: element not found → screenshot + DOM dump + abort
-- **Commit + push**
-
-**Day 9 — WebUI VLAN flow**
-- `pages/vlan_page.py` + `flows/add_access_vlan.py`
+**Day 8 — WebUI VLAN flow**
+- `pages/vlan_page.py` (POM) + `flows/add_access_vlan.py`
+- Screenshots before/after each step
 - Verify VLAN appears via WebUI list + CLI `show vlan brief`
 - Wire into orchestrator (Sonnet picks `webui_add_access_vlan`)
 - **Tag:** `v0.3.0-webui-core`
+
+**Day 9 — Verification, smoke harness, WebUI buffer**
+- TextFSM templates checked for required commands
+- `tests/smoke/` — 6 scenarios from §2 wired as runnable scripts
+- Run all 6 scenarios end-to-end against real router; fix any planner edge cases surfaced
+- **WebUI buffer:** residual bugs from Days 5 / 8 (selector flake, session timeout, race conditions) get the dedicated day before freeze
+- **Commit + push + artifacts upload**
 
 **Day 10 — First full integration & alpha freeze**
 - End-to-end demo of all 6 §2 scenarios from natural language
@@ -447,10 +456,10 @@ A day is "done" only when:
 
 | Risk | P | Impact | Mitigation |
 |---|---|---|---|
-| WebUI prerequisites missing → only Dashboard visible | High | Critical | **Day 1 §3 pre-flight checklist; do not start Day 7 until verified** |
-| WebUI selectors break across IOS XE versions | Medium | High | Multiple selector strategies per element; `selector-map.md` doc; codegen rerun if upgraded |
-| Self-signed cert blocks Playwright | High | Medium | `ignore_https_errors=True` from Day 1; Chromium flag fallback |
-| Cisco WebUI session timeout (5 min idle) | High | Medium | Relogin detection; session keepalive helper |
+| WebUI prerequisites missing → only Dashboard visible | High | Critical | **Day 1 §3 pre-flight checklist; do not start Day 4 until verified** |
+| WebUI selectors break across IOS XE versions | Medium | High | Multiple selector strategies per element; `selector-map.md` doc; codegen rerun if upgraded; **selector discovery moved to Day 4 (was Day 7) — breakage surfaces 3 days earlier with Day 9 as dedicated buffer** |
+| Self-signed cert blocks Playwright | High | Medium | `ignore_https_errors=True` from Day 1; Chromium flag fallback; **cert handling validated on Day 3 probe** |
+| Cisco WebUI session timeout (5 min idle) | High | Medium | Relogin detection; session keepalive helper; **timeout patterns surface on Day 5 hostname flow (was Day 8) — relogin handler has 3 extra days to bake before alpha freeze** |
 | RAG retrieves irrelevant chunks → bad CLI | Medium | Medium | Curate doc set; 10-query relevance eval on Day 5; confidence threshold |
 | Orchestrator approves its own writes | Low | Critical | Server-enforced approval gate (not prompt) |
 | Two weeks tight for full GUI scope | High | Medium | Alpha-1 freeze on Day 10 already passes the grading; GUI is upside |
