@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import sys
 from pathlib import Path
@@ -49,6 +50,19 @@ def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) ->
     stderr_handler.setFormatter(formatter)
 
     root = logging.getLogger()
+    # uvicorn --reload re-runs the FastAPI lifespan on every file save, which
+    # would call configure_logging() again and stack a fresh pair of handlers
+    # on top of the existing ones — every log line then writes 2x, 3x, … N
+    # times. Close + remove any handlers we previously installed before adding
+    # the new pair, so the call is idempotent.
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        # contextlib.suppress(...) is a "swallow this exception type silently"
+        # context manager — same as try/except/pass but one line. handler.close()
+        # can raise if the handler's already closed; we don't care, just move on.
+        with contextlib.suppress(Exception):
+            handler.close()
+
     root.setLevel(log_level.upper())
     root.addHandler(file_handler)
     root.addHandler(stderr_handler)
