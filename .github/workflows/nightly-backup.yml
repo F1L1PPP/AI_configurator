@@ -1,0 +1,14 @@
+name: Nightly backup (placeholder)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # 02:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    name: Nightly backup placeholder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log
+        run: echo "nightly backup placeholder — real artifact upload wired on Day 12"
