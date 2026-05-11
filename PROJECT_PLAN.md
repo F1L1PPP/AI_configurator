@@ -3,7 +3,7 @@
 **Repo:** https://github.com/F1L1PPP/AI_configurator
 **Owner:** Filip
 **Mode:** Solo, with Claude Code (Max plan)
-**Timeline:** 14 days × 6h/day = 84h
+**Timeline:** 10 working days × 6h/day = 60h (parallel GUI track)
 **Target device:** Real Cisco C1111 (WebUI + console cable available)
 **Source assignment:** `uploads/zadanie_projektu_cisco_ai_agent (1).docx`
 
@@ -20,7 +20,7 @@
 | WebUI agent | **30 pts** | Live demo: VLAN add + hostname change via Playwright, screenshots saved, verification |
 | Integration & HITL | 15 pts | Full flow prompt → plan → approval → execute → verify, no autonomous writes |
 | Code & docs | 10 pts | README + technical report (≥8 page PDF) + clean code |
-| Bonus | +10 | Playwright MCP OR monitoring dashboard (we get the dashboard for free from the planned GUI) |
+| Bonus | +10 | Playwright MCP OR monitoring dashboard (the GUI is now a graded core deliverable per instructor, not optional — the dashboard inside it also lands the bonus) |
 
 **Deliverables:** ZIP archive, technical report PDF (≥8 pages), 10–15 min demo (video or live).
 
@@ -252,17 +252,14 @@ AI_configurator/
 ### 6.2 Tag sequence
 | Tag | Created on | What it contains |
 |---|---|---|
-| `v0.0.1-bootstrap` | Day 1 | Repo skeleton, CI, Pydantic settings, logging, prerequisites verified |
-| `v0.1.0-cli-core` | Day 3 | CLI read + safe write + HITL + pre/post snapshots + WebUI cert/login probe |
-| `v0.2.0-agent-core` | Day 7 | Orchestrator + tool registry + RAG minimum |
-| `v0.3.0-webui-core` | Day 8 | Playwright login + hostname flow + VLAN flow + screenshots + verify |
-| `v0.4.0-alpha.1` | **Day 10** | **First fully working end-to-end build → cut `release/alpha-1-freeze` immediately** |
-| `v0.4.1-alpha.1` | Day 11 | Bug bash fixes |
-| `v0.4.2-alpha.1` | Day 12 | CI hardening + repo protections |
-| `v0.5.0-rc.1` | Day 13 | Feature freeze; docs + UX polish |
-| `v1.0.0-demo` | Day 14 | Final submission tag |
+| `v0.0.1-bootstrap` | Day 1 | Repo skeleton, CI, Pydantic settings, logging, GUI foundation (design tokens + Sidebar + Dashboard skeleton), prerequisites verified |
+| `v0.1.0-cli-core` | Day 3 | CLI read + safe write + HITL + pre/post snapshots + WebUI cert/login probe + Chat/Preview GUI skeletons |
+| `v0.2.0-agent-core` | Day 7 | Orchestrator + tool registry + RAG minimum + real-time WebSocket GUI (Chat + Action Timeline + Agent Live) |
+| `v0.3.0-webui-core` | Day 8 | Playwright login + hostname flow + VLAN flow + screenshots + verify + GUI polish |
+| `v0.4.0-alpha.1` | **Day 9** | **First fully working end-to-end build → cut `release/alpha-1-freeze` immediately** |
+| `v1.0.0-demo` | Day 10 | Final submission tag (tech report PDF + demo video + submission ZIP) |
 
-The frontend GUI work happens **on top of** `v0.4.0-alpha.1` in `feature/gui-*` branches and merges through `develop` → `main`. If the GUI doesn't finish, alpha-1 still passes the assignment.
+The frontend GUI is built **in parallel** with the backend, ~2h/day from Day 1 onwards — instructor requires it as a core graded deliverable, not bonus. If a given day's backend work overruns, the GUI work for that day is dropped (not vice versa). At alpha freeze (Day 9), all six §2 scenarios pass end-to-end AND the GUI consumes the real WebSocket event stream.
 
 ### 6.3 Mechanical backup rhythm (not "by feel")
 - Every 60–90 min OR after each logical task → commit to feature branch
@@ -286,130 +283,68 @@ The frontend GUI work happens **on top of** `v0.4.0-alpha.1` in `feature/gui-*` 
 
 ---
 
-## 7. Day-by-day plan (14 days × 6h)
+## 7. Day-by-day plan (10 working days × 6h, parallel GUI track)
 
-Each day is split into **3 blocks**: 4h build / 1h test+bugfix / 1h commit+push+docs+backup. This mechanical structure is what stops AI-assisted development from sprawling.
+Each day allocates roughly **3.5h backend + 1.5h GUI + 1h test/commit/push**. The split is flexible (some days are more backend-heavy, some more GUI), but the rule is: **backend on the §2 critical path comes first; if backend slips on a given day, that day's GUI work is dropped, not vice versa.**
 
-### Week 1 — Foundation, agents, alpha freeze
+**Day 1 — Bootstrap + GUI foundation + router pre-flight**
+- Backend: repo skeleton, `.gitignore`, `.env.example`, `pyproject.toml` (ruff+pytest), `requirements.txt`, Pydantic Settings, structlog, FastAPI healthz, CI workflows, checkpoint skill, unit tests ✓ (shipped)
+- GUI: design tokens (Tailwind: black/white/gray + Inter + JetBrains Mono), `Sidebar`, `TopBar`, app-level layout, Dashboard page with mocked "Recent Actions" / "Device Status" / "Live Agent" cards, browser-tab title
+- (Deferred — cabled session) §3 router pre-flight checklist + USB known-good config export
+- **Tag (after pre-flight):** `v0.0.1-bootstrap`
 
-**Day 1 — Bootstrap + router pre-flight**
-- Verify §3 router prerequisites (privilege 15, VTY 30, http/https server)
-- Export current `running-config` to USB (known-good backup)
-- Init repo: `.gitignore`, `.env.example`, `pyproject.toml` (ruff+pytest), `requirements.txt`
-- FastAPI hello-world + Next.js scaffold (just routes, no styling)
-- Write `CLAUDE.md` (short, concrete — rules below in §9)
-- Write `.claude/skills/checkpoint/SKILL.md` + `scripts/checkpoint.sh`
-- Test SSH+WebUI from throwaway scripts
-- **Tag:** `v0.0.1-bootstrap`
-
-**Day 2 — CLI read layer**
-- `cli_agent/connection.py` (Netmiko pool, 1 persistent SSH session per device)
-- `cli_agent/read_tools.py`: `show_version`, `show_ip_interface_brief`, `show_running_config`, `show_vlan_brief`
-- `cli_agent/parsers.py` — wrap Netmiko `use_textfsm=True`; fall back to regex
-- Action logger writing JSONL with redaction
-- Unit tests with mocked Netmiko
-- Smoke: call each tool against real router, validate parsed structure
+**Day 2 — CLI read + Dashboard wired**
+- Backend: `cli_agent/connection.py` (Netmiko pool, 1 persistent SSH session), `read_tools.py` (`show_version`, `show_ip_interface_brief`, `show_running_config`, `show_vlan_brief`), `parsers.py` (Netmiko `use_textfsm=True` with regex fallback), action logger JSONL with redaction
+- GUI: Dashboard wired to real `/healthz` (live status indicator), recent-actions list reads from `logs/actions.log` (still mocked structure, real data from Day 6)
+- Smoke: call each `show_*` against real router, validate parsed structure
 - **Commit + push**
 
-**Day 3 — CLI write + HITL + snapshots + WebUI probe**
-- `cli_agent/write_tools.py`: `set_hostname`, `set_interface_ip`
-- `cli_agent/snapshots.py`: pre + post snapshot helper
-- `orchestration/confirmations.py`: action_id state machine, server-enforced approval gate
-- Rollback helper: `restore_config(path)`
+**Day 3 — CLI write + HITL + WebUI probe + Chat/Preview skeletons**
+- Backend: `cli_agent/write_tools.py` (`set_hostname`, `set_interface_ip`), `snapshots.py` (pre/post), `orchestration/confirmations.py` (action_id state machine, server-enforced approval gate), `restore_config(path)` rollback helper
+- Backend (30 min): WebUI cert/login probe — Playwright headed against router, confirm login flow + cert bypass, `playwright codegen` capture rough selectors as Day 4 input
+- GUI: Chat page skeleton (mocked conversation), Preview screen skeleton (mocked plan + Approve/Reject buttons)
 - Smoke: change hostname on real router, verify, restore from backup
-- **30-min WebUI probe** at end of day (exploratory only, no production code):
-  - Playwright headed Chromium with `ignore_https_errors=True` against `https://<router>`
-  - Confirm login form submit lands on Dashboard (cert bypass works, no redirect loop)
-  - Quick `playwright codegen` capture of rough selectors for hostname + VLAN forms — input for Day 4
-  - Surfaces cert / login / version mismatch issues 4 days before Day 7 in the old plan
 - **Tag:** `v0.1.0-cli-core`
 
-**Day 4 — WebUI discovery**
-- Playwright codegen on real router: walk Login → Configuration → VLANs → Add VLAN + Administration → Device Properties
-- Fill `webui_agent/selectors/iosxe_default.yaml` with multiple strategies per element (role, text, css)
-- `webui_agent/browser.py` (headed in dev, `ignore_https_errors=True`, viewport pinned)
-- `webui_agent/login.py` — login flow as a class + session keepalive (Cisco WebUI times out ~5 min idle — relogin detection)
-- `wait_for_load_state("networkidle")` helper after each navigation
-- Confirm WebUI version recorded in `docs/router-prerequisites.md` (carry over from Day 1 pre-flight)
+**Day 4 — WebUI discovery + Agent Live skeleton**
+- Backend: Playwright codegen on real router (Login → Configuration → VLANs → Add VLAN; Administration → Device Properties), fill `webui_agent/selectors/iosxe_default.yaml` with multiple strategies per element (role/text/css), `browser.py` (headed dev, `ignore_https_errors=True`, viewport pinned), `login.py` (login flow class + session keepalive + relogin detection), `wait_for_load_state("networkidle")` helper
+- GUI: **WebUI Agent Live screen skeleton** — placeholder screenshots from `public/`, action timeline component skeleton (mocked steps)
 - **Commit + push + Playwright trace as artifact**
 
-**Day 5 — WebUI hostname flow**
-- `pages/hostname_page.py` (POM) + `flows/change_hostname.py`
-- Screenshots before/after each step in `artifacts/screenshots/<session>/<step>.png`
-- Verify via CLI (`show running-config | i hostname`) — uses CLI tools from Days 2–3
-- Error handling: element not found → screenshot + DOM dump + abort (no auto-retry)
+**Day 5 — WebUI hostname flow + Agent Live wired**
+- Backend: `pages/hostname_page.py` (POM) + `flows/change_hostname.py`, screenshots before/after each step into `artifacts/screenshots/<session>/<step>.png`, verify via CLI (`show running-config | i hostname`), error handling (screenshot + DOM dump + abort, no auto-retry)
+- GUI: WebUI Agent Live screen reads real screenshots from `artifacts/screenshots/<session>/` via a `/api/screenshots/{session}` endpoint (polled every 500ms — no WebSocket yet)
 - Smoke: change hostname via WebUI on real router, verify via CLI, restore from backup
 - **Commit + push**
 
-**Day 6 — Orchestrator + tool registry**
-- `orchestration/planner.py` — direct Anthropic SDK, tool-use loop (Sonnet 4.6)
-- Tool schemas in Anthropic format; SK + EN system prompt
-- Register CLI read/write tools + WebUI hostname flow as orchestrator tools
-- WebSocket broadcast: `agent_thinking`, `tool_call`, `tool_result`, `awaiting_approval`, `applied`, `verified`, `error`
-- Refusal path for unknown / unauthorized intents
-- Smoke: "show interfaces" → CLI agent → parsed reply; "change hostname to LAB-R1 via WebUI" → preview → approve → applied → verified
+**Day 6 — Orchestrator + WebSocket + real-time GUI**
+- Backend: `orchestration/planner.py` (direct Anthropic SDK tool-use loop, Sonnet 4.6), tool schemas in Anthropic format, register CLI + WebUI hostname tools, WebSocket broadcast (`agent_thinking`, `tool_call`, `tool_result`, `awaiting_approval`, `applied`, `verified`, `error`), refusal path
+- GUI: `lib/ws.ts` WebSocket client, Chat page consumes message events, Action Timeline consumes tool-call events, WebUI Agent Live replaces polling with WS-pushed screenshot events
+- Smoke: "show interfaces" → CLI agent → reply visible in Chat; "change hostname via WebUI" → preview in Preview screen → approve via Preview → applied → verified, all events visible in GUI in real time
 - **Commit + push**
 
-**Day 7 — RAG minimum**
-- `knowledge_agent/ingest.py`: curated set (~50–100 MB) of C1111 + IOS XE 17.x guides scoped to VLANs, hostname, WebUI nav, interfaces
-- Heading-aware chunking, ~500 tok with 50-tok overlap
-- Embeddings via `all-MiniLM-L6-v2`, persist to ChromaDB
-- `retrieve.search_docs(query, top_k=5)` returning chunks with source + section
-- Orchestrator prompt updated to call `search_docs` before unfamiliar configs
-- Responses include "Sources" section with file + page/heading
+**Day 7 — RAG + Sources display**
+- Backend: `knowledge_agent/ingest.py` (curated ~50–100 MB C1111 + IOS XE 17.x guides scoped to VLANs/hostname/WebUI nav/interfaces), heading-aware chunking ~500 tok with 50-tok overlap, embeddings via `all-MiniLM-L6-v2` persisted to ChromaDB, `retrieve.search_docs(query, top_k=5)` returning chunks with source + section, orchestrator prompt updated to call `search_docs` before unfamiliar configs
+- GUI: Sources display on Chat replies — citation badges (file + page/heading), clickable to expand chunk preview
 - Smoke: 10 test queries hand-graded for relevance (≥7/10 passes)
 - **Tag:** `v0.2.0-agent-core`
 
-**Day 8 — WebUI VLAN flow**
-- `pages/vlan_page.py` (POM) + `flows/add_access_vlan.py`
-- Screenshots before/after each step
-- Verify VLAN appears via WebUI list + CLI `show vlan brief`
-- Wire into orchestrator (Sonnet picks `webui_add_access_vlan`)
+**Day 8 — WebUI VLAN flow + smoke harness + GUI polish**
+- Backend: `pages/vlan_page.py` (POM) + `flows/add_access_vlan.py`, screenshots, verify VLAN appears via WebUI list + CLI `show vlan brief`, wire into orchestrator (`webui_add_access_vlan`); `tests/smoke/` — all 6 §2 scenarios as runnable scripts; `scripts/run_smoke_tests.py` runs all of them
+- GUI: bug fixes + polish (loading states, error toasts, empty states, mesh sphere decoration if time permits)
 - **Tag:** `v0.3.0-webui-core`
 
-**Day 9 — Verification, smoke harness, WebUI buffer**
-- TextFSM templates checked for required commands
-- `tests/smoke/` — 6 scenarios from §2 wired as runnable scripts
-- Run all 6 scenarios end-to-end against real router; fix any planner edge cases surfaced
-- **WebUI buffer:** residual bugs from Days 5 / 8 (selector flake, session timeout, race conditions) get the dedicated day before freeze
-- **Commit + push + artifacts upload**
-
-**Day 10 — First full integration & alpha freeze**
-- End-to-end demo of all 6 §2 scenarios from natural language
-- HITL approval gate proven for every write
-- `scripts/run_smoke_tests.py` runs all scenarios 5× and reports
+**Day 9 — Alpha freeze + demo b-roll**
+- Backend: `scripts/run_smoke_tests.py` runs all 6 scenarios **5× in a row** — must pass clean; HITL approval gate proven for every write; cut `release/alpha-1-freeze` branch from this commit
+- GUI: record demo video b-roll (10–15 min) of the agent doing each scenario through the GUI — saves Day 10 video time
 - **Tag:** `v0.4.0-alpha.1` + cut `release/alpha-1-freeze` + GitHub Release
-- 🎯 At this point the project already passes the grading. Everything beyond is upside.
+- 🎯 At this point the project passes the grading floor.
 
-### Week 2 — GUI, polish, delivery
-
-**Day 11 — Bug bash + design system**
-- 5× back-to-back smoke loop; fix every issue found
-- Tailwind config: design tokens (black/white/gray, JetBrains Mono + Inter)
-- `components/layout/Sidebar.tsx`, `TopBar.tsx`
-- `components/mesh/MeshSphere.tsx`, `EthernetLogo.tsx` (low-poly SVG)
-- **Tag:** `v0.4.1-alpha.1`
-
-**Day 12 — Dashboard + Device Connection + CI hardening**
-- Dashboard page: live status from WS, recent actions, mesh decoration
-- Device Connection page: form + test connection button
-- CI: ruff + pytest on push/PR; nightly backup workflow; release-artifacts workflow
-- Protected `main`, ruleset for `release/alpha-1-freeze` and tags
-- **Tag:** `v0.4.2-alpha.1`
-
-**Day 13 — Chat + Preview + WebUI Agent Live screen**
-- Chat page with streaming responses + inline tool-call chips
-- Preview screen with planned actions, change summary, risk level, Approve/Reject
-- **WebUI Agent Live** screen — the highest-demo-value frontend piece — consumes the screenshot stream + action timeline (this is what mockup #1 shows)
-- Logs + Backups tables
-- Start writing `docs/technical_report.md`
-- **Tag:** `v0.5.0-rc.1`
-
-**Day 14 — Stability, report, video**
+**Day 10 — Tech report + final polish + submission**
 - No new features. Only P0/P1 fixes
-- Finalize `docs/technical_report.md` → PDF (use `docx`/`pdf` skill or `pandoc`)
-- Polish README: install steps from a clean Windows, config, supported commands, example I/O
-- Record 10–15 min demo video (or rehearse for live presentation)
+- Finalize `docs/technical_report.md` → PDF (use `docx`/`pdf` skill or `pandoc`); polish README with install + supported commands + example I/O
+- Edit demo video from Day 9 b-roll (10–15 min final cut) or rehearse for live presentation
+- Final GUI polish based on the video review
 - Build submission ZIP via `scripts/create_release_bundle.py` (excludes `.git`, `.venv`, `node_modules`, `vectorstore/`, `screenshots/`, `backups/`, `.env`)
 - **Tag:** `v1.0.0-demo` — final submission
 
@@ -462,7 +397,7 @@ A day is "done" only when:
 | Cisco WebUI session timeout (5 min idle) | High | Medium | Relogin detection; session keepalive helper; **timeout patterns surface on Day 5 hostname flow (was Day 8) — relogin handler has 3 extra days to bake before alpha freeze** |
 | RAG retrieves irrelevant chunks → bad CLI | Medium | Medium | Curate doc set; 10-query relevance eval on Day 5; confidence threshold |
 | Orchestrator approves its own writes | Low | Critical | Server-enforced approval gate (not prompt) |
-| Two weeks tight for full GUI scope | High | Medium | Alpha-1 freeze on Day 10 already passes the grading; GUI is upside |
+| 10 days tight for backend + parallel GUI | High | High | Backend on §2 critical path is non-negotiable; GUI is 1.5h/day strictly capped — if backend slips on a day, that day's GUI work is dropped, not vice versa. Mesh decoration / device-connection page treated as Day 8 polish, only if there's spare time. |
 | Anthropic rate limits during demo | Low | Medium | Cache last good plan; pre-recorded demo video as fallback |
 | Bricking the router with bad config | Low | Critical | Known-good config exported to USB Day 1; mandatory pre-snapshot |
 | AI-assisted dev sprawls into unmaintainable diffs | Medium | High | Mechanical 4h/1h/1h day blocks; small feature branches; `/checkpoint` skill |
