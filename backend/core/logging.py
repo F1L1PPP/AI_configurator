@@ -7,12 +7,45 @@ import structlog
 
 _REDACT_KEYS = frozenset({"password", "secret", "api_key", "token"})
 
+# Sentinel attribute we tag onto handlers we install ourselves, so reload
+# cleanup only touches our own handlers — not anything installed by uvicorn,
+# pytest, FastAPI, or a downstream library.
+_OWNED_FLAG = "_cisco_ai_owned"
+
 
 def redact_secrets(logger: object, method: str, event_dict: dict) -> dict:
     for key in _REDACT_KEYS:
         if key in event_dict:
             event_dict[key] = "***REDACTED***"
     return event_dict
+
+
+def _own(handler: logging.Handler) -> logging.Handler:
+    """Tag a handler as one we created; cleanup only removes tagged handlers."""
+    setattr(handler, _OWNED_FLAG, True)
+    return handler
+
+
+def _remove_owned_handlers(root: logging.Logger) -> None:
+    """Remove handlers we previously installed without disturbing anyone else's.
+
+    Two safety rules:
+      1. Only touch handlers carrying our sentinel — don't disturb handlers
+         that uvicorn, pytest, or a downstream library installed.
+      2. Among our own, only call .close() on FileHandlers. logging.StreamHandler
+         delegates close() to its underlying stream, so closing the StreamHandler
+         we attached to sys.stderr would close sys.stderr itself — every
+         subsequent print() / log would silently fail. removeHandler() unhooks
+         it from the logger; the handler object then gets garbage-collected
+         without closing the wrapped stream.
+    """
+    for handler in list(root.handlers):
+        if not getattr(handler, _OWNED_FLAG, False):
+            continue
+        root.removeHandler(handler)
+        if isinstance(handler, logging.FileHandler):
+            with contextlib.suppress(Exception):
+                handler.close()
 
 
 def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) -> None:
@@ -43,25 +76,17 @@ def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) ->
         foreign_pre_chain=shared_processors,
     )
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = _own(logging.FileHandler(log_file, encoding="utf-8"))
     file_handler.setFormatter(formatter)
 
-    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler = _own(logging.StreamHandler(sys.stderr))
     stderr_handler.setFormatter(formatter)
 
     root = logging.getLogger()
-    # uvicorn --reload re-runs the FastAPI lifespan on every file save, which
-    # would call configure_logging() again and stack a fresh pair of handlers
-    # on top of the existing ones — every log line then writes 2x, 3x, … N
-    # times. Close + remove any handlers we previously installed before adding
-    # the new pair, so the call is idempotent.
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-        # contextlib.suppress(...) is a "swallow this exception type silently"
-        # context manager — same as try/except/pass but one line. handler.close()
-        # can raise if the handler's already closed; we don't care, just move on.
-        with contextlib.suppress(Exception):
-            handler.close()
+    # Idempotency: uvicorn --reload re-runs the FastAPI lifespan on every file
+    # save, calling configure_logging() again. Without removal, handlers stack
+    # and every log line writes 2x, 3x, … N times after N reloads.
+    _remove_owned_handlers(root)
 
     root.setLevel(log_level.upper())
     root.addHandler(file_handler)
