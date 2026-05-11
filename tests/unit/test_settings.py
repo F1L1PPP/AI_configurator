@@ -27,8 +27,11 @@ def test_settings_types_from_env():
         "ARTIFACTS_DIR": "artifacts",
         "LOGS_DIR": "logs",
     }
-    with patch.dict(os.environ, env):
-        s = Settings()
+    # clear=True wipes all env vars first so the test isn't polluted by the
+    # developer's local shell. _env_file=None skips .env so we don't pick up
+    # whatever happens to be in the project root.
+    with patch.dict(os.environ, env, clear=True):
+        s = Settings(_env_file=None)
 
     assert isinstance(s.anthropic_api_key, str)
     assert s.anthropic_api_key == "sk-test-key"
@@ -49,9 +52,15 @@ def test_settings_defaults():
     assert s.logs_dir == Path("logs")
 
 
-def test_get_settings_is_cached():
-    env = {"ANTHROPIC_API_KEY": "key-a"}
-    with patch.dict(os.environ, env):
+def test_get_settings_is_cached(monkeypatch):
+    # Force get_settings() through a hermetic environment: clear shell vars,
+    # skip .env, and stub Settings to a known instance so we're only testing
+    # the @lru_cache behavior of get_settings itself.
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key-a"}, clear=True):
+        monkeypatch.setattr(
+            "backend.core.settings.Settings",
+            lambda **kw: Settings(_env_file=None, **kw),
+        )
         s1 = get_settings()
         s2 = get_settings()
     assert s1 is s2
