@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cisco-Lab WebUI — VLANs</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1 class="mono">CISCO-LAB</h1>
+      <nav>
+        <a href="dashboard.html">Dashboard</a>
+        <a href="vlan-list.html" class="active">VLANs</a>
+        <a href="#" onclick="event.preventDefault(); logout();">Sign out</a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h2>VLANs</h2>
+        <a href="vlan-add.html" class="btn primary" role="button">+ Add VLAN</a>
+      </header>
+
+      <div id="alertSlot"></div>
+
+      <section id="vlanContainer">
+        <div class="loading-wrap" style="text-align:center;padding:24px;color:#888">
+          <span class="loading"></span> Loading VLANs…
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    requireLogin();
+
+    // Surface success message from the redirect after add
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("added")) {
+      document.getElementById("alertSlot").innerHTML =
+        `<div class="alert success" role="status">VLAN ${params.get("added")} was created successfully.</div>`;
+    }
+
+    // Simulate a small load delay so Playwright has a networkidle to wait for
+    (async () => {
+      await fakeDelay(500);
+      const vlans = getVlans();
+      const container = document.getElementById("vlanContainer");
+      if (vlans.length === 0) {
+        container.innerHTML = '<div class="empty">No VLANs configured yet. Click "+ Add VLAN" to create one.</div>';
+        return;
+      }
+      let html = `<table role="table">
+        <thead><tr><th>VLAN ID</th><th>Name</th><th>Interface</th><th>Mode</th><th>Created</th></tr></thead>
+        <tbody>`;
+      for (const v of vlans) {
+        html += `<tr>
+          <td class="mono">${v.id}</td>
+          <td>${v.name}</td>
+          <td class="mono">${v.interface}</td>
+          <td>${v.mode}</td>
+          <td class="mono" style="color:#888">${new Date(v.createdAt).toLocaleString()}</td>
+        </tr>`;
+      }
+      html += "</tbody></table>";
+      container.innerHTML = html;
+    })();
+  </script>
+</body>
+</html>

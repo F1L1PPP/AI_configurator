@@ -6,6 +6,9 @@ pydantic-settings==2.9.1
 structlog==25.3.0
 python-dotenv==1.1.0
 
+# Pulled forward from Day 3 — used by playwright_playground/ for training
+playwright==1.49.1
+
 # Dev / test
 ruff==0.11.10
 pytest==8.3.5

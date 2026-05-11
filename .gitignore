@@ -12,6 +12,9 @@ knowledge_base/docs/
 # screenshots & traces live only in artifacts/
 screenshots/
 
+# playwright playground runtime artifacts (per-script session screenshots/DOM dumps)
+playwright_playground/artifacts/
+
 # Python
 __pycache__/
 *.pyc
