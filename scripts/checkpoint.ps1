@@ -32,8 +32,9 @@ Write-Host "-> git push ..."
 git push
 if ($LASTEXITCODE -ne 0) { Abort "git push failed" }
 
-# 5. Annotated backup tag
-$tag = "backup-" + (Get-Date -Format "yyyyMMdd-HHmm")
+# 5. Annotated backup tag — seconds precision so back-to-back checkpoints
+#    within the same minute don't collide on `git tag -a`.
+$tag = "backup-" + (Get-Date -Format "yyyyMMdd-HHmmss")
 Write-Host "-> tagging $tag ..."
 git tag -a $tag -m "Daily backup $tag"
 git push origin $tag

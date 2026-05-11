@@ -26,8 +26,9 @@ git commit -m "$COMMIT_MSG" || abort "git commit failed"
 echo "-> git push ..."
 git push || abort "git push failed"
 
-# 5. Annotated backup tag
-TAG="backup-$(date +%Y%m%d-%H%M)"
+# 5. Annotated backup tag — seconds precision so back-to-back checkpoints
+#    within the same minute don't collide on `git tag -a`.
+TAG="backup-$(date +%Y%m%d-%H%M%S)"
 echo "-> tagging $TAG ..."
 git tag -a "$TAG" -m "Daily backup $TAG"
 git push origin "$TAG" || abort "tag push failed"
