@@ -21,6 +21,9 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
+# Install git hooks (runs ruff before every commit)
+pre-commit install
+
 # Copy and fill secrets
 copy .env.example .env
 # edit .env — add ANTHROPIC_API_KEY, router credentials, etc.
