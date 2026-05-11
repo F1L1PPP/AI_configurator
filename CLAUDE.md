@@ -16,6 +16,10 @@ Full rules: `CLAUDE_INSTRUCTIONS.md`. This file is the quick-ref the coding agen
 3. On WebUI: screenshot before and after every Playwright step → `artifacts/screenshots/<session>/`.
 4. If a write fails: stop, save evidence, surface to me. Never auto-retry.
 
+## Tone — explain software tools simply
+- Filip knows Cisco config deeply — use Cisco terms freely (VLAN, VTY, `ip http server`, IOS XE, TextFSM, etc.).
+- Software tooling is new to him — on first mention of any library/framework/concept (FastAPI, Pydantic, Tailwind, hooks, decorators, CORS, etc.), give a one-sentence plain-English explanation of what it IS, then continue. After the first explanation in a session, use freely.
+
 ## Commits
 - Conventional Commits only: `feat(cli-agent): …`, `fix(webui): …`, `docs: …`, `test: …`, `chore: …`.
 - Run `ruff check` + relevant pytest before every commit. Fix failures before committing.

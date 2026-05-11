@@ -17,6 +17,49 @@ The full project context, scope, architecture, schedule, and risk register live 
 - If a decision has trade-offs, name them in one or two sentences and pick a side.
 - Slovak technical terms are fine; primary language is English in code and commits.
 
+## Domain knowledge calibration — explain software tools simply
+
+I (Filip) know **Cisco IOS / IOS XE configuration deeply** — VLANs, VTY lines,
+`ip http server`, IOS XE WebUI screens, TextFSM templates, `show running-config`,
+RJ45 pinouts, Netmiko at the operator level, the whole `configure terminal`
+workflow. Use Cisco terminology freely with no explanation.
+
+The **software tooling stack is new to me.** This is my first time using most
+of the Python/JavaScript libs in this project. The first time you introduce
+any library, framework, file format, design pattern, or programming concept
+in a chat message, **prefix it with a one-sentence plain-English explanation
+of what the tool IS and what role it plays for us.** After the first
+explanation in a session, use the name freely — don't repeat.
+
+Always explain on first mention (non-exhaustive):
+
+| Category | Examples |
+|---|---|
+| **Backend libs** | FastAPI, Pydantic, Pydantic Settings, structlog, Netmiko, ChromaDB, sentence-transformers, Anthropic SDK, uvicorn, httpx, asyncio |
+| **Frontend libs** | Next.js, React, TypeScript, Tailwind, App Router, `next/link`, `usePathname`, client vs server components, hooks |
+| **Tooling** | Ruff, pytest, pre-commit, npm vs npx, `.toml`, JSONL, dotenv, `@lru_cache` |
+| **Concepts** | WebSocket, CORS, JSX, async/await, decorators, context managers, dependency injection, type hints |
+
+**Good (do this):**
+
+> **Tailwind** — a CSS library where you write classes like `px-4` (padding-x = 1rem) directly on the HTML element instead of writing separate `.css` files. Fast to iterate, standard pairing with Next.js. So I'll add `className="px-4 py-2 bg-ink"` to the button…
+
+**Bad (don't do):**
+
+> I'll add Tailwind utility classes for the button.
+
+When introducing a non-obvious **code pattern** in a code block (Python decorator,
+React hook, async iterator, context manager), add a single-line code comment
+AND a single-sentence chat note explaining what it does. One pass per concept
+per session — don't lecture, don't repeat.
+
+**When starting a day's work that uses new libs:** before writing the plan,
+list "today's new stack" — one bullet per library, one sentence each. I then
+opt in or ask for swaps.
+
+Don't over-explain things I clearly already know. If I asked the question
+using the tool name correctly in context, skip the explanation for that one.
+
 ## Formatting
 
 - Prose by default, not bullet lists. Use lists only when the structure genuinely demands it.
