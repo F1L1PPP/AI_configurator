@@ -23,12 +23,19 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         print(f"[serve] {self.address_string()} {format % args}")
 
 
+class ReusableTCPServer(socketserver.TCPServer):
+    # Without this, the OS keeps :8765 in TIME_WAIT for ~30s after Ctrl+C and
+    # the next `python serve.py` fails with "Address already in use". Setting
+    # this flag tells Python to skip that check — standard for dev servers.
+    allow_reuse_address = True
+
+
 def main() -> None:
     class Handler(QuietHandler):
         def __init__(self, *args: object, **kwargs: object) -> None:
             super().__init__(*args, directory=str(SITE_DIR), **kwargs)
 
-    with socketserver.TCPServer(("127.0.0.1", PORT), Handler) as httpd:
+    with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"[serve] Playwright playground site at http://localhost:{PORT}/")
         print(f"[serve] Serving from {SITE_DIR}")
         print("[serve] Stop with Ctrl+C")

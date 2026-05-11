@@ -36,11 +36,28 @@
   <script>
     requireLogin();
 
-    // Surface success message from the redirect after add
+    // Tiny helpers — building elements with createElement + textContent is
+    // the safe pattern for any value that came from user input (URL params,
+    // form fields, localStorage). innerHTML executes <script> tags inside
+    // interpolated strings; textContent never does.
+    function el(tag, opts = {}) {
+      const node = document.createElement(tag);
+      if (opts.className) node.className = opts.className;
+      if (opts.text != null) node.textContent = String(opts.text);
+      if (opts.style) Object.assign(node.style, opts.style);
+      if (opts.role) node.setAttribute("role", opts.role);
+      return node;
+    }
+
+    // Surface success message from the redirect after add.
+    // The ?added= value is user-controlled (the VLAN ID they typed) — render
+    // it via textContent, never via innerHTML interpolation.
     const params = new URLSearchParams(window.location.search);
-    if (params.get("added")) {
-      document.getElementById("alertSlot").innerHTML =
-        `<div class="alert success" role="status">VLAN ${params.get("added")} was created successfully.</div>`;
+    const addedVlanId = params.get("added");
+    if (addedVlanId) {
+      const alert = el("div", { className: "alert success", role: "status" });
+      alert.textContent = `VLAN ${addedVlanId} was created successfully.`;
+      document.getElementById("alertSlot").appendChild(alert);
     }
 
     // Simulate a small load delay so Playwright has a networkidle to wait for
@@ -48,24 +65,49 @@
       await fakeDelay(500);
       const vlans = getVlans();
       const container = document.getElementById("vlanContainer");
+
+      // Clear the "Loading VLANs…" placeholder.
+      container.textContent = "";
+
       if (vlans.length === 0) {
-        container.innerHTML = '<div class="empty">No VLANs configured yet. Click "+ Add VLAN" to create one.</div>';
+        container.appendChild(
+          el("div", {
+            className: "empty",
+            text: 'No VLANs configured yet. Click "+ Add VLAN" to create one.',
+          })
+        );
         return;
       }
-      let html = `<table role="table">
-        <thead><tr><th>VLAN ID</th><th>Name</th><th>Interface</th><th>Mode</th><th>Created</th></tr></thead>
-        <tbody>`;
-      for (const v of vlans) {
-        html += `<tr>
-          <td class="mono">${v.id}</td>
-          <td>${v.name}</td>
-          <td class="mono">${v.interface}</td>
-          <td>${v.mode}</td>
-          <td class="mono" style="color:#888">${new Date(v.createdAt).toLocaleString()}</td>
-        </tr>`;
+
+      const table = el("table", { role: "table" });
+      const thead = el("thead");
+      const headerRow = el("tr");
+      for (const label of ["VLAN ID", "Name", "Interface", "Mode", "Created"]) {
+        headerRow.appendChild(el("th", { text: label }));
       }
-      html += "</tbody></table>";
-      container.innerHTML = html;
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      const tbody = el("tbody");
+      for (const v of vlans) {
+        const tr = el("tr");
+        // Each cell uses textContent — VLAN name comes from user input, so we
+        // MUST NOT pass it through any innerHTML / template-string path.
+        tr.appendChild(el("td", { className: "mono", text: v.id }));
+        tr.appendChild(el("td", { text: v.name }));
+        tr.appendChild(el("td", { className: "mono", text: v.interface }));
+        tr.appendChild(el("td", { text: v.mode }));
+        tr.appendChild(
+          el("td", {
+            className: "mono",
+            style: { color: "#888" },
+            text: new Date(v.createdAt).toLocaleString(),
+          })
+        );
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      container.appendChild(table);
     })();
   </script>
 </body>
