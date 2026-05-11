@@ -2,8 +2,12 @@
 
 **Date:** 2026-05-11
 **Branch:** `feature/bootstrap` (off `develop`)
-**Total commits today:** 20 on `feature/bootstrap` (plus 2 inherited from `main`)
-**Daily backup tags:** `backup-20260511-1029`, `-1117`, `-1129`, `-1144`, `-1209`
+**Total commits today:** 31 on `feature/bootstrap` (plus 2 inherited from `main`)
+**Daily backup tags (9 total):** `backup-20260511-1029`, `-1117`, `-1129`, `-1144`,
+`-1209`, `-1222`, `-1240`, `-194203`, `-195237`
+**Milestone tag:** `v0.0.1-bootstrap` (created at the end of today by explicit
+operator override — prerequisites-verified portion still pending the cabled
+session; tag will be moved or supplemented tomorrow when prereqs land)
 **Status:** local-only track complete; router-dependent items deferred to the
 cabled session ("resume Day 1 — router pre-flight").
 
@@ -122,6 +126,78 @@ cabled session ("resume Day 1 — router pre-flight").
     - `playwright==1.49.1` pinned in `requirements.txt`, Chromium downloaded
     - Verified end-to-end: scripts 03 and 04 run clean
 
+### Phase F — Curated docs for upcoming days (commits 22–25)
+
+22. `docs: update day-1 summary with phases B-E (plan, GUI, playground)` —
+    mid-day refresh of this very file.
+23. `docs: add curated cisco docs list for day-7 rag ingest` —
+    `docs/rag-sources.md` lists 6 required + 1 optional Cisco docs scoped
+    to the §2 scenarios, with title + search query + sections to keep +
+    estimated MB. Target corpus ~10–11 MB (well under 50 MB ceiling).
+24. `docs: add router-prerequisites skeleton for cabled session` —
+    `docs/router-prerequisites.md` is a 9-step fill-in worksheet that turns
+    tomorrow's cabled session into 30–45 min instead of figuring it out
+    cold.
+25. `docs(claude): add plain-english tool-explanation rule` —
+    `CLAUDE.md` + `CLAUDE_INSTRUCTIONS.md` updated so the agent
+    explains every new software lib/concept in one plain-English
+    sentence the first time it's mentioned. Cisco terminology stays
+    unexplained.
+
+### Phase G — Copilot review fixes round 1 (commits 26–30)
+
+GitHub Copilot reviewed PR #1 and found 9 issues. All addressed:
+
+26. `chore(build): remove empty pytest markers table` — `[tool.pytest.ini_options.markers]`
+    as a TOML table is the wrong shape (pytest expects a list of strings);
+    replaced with a commented-out example for when we register our first
+    custom marker.
+27. `test: make settings tests hermetic` — all three `test_settings.py`
+    tests now use `patch.dict(..., clear=True)` + `Settings(_env_file=None)`
+    so they pass identically on any machine regardless of shell env or
+    a local `.env`.
+28. `fix(core): clear root handlers before re-adding in configure_logging` —
+    first attempt at making `configure_logging()` idempotent across
+    uvicorn reloads. Walked `root.handlers` and called `close()` on each.
+    (Superseded by commit 31 — see Phase H.)
+29. `fix(scripts): seconds precision for backup tag to avoid collisions` —
+    `backup-YYYYMMDD-HHMM` → `backup-YYYYMMDD-HHMMSS` in both
+    `checkpoint.ps1` and `checkpoint.sh` + the SKILL.md doc. Two
+    `/checkpoint` runs in the same minute would have collided on `git
+    tag -a`.
+30. `fix(playground): escape user input + allow_reuse_address` —
+    `vlan-list.html` rewritten with `createElement` + `textContent`
+    instead of `innerHTML` with template-string interpolation
+    (eliminates two DOM XSS sinks: the `?added=` query param and the
+    VLAN fields from `localStorage`). `serve.py` uses a `ReusableTCPServer`
+    subclass with `allow_reuse_address = True` so the port doesn't get
+    stuck in `TIME_WAIT` between dev restarts.
+
+### Phase H — Copilot review fixes round 2 (commit 31)
+
+Copilot re-reviewed and caught a real bug in commit 28's "fix":
+
+31. `fix(core): only close FileHandlers in configure_logging cleanup` —
+    commit 28 closed every existing root handler, including the
+    `StreamHandler(sys.stderr)` we'd installed on a previous call.
+    `logging.StreamHandler.close()` delegates to its underlying stream's
+    `close()`, so calling it would close `sys.stderr` itself —
+    `print()` and all subsequent logging would silently fail after the
+    first uvicorn reload.
+
+    Two-layer fix:
+    - **Sentinel attribute** (`_cisco_ai_owned = True`) tagged onto every
+      handler we install. Cleanup only touches sentinel-tagged handlers —
+      uvicorn/pytest/other-library handlers are left alone.
+    - **Selective close.** Among our own, only `FileHandler` instances get
+      `.close()` called. StreamHandlers just get removed and GC'd; the
+      wrapped stream stays open.
+
+    Added `tests/unit/test_logging.py` with 3 regression tests:
+    `test_configure_logging_is_idempotent`, `test_configure_logging_does_not_close_stderr`,
+    `test_configure_logging_does_not_touch_foreign_handlers`. **Test count
+    now 7** (was 4).
+
 ---
 
 ## What's verified working RIGHT NOW (2026-05-11)
@@ -129,7 +205,7 @@ cabled session ("resume Day 1 — router pre-flight").
 | Check | Result |
 |---|---|
 | `python -m ruff check .` | All checks passed |
-| `python -m pytest -q` | 4 passed, 0 failed |
+| `python -m pytest -q` | 7 passed, 0 failed (3 settings + 1 health + 3 logging) |
 | `python -m pre_commit run --all-files` | ruff hook passes |
 | `cd frontend && npm run build` | Succeeds, 5 static pages generated (`/`, `/chat`, `/preview`, `/webui-live`, `/_not-found`), ~88 kB first-load JS |
 | `uvicorn backend.main:app --reload` | Starts; `GET /healthz` returns `{"status":"ok"}`; structured log written to `logs/actions.log`; CORS header `Access-Control-Allow-Origin: http://localhost:3000` present |
