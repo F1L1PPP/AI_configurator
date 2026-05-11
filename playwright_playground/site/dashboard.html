@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cisco-Lab WebUI — Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1 class="mono">CISCO-LAB</h1>
+      <nav>
+        <a href="dashboard.html" class="active">Dashboard</a>
+        <a href="vlan-list.html">VLANs</a>
+        <a href="#" onclick="event.preventDefault(); logout();">Sign out</a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h2>Dashboard</h2>
+        <span class="status mono">SIGNED IN AS ADMIN</span>
+      </header>
+
+      <div class="alert success">
+        Login successful. Use the sidebar to navigate to VLANs.
+      </div>
+
+      <section style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px">
+        <div style="border:1px solid #ddd;background:white;padding:16px">
+          <div class="mono" style="font-size:10px;color:#888;letter-spacing:1px">DEVICE</div>
+          <div style="font-size:18px;margin-top:4px">C1111-LAB</div>
+          <div class="mono" style="font-size:10px;color:#aaa;margin-top:2px">192.168.1.1</div>
+        </div>
+        <div style="border:1px solid #ddd;background:white;padding:16px">
+          <div class="mono" style="font-size:10px;color:#888;letter-spacing:1px">UPTIME</div>
+          <div style="font-size:18px;margin-top:4px">3d 4h 12m</div>
+        </div>
+        <div style="border:1px solid #ddd;background:white;padding:16px">
+          <div class="mono" style="font-size:10px;color:#888;letter-spacing:1px">VLANS CONFIGURED</div>
+          <div style="font-size:18px;margin-top:4px" id="vlanCount">0</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    requireLogin();
+    document.getElementById("vlanCount").textContent = getVlans().length;
+  </script>
+</body>
+</html>

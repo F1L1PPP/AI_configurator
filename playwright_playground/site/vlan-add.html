@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cisco-Lab WebUI — Add VLAN</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1 class="mono">CISCO-LAB</h1>
+      <nav>
+        <a href="dashboard.html">Dashboard</a>
+        <a href="vlan-list.html" class="active">VLANs</a>
+        <a href="#" onclick="event.preventDefault(); logout();">Sign out</a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h2>Add VLAN</h2>
+        <a href="vlan-list.html" class="status mono">← Back to list</a>
+      </header>
+
+      <div id="alertSlot"></div>
+
+      <form id="vlanForm" autocomplete="off" style="max-width:480px">
+        <div class="form-row">
+          <label for="vlanId">VLAN ID</label>
+          <input
+            type="number"
+            id="vlanId"
+            name="vlanId"
+            min="1"
+            max="4094"
+            required
+            placeholder="1 – 4094"
+          />
+        </div>
+        <div class="form-row">
+          <label for="vlanName">Name</label>
+          <input
+            type="text"
+            id="vlanName"
+            name="vlanName"
+            required
+            placeholder="e.g. OFFICE"
+            maxlength="32"
+          />
+        </div>
+        <div class="form-row">
+          <label for="vlanInterface">Interface</label>
+          <select id="vlanInterface" name="vlanInterface" required>
+            <option value="">— select —</option>
+            <option value="Gi0/0/0">GigabitEthernet0/0/0</option>
+            <option value="Gi0/0/1">GigabitEthernet0/0/1</option>
+            <option value="Gi0/0/2">GigabitEthernet0/0/2</option>
+            <option value="Gi0/0/3">GigabitEthernet0/0/3</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="vlanMode">Mode</label>
+          <select id="vlanMode" name="vlanMode" required>
+            <option value="access">Access</option>
+            <option value="trunk">Trunk</option>
+          </select>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:20px">
+          <button type="submit" class="btn primary" id="saveBtn">Save</button>
+          <a href="vlan-list.html" class="btn" role="button">Cancel</a>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <script>
+    requireLogin();
+
+    document.getElementById("vlanForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById("saveBtn");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading"></span>Saving…';
+
+      const vlan = {
+        id: document.getElementById("vlanId").value,
+        name: document.getElementById("vlanName").value,
+        interface: document.getElementById("vlanInterface").value,
+        mode: document.getElementById("vlanMode").value,
+      };
+
+      await fakeDelay(800); // pretend the router takes a moment
+
+      addVlan(vlan);
+      window.location.href = `vlan-list.html?added=${encodeURIComponent(vlan.id)}`;
+    });
+  </script>
+</body>
+</html>

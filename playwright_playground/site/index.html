@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cisco-Lab WebUI — Sign in</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="app.js"></script>
+</head>
+<body>
+  <main class="login-wrap">
+    <form class="login-card" id="loginForm" autocomplete="off">
+      <h1 class="mono">CISCO-LAB WEBUI</h1>
+      <div class="subtitle mono">PLAYWRIGHT TRAINING GROUND</div>
+
+      <div id="alertSlot"></div>
+
+      <div class="form-row">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required />
+      </div>
+      <div class="form-row">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required />
+      </div>
+
+      <button type="submit" class="btn primary" id="loginBtn" style="width:100%">
+        Log in
+      </button>
+      <p class="mono" style="font-size:10px;color:#aaa;margin-top:14px">
+        HINT: admin / admin
+      </p>
+    </form>
+  </main>
+
+  <script>
+    if (isLoggedIn()) {
+      window.location.href = "dashboard.html";
+    }
+
+    document.getElementById("loginForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const u = document.getElementById("username").value;
+      const p = document.getElementById("password").value;
+      const btn = document.getElementById("loginBtn");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading"></span>Signing in…';
+
+      await fakeDelay(600);
+
+      if (login(u, p)) {
+        window.location.href = "dashboard.html";
+      } else {
+        document.getElementById("alertSlot").innerHTML =
+          '<div class="alert error" role="alert">Invalid credentials.</div>';
+        btn.disabled = false;
+        btn.textContent = "Log in";
+      }
+    });
+  </script>
+</body>
+</html>

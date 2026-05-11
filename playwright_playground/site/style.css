@@ -1,0 +1,176 @@
+/* Minimal Cisco-WebUI-ish styling for the Playwright training ground. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #f0f0f0;
+  color: #111;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mono { font-family: 'Courier New', monospace; letter-spacing: 0.5px; }
+
+/* Layout: sidebar + main */
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+.sidebar {
+  width: 200px;
+  background: #fafafa;
+  border-right: 1px solid #ddd;
+  padding: 16px 0;
+}
+.sidebar h1 {
+  font-size: 11px;
+  letter-spacing: 2px;
+  padding: 0 16px 12px;
+  border-bottom: 1px solid #ddd;
+  margin-bottom: 12px;
+}
+.sidebar a {
+  display: block;
+  padding: 8px 16px;
+  color: #333;
+  text-decoration: none;
+  font-size: 12px;
+  border-left: 3px solid transparent;
+}
+.sidebar a:hover { background: #f0f0f0; }
+.sidebar a.active { border-left-color: #111; background: #f0f0f0; font-weight: 600; }
+
+.main {
+  flex: 1;
+  padding: 24px;
+}
+.topbar {
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 12px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.topbar h2 { font-size: 16px; font-weight: 600; }
+.topbar .status { font-size: 11px; color: #888; }
+
+/* Login page */
+.login-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: #fafafa;
+}
+.login-card {
+  background: white;
+  border: 1px solid #ddd;
+  padding: 32px;
+  width: 320px;
+}
+.login-card h1 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+.login-card .subtitle {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 20px;
+}
+
+/* Forms */
+.form-row { margin-bottom: 14px; }
+.form-row label {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+  color: #555;
+  text-transform: uppercase;
+}
+.form-row input,
+.form-row select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid #ccc;
+  background: white;
+  font-size: 13px;
+  font-family: inherit;
+}
+.form-row input:focus,
+.form-row select:focus {
+  outline: none;
+  border-color: #111;
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  padding: 7px 16px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border: 1px solid #111;
+  background: white;
+  color: #111;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn.primary { background: #111; color: white; }
+.btn.primary:hover { background: #333; }
+.btn:hover { background: #f0f0f0; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #888;
+  text-transform: uppercase;
+  padding: 8px 12px;
+  border-bottom: 1px solid #ddd;
+  font-weight: 400;
+}
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  font-size: 12px;
+}
+.empty {
+  padding: 24px;
+  text-align: center;
+  color: #888;
+  font-size: 12px;
+  border: 1px dashed #ddd;
+}
+
+/* Alerts */
+.alert {
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-left: 3px solid #111;
+  background: #f5f5f5;
+  font-size: 12px;
+}
+.alert.success { border-left-color: #2a7; background: #e8f7ef; }
+.alert.error { border-left-color: #d22; background: #fde8e8; }
+
+/* Loading spinner used as a fake delay */
+.loading {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ddd;
+  border-top-color: #111;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
