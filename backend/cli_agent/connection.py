@@ -44,13 +44,20 @@ class ConnectionPool:
         key = (host, user)
         conn = self._pool.get(key)
         if conn is not None:
+            alive = False
             try:
-                if conn.is_alive():
-                    return conn
-            except Exception:
-                pass
+                alive = bool(conn.is_alive())
+            except Exception as exc:
+                # is_alive() itself blew up — treat as dead and rebuild.
+                # Don't leak the corpse into a retry. Audit #8.
+                log.info("connection_is_alive_failed", host=host, user=user, error=str(exc))
+            if alive:
+                return conn
             log.info("connection_stale", host=host, user=user)
             self._pool.pop(key, None)
+            # Best-effort close on the corpse so we don't leak the SSH socket
+            with contextlib.suppress(Exception):
+                conn.disconnect()
 
         conn = self._connect(host, user, password, device_type)
         self._pool[key] = conn

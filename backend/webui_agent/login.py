@@ -178,10 +178,26 @@ def start_keepalive(page: Page, interval_s: int = KEEPALIVE_INTERVAL_S) -> threa
 
     Returns a stop-event; call `.set()` to halt the keepalive.
 
-    Note: this uses page.evaluate which is not thread-safe in Playwright sync
-    mode. Only use when no other thread is driving the same page. For flows
-    that interact with the page continuously, the keepalive is unnecessary —
-    the user activity already resets the timer.
+    WARNING — THREAD SAFETY (audit #9):
+        Playwright's sync API is NOT thread-safe: you cannot call methods
+        on the same Page object from two threads simultaneously. This
+        keepalive runs in a background thread that calls `page.evaluate`,
+        which conflicts with any foreground thread that's currently
+        clicking/filling the page.
+
+        Use rules:
+        - For active flows (HostnamePage.goto / set_hostname / apply):
+          DO NOT start keepalive. The user-driven actions already reset
+          the idle timer on every click.
+        - For long-idle scenarios (multi-step forms that pause for human
+          input between steps): consider keepalive, but only between
+          steps — call stop_keepalive() before the next page interaction.
+        - Better long-term: migrate to Playwright's async API and run
+          the keepalive coroutine on the same event loop. Deferred until
+          Day 11 polish.
+
+        Today, no production flow uses this keepalive. The function is
+        kept available for future flows where it makes sense.
     """
     stop = threading.Event()
 

@@ -125,11 +125,12 @@ class PlannerResult:
 
 def _text_from_response(response: Any) -> str:
     """Concatenate all text blocks in an Anthropic Message response."""
-    chunks: list[str] = []
-    for block in response.content:
-        if getattr(block, "type", None) == "text":
-            chunks.append(block.text)
-    return "\n".join(chunks).strip()
+    # Single-pass generator + join — no manual loop / list growth.
+    return "\n".join(
+        block.text
+        for block in response.content
+        if getattr(block, "type", None) == "text"
+    ).strip()
 
 
 def _serialize_assistant_content(response: Any) -> list[dict]:
