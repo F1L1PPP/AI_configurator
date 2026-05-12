@@ -1,0 +1,170 @@
+# Cisco IOS XE 17.x WebUI selector map — fallback chains per element.
+#
+# Each entry is a list of strategies. The login/flow code tries strategies
+# in order and uses the first one that resolves to a visible element. Order
+# matters: most-stable strategies (role + ARIA name) first, CSS class
+# selectors last (Angular class names change between builds).
+#
+# Selectors here are seeded from scripts/05 (login + nav probe) and 06
+# (VLAN add). Refine them by running `playwright codegen https://<router-ip>`
+# locally and lifting the captured selectors into this file — see
+# docs/codegen-howto.md.
+
+# -----------------------------------------------------------------
+# Login page
+# -----------------------------------------------------------------
+login:
+  username:
+    - { label: "Username" }
+    - { css: "input[name='username']" }
+    - { css: "input[id*='user' i]" }
+    - { css: "input[type='text']" }
+  password:
+    - { label: "Password" }
+    - { css: "input[name='password']" }
+    - { css: "input[type='password']" }
+  submit:
+    - { role: "button", name: "Log In" }
+    - { role: "button", name: "Login" }
+    - { role: "button", name: "Sign In" }
+    - { css: "button[type='submit']" }
+    - { css: "input[type='submit']" }
+
+# -----------------------------------------------------------------
+# Top-level navigation (priv-15 user)
+#
+# IMPORTANT: Cisco IOS XE wraps menu labels in <span> inside <a> elements,
+# with whitespace and icon nodes around the text. ANCHORED regex like
+# /^Administration$/i FAILS because the element's full text content is
+# " Administration\n..." not "Administration".
+#
+# Use plain substring matching: `text=Administration` is case-insensitive
+# and ignores whitespace by default in Playwright.
+# -----------------------------------------------------------------
+nav:
+  # The AngularJS-1 sidebar wraps top-level menu items in <a class="title">
+  # (verified against IOS XE 17.x via script 07_inspect_dashboard.py). The
+  # text= match returns count=2 for some labels because there are extra
+  # mirror elements elsewhere in the DOM, so prefer `a.title` to pick the
+  # correct one. Plain `text=` is kept as a permissive fallback.
+  dashboard:
+    - { css: "a.title:has-text('Dashboard')" }
+    - { text: "Dashboard" }
+    - { css: "a:has-text('Dashboard')" }
+    - { css: "[routerlink*='dashboard' i]" }
+  monitoring:
+    - { css: "a.title:has-text('Monitoring')" }
+    - { text: "Monitoring" }
+    - { css: "a:has-text('Monitoring')" }
+  configuration:
+    - { css: "a.title:has-text('Configuration')" }
+    - { text: "Configuration" }
+    - { css: "a:has-text('Configuration')" }
+    - { css: "[routerlink*='configuration' i]" }
+    - { css: "[href*='configuration' i]" }
+  administration:
+    - { css: "a.title:has-text('Administration')" }
+    - { text: "Administration" }
+    - { css: "a:has-text('Administration')" }
+    - { css: "[routerlink*='administration' i]" }
+  troubleshooting:
+    - { css: "a.title:has-text('Troubleshooting')" }
+    - { text: "Troubleshooting" }
+    - { css: "a:has-text('Troubleshooting')" }
+
+# -----------------------------------------------------------------
+# Configuration → Layer 2 → VLAN (the VLAN-add flow)
+# -----------------------------------------------------------------
+vlan_nav:
+  layer2:
+    - { text: "Layer 2" }
+    - { css: "a:has-text('Layer 2')" }
+    - { css: "span:has-text('Layer 2')" }
+    - { css: "[routerlink*='layer2' i]" }
+    - { css: "[routerlink*='layer-2' i]" }
+  vlan:
+    - { text: "VLAN" }
+    - { css: "a:has-text('VLAN')" }
+    - { css: "[routerlink*='vlan' i]" }
+
+vlan_form:
+  add_button:
+    - { role: "button", name: "Add" }
+    - { role: "button", name: "+" }
+    - { role: "button", name: "New" }
+    - { css: "button:has-text('Add')" }
+    - { css: ".add-btn" }
+  vlan_id:
+    - { label: "VLAN ID" }
+    - { css: "input[placeholder*='VLAN ID' i]" }
+    - { css: "input[placeholder*='vlan' i]" }
+    - { css: "input[id*='vlan' i]" }
+    - { css: "input[name*='vlan' i]" }
+    - { css: "input[type='number']" }
+  vlan_name:
+    - { label: "VLAN Name" }
+    - { label: "Name" }
+    - { css: "input[placeholder*='name' i]" }
+    - { css: "input[id*='name' i]" }
+  save_button:
+    - { role: "button", name: "Save" }
+    - { role: "button", name: "Apply" }
+    - { role: "button", name: "OK" }
+    - { css: "button[type='submit']" }
+  cancel_button:
+    - { role: "button", name: "Cancel" }
+    - { role: "button", name: "Close" }
+    - { role: "button", name: "Back" }
+
+# -----------------------------------------------------------------
+# Hostname change form — Administration → Device → General
+#
+# Captured from real C1111 with IOS XE 17.6.3a by manual inspection
+# (see screenshots in the Day-5 commit message). The form is reachable
+# directly via hash route /webui/#/general, which bypasses the sidebar
+# entirely — the sidebar has been rendering unreliably under Playwright
+# (priv-15 menus sometimes hidden even though the user has the role).
+# -----------------------------------------------------------------
+hostname_form:
+  # Verified from actual DOM (IOS XE 17.6.3a, Kendo UI + AngularJS 1.x):
+  #   <input name="switchName" id="switchName"
+  #          data-ng-model="jsonData.general.name"
+  #          class="k-textbox form-control ..."
+  #          required data-maximum="33" ng-change="enableApplyButton('general')">
+  # The input is called 'switchName' because the same form is used for
+  # switches and routers — quirky but consistent.
+  hostname_input:
+    - { css: "input[name='switchName']" }
+    - { css: "input[id='switchName']" }
+    - { css: "input[data-ng-model='jsonData.general.name']" }
+    - { css: "input[ng-model='jsonData.general.name']" }
+    - { css: "input.k-textbox[required]" }
+    # Generic fallbacks (kept in case the build changes):
+    - { role: "textbox", name: "Host Name" }
+    - { label: "Host Name" }
+    - { css: "input[ng-model*='name' i]" }
+    - { css: "xpath=//*[normalize-space(text())='Host Name*' or normalize-space(text())='Host Name']/following::input[@type='text'][1]" }
+    - { css: "input[type='text']:visible" }
+
+  # Verified DOM:
+  #   <button kendo-button="saveBtn"
+  #           class="k-button btn btn-primary ng-binding ..."
+  #           ng-click="apply('General')" ...>Apply</button>
+  # There are several Apply buttons (one per form section / tab). Target
+  # the General-tab one explicitly. Button is initially disabled; Playwright
+  # click() waits for it to become enabled after our fill triggers ng-change.
+  apply_button:
+    - { css: "button[ng-click=\"apply('General')\"]" }
+    - { css: "button[kendo-button='saveBtn'].btn-primary:has-text('Apply')" }
+    - { css: "button.btn-primary:has-text('Apply')" }
+    - { css: "button:has-text('Apply'):visible" }
+    - { role: "button", name: "Apply" }
+
+# -----------------------------------------------------------------
+# Session-expired detection — if any of these resolve we're back on the
+# login page and need to relogin (Cisco WebUI 5-min idle timeout).
+# -----------------------------------------------------------------
+session_expired:
+  - { label: "Username" }
+  - { css: "input[name='username']" }
+  - { text: "/Session.{0,5}(expired|timeout)/i" }

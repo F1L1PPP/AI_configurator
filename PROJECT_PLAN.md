@@ -288,7 +288,7 @@ The frontend GUI is built **in parallel** with the backend, ~2h/day from Day 1 o
 
 Each day allocates roughly **3.5h backend + 1.5h GUI + 1h test/commit/push**. Hard rule: **backend on the §2 critical path comes first; if backend slips on a given day, that day's GUI work is dropped, not vice versa.**
 
-> **Schedule status as of 2026-05-12:** Days 1, 2, 3 done. The orchestrator/planner/chat-API portion of Day 6 also done early on 2026-05-12 (commits `e5c4414` + `684ead8`). **2 calendar days banked.** Days 4–10 below reflect the actual remaining work.
+> **Schedule status as of 2026-05-12 evening:** Days 1, 2, 3, 4, 5 all done in 2 calendar days (Day 1 yesterday, Days 2–5 today). **WebUI hostname round-trip proven on real Cisco C1111 at 12:26 today** — see Day 5 below for the run log. The orchestrator/planner/chat-API portion of Day 6 also already shipped (Days 4 commits `e5c4414` + `684ead8`). **3 calendar days banked** against the 10-day schedule. Day 6 (next, RAG + WebSocket) is the v0.2.0-agent-core tag.
 
 ---
 
@@ -315,38 +315,99 @@ Each day allocates roughly **3.5h backend + 1.5h GUI + 1h test/commit/push**. Ha
 - Full round-trip proven on real router: hostname `c1111-lab` → `LAB-R1` → restored
 - **Tag:** `v0.1.0-cli-core` (created 2026-05-12)
 
-### 🟡 Day 4 — Orchestrator (DONE 2026-05-12) + WebUI discovery (REMAINING)
+### ✓ Day 4 — Orchestrator + WebUI discovery (DONE 2026-05-12)
 
-**Done early (was Day 6 of the plan):**
-- `orchestration/tool_registry.py` — 8 Anthropic-format schemas (4 read + 2 propose + 2 execute) with dispatcher that catches `NotApproved`/`TypeError`/exceptions
-- `orchestration/planner.py` — Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) tool-use loop, SK/EN bilingual prompt, hard cap 8 iterations, structured events
-- `api/routes_chat.py` — sync `POST /api/chat`, surfaces `awaiting_approval` action_id at top level
-- 19 new tests, 66 total, all green
+**Orchestrator (commits `e5c4414` + `684ead8`):**
+- `orchestration/tool_registry.py` — 8 Anthropic-format schemas (4 read + 2 propose + 2 execute) with two-layer defense-in-depth approval gate (PR review fix in `809cdf0`)
+- `orchestration/planner.py` — Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) tool-use loop, SK/EN bilingual prompt, hard cap 8 iterations, structured events, model_dump fallback for unknown content blocks
+- `api/routes_chat.py` — `POST /api/chat` with `run_in_threadpool` to keep the FastAPI loop responsive while planner does blocking I/O
 - Full natural-language round-trip proven: "ukáž mi rozhrania" parsed in Slovak; "zmeň hostname na LAB-R1" → propose → approve → execute in 1.29 s
 
-**Remaining for Day 4 (next session):**
-- Playwright codegen on real router for both flows (Configuration → VLANs → Add VLAN; Administration → Device Properties), save to `playwright_playground/draft_real_router_codegen.py` (gitignored)
-- `backend/webui_agent/browser.py` — headed-dev launcher, `ignore_https_errors=True`, pinned viewport, `--ignore-certificate-errors` Chromium arg, `wait_for_networkidle` helper
-- `backend/webui_agent/login.py` — login class, 5-min keepalive, relogin detection on session-expired redirect
-- `backend/webui_agent/selectors/iosxe_default.yaml` — role/text/css fallback strategies per element captured from codegen output
-- `backend/webui_agent/evidence.py` — `Step` helper (numbered screenshots + DOM dump on error) lifted from playground `_helpers.py`
-- GUI: `/webui-live` action-timeline component skeleton (mocked steps; real WS in Day 5)
-- **Commit + push + Playwright trace stored as artifact**
+**WebUI discovery scaffolds (commit `5c048b0`):**
+- `backend/webui_agent/browser.py` — `webui_browser()` context manager, viewport-pinned, cert-bypassed, console+pageerror → structlog, networkidle suppression helper
+- `backend/webui_agent/login.py` — `first_match()` yaml-driven strategy walker, `login()`/`ensure_logged_in()`/`start_keepalive()` for 5-min idle timeout
+- `backend/webui_agent/evidence.py` — `EvidenceCollector` with auto-numbered screenshots + DOM dump
+- `backend/webui_agent/selectors/iosxe_default.yaml` — role/label/text/css fallback chains for login, top nav, VLAN form, hostname form, session-expired detection
+- `frontend/components/webui-agent/PhaseProgress.tsx` + `ActionTimeline.tsx` — extracted from `/webui-live` page, prop-driven so Day 5 swaps mocks for real events with zero page changes
+- `docs/codegen-howto.md` — step-by-step for running `playwright codegen` against the real C1111
+- **Deferred (Filip-driven):** Playwright codegen capture against the real router; not blocking — scripts 05/06 seeded the yaml fallbacks well enough that Day 5 flows should work; refinement when needed.
+- 97 unit tests passing
 
-### Day 5 — WebUI hostname flow + WebSocket events
+### ✓ Day 5 — WebUI hostname flow + verify (DONE 2026-05-12)
 
-- Backend: `webui_agent/pages/hostname_page.py` (POM), `webui_agent/flows/change_hostname.py` (full flow with screenshots before/after each step into `artifacts/screenshots/<session>/<step>.png`), `webui_agent/verify.py` (post-CLI `show running-config | i hostname`), error handling (screenshot + DOM dump + abort, never auto-retry)
-- Backend: register `propose_webui_set_hostname` + `webui_set_hostname` in `tool_registry.py`, update orchestrator system prompt
-- Backend: `core/eventbus.py` (async pub/sub) + WS route `GET /ws/agent`; refactor planner to publish events; keep sync `POST /api/chat` as fallback
-- GUI: `lib/ws.ts` WebSocket client; `/chat` consumes message events; `/preview` shows live action timeline; `/webui-live` consumes WS-pushed screenshot events (replaces mocked timeline)
-- Smoke: natural-language → preview → approve → Playwright executes hostname change → CLI verifies → screenshot trail visible live in GUI
-- **Commit + push**
+**Shipped:**
+- `backend/webui_agent/pages/hostname_page.py` — Page Object Model.
+  Direct hash-route navigation to `/webui/#/general` bypasses the sidebar
+  (sidebar renders flakily under Playwright). `get_current_hostname()`,
+  `set_hostname()` (focus + fill — `Locator.triple_click()` isn't on the
+  Locator class in Playwright 1.49.1 sync; `fill()` clears+focuses+types
+  in one call), `apply()`. On failure dumps `input_inventory` (every
+  `<input>` attribute) for next-iteration debugging.
+- `backend/webui_agent/flows/change_hostname.py` — composes browser +
+  login + POM + verify + snapshots. Hard rules: HITL gate, pre-snapshot
+  before the UI is touched, screenshots at every step, SSH pool
+  invalidated after success (hostname change makes Netmiko's
+  `base_prompt` stale — same bug we patched on Day 3 fires here too),
+  CLI verify is the ground truth, no auto-retry on error.
+- `backend/webui_agent/verify.py` — `verify_hostname()` regex-anchored
+  whole-line match against `show running-config`, `verify_vlan_exists()`
+  for Day 7.
+- `backend/orchestration/tool_registry.py` — `propose_webui_set_hostname` →
+  `webui_set_hostname` schemas + dispatch + `_REQUIRES_APPROVAL` gate.
+- `backend/orchestration/planner.py` — system prompt teaches Claude when
+  to pick CLI vs WebUI ("v prehliadači" / "demo" / "ukáž mi ako" →
+  WebUI; otherwise CLI). Added rule for action_id reference: when the
+  user says "execute act_X", find the matching propose in history and
+  call the execute tool from its `execute_tool` hint — don't propose
+  again or swap CLI↔WebUI.
+- Selector ground truth captured in `selectors/iosxe_default.yaml`:
+  hostname input is `name="switchName"` (the form is shared between
+  switches and routers), `data-ng-model="jsonData.general.name"`. Apply
+  button is `kendo-button="saveBtn"` with `ng-click="apply('General')"`
+  — initially disabled, enabled by `ng-change` after fill.
 
-### Day 6 — RAG + Sources display
+**Bug fix during the smoke session:**
+After the previous-conversation `set_hostname` fix, the same Netmiko
+prompt-staleness bug fires when the WebUI changes the hostname too.
+`change_hostname_via_webui` invalidates the SSH pool right before the
+CLI verify call — the fresh connection re-detects the new prompt.
+
+**Real-router round-trip proven 2026-05-12 12:26:**
+
+```
+12:26:20  propose_action + approve_action
+12:26:22  pre-snapshot via SSH (hostname = LAB-R3)
+12:26:23  Chromium launched, screenshot 01
+12:26:25  WebUI login complete
+12:26:26  → direct nav https://192.168.10.1/webui/#/general
+12:26:39  form loaded (screenshot 03), read current = LAB-R3
+12:26:40  fill new = LAB-R4 (screenshot 04)
+12:26:41  Apply clicked (screenshot 05), browser closes
+12:26:41  SSH pool invalidated (hostname change → stale prompt)
+12:26:42  show running-config → verify_hostname found=True
+12:26:43  post-snapshot via SSH (hostname = LAB-R4)
+          DONE — total 23 seconds end-to-end
+```
+
+Evidence on disk at `artifacts/screenshots/change_hostname_act_…/` (5
+PNGs) and `artifacts/device-snapshots/act_…/{pre,post}/*.txt` (6 files).
+
+**Deferred to Day 6** (originally Day 5 scope, moved because it's
+naturally bundled with the orchestrator/RAG WebSocket work):
+- `backend/core/eventbus.py` + `GET /ws/agent` WebSocket route
+- Refactor planner to publish events through the bus
+- Frontend `lib/ws.ts` + `/chat` + `/webui-live` consume real events
+  instead of mocks
+
+Day 6's `v0.2.0-agent-core` tag will include both the WebSocket wiring
+and the RAG pieces.
+
+### Day 6 — RAG + WebSocket events + Sources display
 
 - Backend: `knowledge_agent/ingest.py` — curated ~10 MB C1111 + IOS XE 17.x guides (VLANs, hostname, WebUI nav, interfaces only per `docs/rag-sources.md`); heading-aware chunking ~500 tok with 50-tok overlap (`chunking.py`); embeddings via `sentence-transformers/all-MiniLM-L6-v2` persisted to ChromaDB
 - Backend: `knowledge_agent/retrieve.py` — `search_docs(query, top_k=5)` returns chunks with source + section; register as new tool in `tool_registry.py`; orchestrator prompt updated to call `search_docs` before unfamiliar configs; responses include "Sources" section
-- GUI: citation badges on Chat replies (file + section), click to expand chunk preview
+- Backend (pulled forward from Day 5): `core/eventbus.py` async pub/sub + `GET /ws/agent` WebSocket route; refactor planner to publish `agent_thinking` / `tool_call` / `tool_result` / `awaiting_approval` / `applied` / `verified` / `error` events through the bus; keep sync `POST /api/chat` working as before
+- GUI: `lib/ws.ts` WebSocket client; `/chat` consumes message events; `/preview` shows live action timeline; `/webui-live` consumes WS-pushed screenshot events (replaces mocked timeline); citation badges on Chat replies
 - Smoke: 10 hand-graded relevance queries, target ≥ 7/10
 - **Tag:** `v0.2.0-agent-core`
 

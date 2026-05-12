@@ -1,9 +1,16 @@
 import MeshSphere from "@/components/mesh/MeshSphere";
+import ActionTimeline, {
+  type AgentAction,
+} from "@/components/webui-agent/ActionTimeline";
+import PhaseProgress, {
+  type Phase,
+} from "@/components/webui-agent/PhaseProgress";
 
-type StepStatus = "done" | "current" | "future";
-type Step = { n: string; label: string; status: StepStatus };
+// Day 4 skeleton — mocked phase + action data, presentational components in
+// frontend/components/webui-agent/ ready to receive real WebSocket events on
+// Day 5 (no page changes needed beyond swapping data sources).
 
-const phaseSteps: Step[] = [
+const phaseSteps: Phase[] = [
   { n: "01", label: "Prompt", status: "done" },
   { n: "02", label: "Plan", status: "done" },
   { n: "03", label: "Approval", status: "done" },
@@ -11,7 +18,6 @@ const phaseSteps: Step[] = [
   { n: "05", label: "Verify", status: "future" },
 ];
 
-type AgentAction = { n: string; text: string; status: StepStatus };
 const agentActions: AgentAction[] = [
   { n: "01", text: "Open WebUI (Playwright launch)", status: "done" },
   { n: "02", text: "Login as admin", status: "done" },
@@ -22,57 +28,6 @@ const agentActions: AgentAction[] = [
   { n: "07", text: "Click 'Save'", status: "future" },
   { n: "08", text: "Screenshot post-state, verify via CLI", status: "future" },
 ];
-
-const Step = ({ s }: { s: Step }) => {
-  const ring =
-    s.status === "done"
-      ? "border-ink bg-ink text-surface"
-      : s.status === "current"
-        ? "border-ink bg-surface text-ink"
-        : "border-rule text-ink-line";
-  return (
-    <div className="flex items-center gap-2">
-      <div
-        className={`mono flex h-6 w-6 items-center justify-center rounded-full border text-[9px] ${ring}`}
-      >
-        {s.n}
-      </div>
-      <span
-        className={`text-[10px] tracking-wide ${
-          s.status === "future" ? "text-ink-line" : "text-ink"
-        }`}
-      >
-        {s.label}
-      </span>
-    </div>
-  );
-};
-
-const ActionRow = ({ a }: { a: AgentAction }) => {
-  const checkbox =
-    a.status === "done"
-      ? "border-ink bg-ink text-surface"
-      : a.status === "current"
-        ? "border-ink animate-pulse"
-        : "border-rule";
-  return (
-    <div className="flex items-start gap-2 border-b border-rule-ghost py-2 text-[10px] last:border-0">
-      <span className="mono w-5 shrink-0 text-right text-[8px] text-ink-line">
-        {a.n}
-      </span>
-      <span
-        className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center border text-[8px] ${checkbox}`}
-      >
-        {a.status === "done" ? "✓" : ""}
-      </span>
-      <span
-        className={`flex-1 leading-snug ${a.status === "future" ? "text-ink-line" : a.status === "current" ? "font-medium" : ""}`}
-      >
-        {a.text}
-      </span>
-    </div>
-  );
-};
 
 export default function WebUILivePage() {
   return (
@@ -88,18 +43,7 @@ export default function WebUILivePage() {
             ACT_2026-05-11_8AF3C2 · WEBUI_ADD_ACCESS_VLAN
           </span>
         </div>
-        <div className="flex items-center gap-3">
-          {phaseSteps.map((s, idx) => (
-            <div key={s.n} className="flex items-center gap-3">
-              <Step s={s} />
-              {idx < phaseSteps.length - 1 ? (
-                <span
-                  className={`h-px w-8 ${s.status === "done" ? "bg-ink" : "bg-rule"}`}
-                />
-              ) : null}
-            </div>
-          ))}
-        </div>
+        <PhaseProgress phases={phaseSteps} />
       </section>
 
       <div className="relative z-10 grid grid-cols-[1fr_280px] gap-4">
@@ -109,7 +53,7 @@ export default function WebUILivePage() {
               <span className="h-2 w-2 rounded-full bg-terminal-red" />
               <span className="h-2 w-2 rounded-full bg-terminal-yellow" />
               <span className="h-2 w-2 rounded-full bg-terminal-green" />
-              <span className="ml-2">https://192.168.1.1/webui/#/configuration/vlan</span>
+              <span className="ml-2">https://192.168.10.1/webui/#/configuration/vlan</span>
             </div>
             <span className="mono text-[8px] tracking-wider text-ink-faint">PLAYWRIGHT · HEADED</span>
           </div>
@@ -171,11 +115,7 @@ export default function WebUILivePage() {
 
         <aside className="flex flex-col gap-3 border border-rule bg-surface p-3.5">
           <div className="tech-label">AI Next Actions</div>
-          <div>
-            {agentActions.map((a) => (
-              <ActionRow key={a.n} a={a} />
-            ))}
-          </div>
+          <ActionTimeline actions={agentActions} />
         </aside>
       </div>
 

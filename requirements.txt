@@ -17,6 +17,9 @@ ntc-templates==9.1.0
 # Day 4 — Anthropic SDK for the orchestrator/planner tool-use loop.
 anthropic==0.101.0
 
+# Day 4 (WebUI scaffolds) — selectors loaded from YAML files.
+pyyaml==6.0.2
+
 # Dev / test
 ruff==0.11.10
 pytest==8.3.5
