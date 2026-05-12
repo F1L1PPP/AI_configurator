@@ -63,8 +63,9 @@ def test_goto_clicks_administration_then_device_properties():
     admin_loc = _loc()
     dp_loc    = _loc()
     page = _page_with({
-        "locator:text=Administration":         admin_loc,
-        "locator:text=Device Properties":      dp_loc,
+        # New primary selector — a.title with text — matches IOS XE 17.x sidebar
+        "locator:a.title:has-text('Administration')": admin_loc,
+        "locator:text=Device Properties":             dp_loc,
     })
 
     hp = HostnamePage(page)
@@ -83,7 +84,7 @@ def test_goto_raises_when_admin_menu_missing():
 
 def test_goto_raises_when_device_properties_missing():
     page = _page_with({
-        "locator:text=Administration": _loc(),
+        "locator:a.title:has-text('Administration')": _loc(),
         # No Device Properties locator
     })
     hp = HostnamePage(page)

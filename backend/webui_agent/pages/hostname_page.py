@@ -10,10 +10,7 @@ any locator. If the yaml changes, the POM keeps working.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING
-
-from playwright.sync_api import TimeoutError as PWTimeout
 
 from backend.core.logging import get_logger
 from backend.webui_agent.browser import wait_for_networkidle
@@ -25,7 +22,11 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-MENU_RENDER_TIMEOUT_MS = 15_000  # Angular dashboard render after login
+# How long to let AngularJS render the sidebar after the post-login redirect.
+# Empirically 5 s is plenty on a healthy C1111 — the inspector script proved
+# this. Bumping it costs latency but doesn't add value unless the device is
+# under heavy load.
+DASHBOARD_SETTLE_MS = 5_000
 
 
 class HostnameNavigationError(RuntimeError):
@@ -59,19 +60,17 @@ class HostnamePage:
     def goto(self) -> None:
         """Click Administration → Device Properties from any post-login page.
 
-        Angular renders the sidebar AFTER the initial post-login redirect, so
-        we wait up to MENU_RENDER_TIMEOUT_MS for the Administration menu item
-        to appear before resolving the locator chain. Without this wait the
-        flow races the dashboard and finds nothing.
+        AngularJS renders the sidebar AFTER the post-login redirect resolves,
+        so we hard-wait DASHBOARD_SETTLE_MS for the menu to materialise. This
+        matches the timing pattern that script 07_inspect_dashboard.py proved
+        works — `wait_for(state="visible")` was less reliable because some
+        menu items render as hidden parents with visible children.
         """
         log.info("hostname_page_goto_start")
 
-        # Wait for the dashboard to actually render the sidebar
-        with contextlib.suppress(PWTimeout, Exception):
-            self.page.locator("text=Administration").first.wait_for(
-                state="visible",
-                timeout=MENU_RENDER_TIMEOUT_MS,
-            )
+        # Hard wait for the AngularJS sidebar to render — same wait that
+        # 07_inspect_dashboard.py uses successfully.
+        self.page.wait_for_timeout(DASHBOARD_SETTLE_MS)
 
         admin = first_match(self.page, self._sel["nav"]["administration"])
         if admin is None:
@@ -81,19 +80,15 @@ class HostnamePage:
             )
         admin.click()
         wait_for_networkidle(self.page, 10_000)
-
-        # Same race: the submenu pops on click but the route may need a beat
-        with contextlib.suppress(PWTimeout, Exception):
-            self.page.locator("text=Device Properties").first.wait_for(
-                state="visible",
-                timeout=MENU_RENDER_TIMEOUT_MS,
-            )
+        # Sub-menu pops on click but Angular may still be settling
+        self.page.wait_for_timeout(1_500)
 
         dp = first_match(self.page, self._sel["hostname_nav"]["device_properties"])
         if dp is None:
             raise HostnameNavigationError("Device Properties submenu not visible")
         dp.click()
         wait_for_networkidle(self.page, 10_000)
+        self.page.wait_for_timeout(1_500)
 
         log.info("hostname_page_goto_complete", url=self.page.url)
 

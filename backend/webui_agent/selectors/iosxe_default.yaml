@@ -42,23 +42,33 @@ login:
 # and ignores whitespace by default in Playwright.
 # -----------------------------------------------------------------
 nav:
+  # The AngularJS-1 sidebar wraps top-level menu items in <a class="title">
+  # (verified against IOS XE 17.x via script 07_inspect_dashboard.py). The
+  # text= match returns count=2 for some labels because there are extra
+  # mirror elements elsewhere in the DOM, so prefer `a.title` to pick the
+  # correct one. Plain `text=` is kept as a permissive fallback.
   dashboard:
+    - { css: "a.title:has-text('Dashboard')" }
     - { text: "Dashboard" }
     - { css: "a:has-text('Dashboard')" }
     - { css: "[routerlink*='dashboard' i]" }
   monitoring:
+    - { css: "a.title:has-text('Monitoring')" }
     - { text: "Monitoring" }
     - { css: "a:has-text('Monitoring')" }
   configuration:
+    - { css: "a.title:has-text('Configuration')" }
     - { text: "Configuration" }
     - { css: "a:has-text('Configuration')" }
     - { css: "[routerlink*='configuration' i]" }
     - { css: "[href*='configuration' i]" }
   administration:
+    - { css: "a.title:has-text('Administration')" }
     - { text: "Administration" }
     - { css: "a:has-text('Administration')" }
     - { css: "[routerlink*='administration' i]" }
   troubleshooting:
+    - { css: "a.title:has-text('Troubleshooting')" }
     - { text: "Troubleshooting" }
     - { css: "a:has-text('Troubleshooting')" }
 
