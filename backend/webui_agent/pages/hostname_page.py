@@ -108,7 +108,13 @@ class HostnamePage:
             text=body.replace("\n", " | "),
         )
 
-        # Probe count for several candidate strategies
+        # Probe count for several CSS / text candidate strategies.
+        # Note: `label:has-text('Host Name')` IS a valid Playwright selector
+        # (returns count of <label> elements with that text) — distinct from
+        # `get_by_label(...)` which finds inputs associated with a label.
+        # We log both so diagnostics show whether the form uses <label> at
+        # all (Cisco IOS XE 17.6.3a does NOT — it's loose text) AND whether
+        # Playwright's label-association heuristics find a labelled input.
         for probe in (
             "input[type='text']",
             "text=Host Name",
@@ -116,15 +122,27 @@ class HostnamePage:
             "label:has-text('Host Name')",
             "input[name='hostname']",
             "input[name='hostName']",
+            "input[name='switchName']",
             "button:has-text('Apply')",
             "input[ng-model*='hostname' i]",
             "input[ng-model*='host' i]",
+            "input[data-ng-model*='name' i]",
         ):
             try:
                 cnt = self.page.locator(probe).count()
             except Exception as exc:
                 cnt = f"ERR:{exc}"
             log.warning("probe_count", probe=probe, count=cnt)
+
+        # Playwright `get_by_label` probe — semantically different from the
+        # CSS `label:has-text(...)` above. Looks for inputs associated with
+        # a label via for=, aria-labelledby, or wrapping <label>.
+        for label in ("Host Name", "Hostname"):
+            try:
+                cnt = self.page.get_by_label(label, exact=False).count()
+            except Exception as exc:
+                cnt = f"ERR:{exc}"
+            log.warning("probe_get_by_label", label=label, count=cnt)
 
         # Full input inventory — name/id/ng-model/placeholder/type/visible
         try:

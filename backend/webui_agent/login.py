@@ -36,10 +36,19 @@ KEEPALIVE_INTERVAL_S = 240  # 4 minutes; WebUI idle timeout is 5 minutes
 
 
 def first_match(page: Page, strategies: list[dict[str, Any]]) -> Locator | None:
-    """Return a locator for the first strategy that resolves to ≥ 1 element.
+    """Return a locator for the first VISIBLE element that any strategy matches.
 
     Strategy keys understood: role (+ name), label, text, css.
     Order in the list is significance order — most stable first.
+
+    Visibility matters: the Cisco IOS XE WebUI renders duplicate elements
+    (the same nav text appears in a collapsed hidden menu AND in the
+    visible sidebar). `.first` alone could pick the hidden mirror, which
+    then causes `.click()` / `.fill()` to time out waiting for it to
+    become actionable. Filtering to visible up front sidesteps that.
+
+    If a strategy matches but no match is visible, we move to the next
+    strategy (don't fall back to a hidden element).
     """
     for strat in strategies:
         try:
@@ -50,11 +59,24 @@ def first_match(page: Page, strategies: list[dict[str, Any]]) -> Locator | None:
         if loc is None:
             continue
         try:
-            if loc.count() > 0:
-                return loc.first
+            n = loc.count()
         except Exception as exc:
             log.debug("strategy_count_failed", strat=strat, error=str(exc))
             continue
+        if n == 0:
+            continue
+
+        # Pick the first visible match. Walk all matches in case the first
+        # is the hidden mirror element.
+        for i in range(n):
+            el = loc.nth(i)
+            try:
+                if el.is_visible():
+                    return el
+            except Exception:
+                continue
+        # None of the matches are visible — try next strategy
+        log.debug("strategy_no_visible_match", strat=strat, total_matches=n)
     return None
 
 

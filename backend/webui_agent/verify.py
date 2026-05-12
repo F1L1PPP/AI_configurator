@@ -41,12 +41,12 @@ def verify_vlan_exists(vlan_id: int, name: str | None = None) -> bool:
     If `name` is provided, also confirm the VLAN's name matches (case-
     insensitive). Used after a WebUI VLAN add to prove the row landed in
     the device's actual VLAN database.
+
+    show_vlan_brief() always returns a list (it normalises non-list /
+    unparsed output to []), so we just iterate. An empty list naturally
+    falls through to the not-found path at the bottom.
     """
     rows = show_vlan_brief()
-    if not isinstance(rows, list):
-        log.warning("verify_vlan_unparsed_output")
-        return False
-
     vlan_id_str = str(vlan_id)
     for row in rows:
         if row.get("vlan_id") != vlan_id_str:

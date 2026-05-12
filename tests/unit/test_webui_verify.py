@@ -84,8 +84,7 @@ def test_verify_vlan_name_mismatch_returns_false():
         assert verify_vlan_exists(30, name="ENGINEERING") is False
 
 
-def test_verify_vlan_handles_unparsed_string_output():
-    """If TextFSM had no template, show_vlan_brief returns []
-    (read_tools.show_vlan_brief converts non-list to empty)."""
+def test_verify_vlan_returns_false_when_show_returns_empty():
+    """Empty rows (no template / no VLANs configured) → not found → False."""
     with patch("backend.webui_agent.verify.show_vlan_brief", return_value=[]):
         assert verify_vlan_exists(30) is False

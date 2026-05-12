@@ -14,9 +14,15 @@ from backend.webui_agent.pages.hostname_page import (
 
 
 def _loc(input_value: str = "c1111-lab") -> MagicMock:
+    """Mock locator that returns itself from `.first` and `.nth(i)`, and
+    reports as visible. Self-referential so click/fill assertions on the
+    test-side locator capture the call made by `first_match`'s visible-
+    only walk."""
     loc = MagicMock()
     loc.count.return_value = 1
     loc.first = loc
+    loc.nth = MagicMock(return_value=loc)
+    loc.is_visible = MagicMock(return_value=True)
     loc.input_value.return_value = input_value
     return loc
 

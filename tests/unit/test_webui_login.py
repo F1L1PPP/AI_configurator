@@ -22,9 +22,14 @@ from backend.webui_agent.login import (
 
 
 def _loc(count: int = 1) -> MagicMock:
+    """Mock locator. `first_match` walks via .nth(i) and checks .is_visible,
+    so the inner mock must report visible."""
     loc = MagicMock()
     loc.count.return_value = count
-    loc.first = MagicMock()
+    inner = MagicMock()
+    inner.is_visible = MagicMock(return_value=True)
+    loc.first = inner
+    loc.nth = MagicMock(return_value=inner)
     return loc
 
 
