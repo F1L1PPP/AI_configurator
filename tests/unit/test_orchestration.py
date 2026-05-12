@@ -113,3 +113,69 @@ def test_multiple_actions_independent():
     approve_action(a1)
     assert is_approved(a1) is True
     assert is_approved(a2) is False
+
+
+# ---------------------------------------------------------------------------
+# Concurrency — the lock has to serialise reads + writes (audit #1)
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_approve_reject_lands_in_one_consistent_state():
+    """Two threads racing approve+reject on the same action_id should leave
+    the action in EXACTLY ONE of APPROVED or REJECTED — no torn write."""
+    import threading
+
+    from backend.orchestration.confirmations import get_action
+
+    action_id = propose_action("set_hostname", {"name": "R1"})
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def approve_worker():
+        barrier.wait()
+        approve_action(action_id)
+        results.append("approve")
+
+    def reject_worker():
+        barrier.wait()
+        from backend.orchestration.confirmations import reject_action
+        reject_action(action_id)
+        results.append("reject")
+
+    t1 = threading.Thread(target=approve_worker)
+    t2 = threading.Thread(target=reject_worker)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    final_state = get_action(action_id)["state"]
+    # Whichever thread won the race, the state is one of the two — not a
+    # torn write that left mixed fields.
+    assert final_state in (ActionState.APPROVED, ActionState.REJECTED)
+
+
+def test_concurrent_propose_does_not_collide():
+    """100 threads proposing simultaneously must produce 100 distinct
+    action_ids and no lost-update on the store."""
+    import threading
+
+    from backend.orchestration.confirmations import _actions
+
+    ids: list[str] = []
+    ids_lock = threading.Lock()
+
+    def worker():
+        aid = propose_action("set_hostname", {"name": "x"})
+        with ids_lock:
+            ids.append(aid)
+
+    threads = [threading.Thread(target=worker) for _ in range(100)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(ids) == 100
+    assert len(set(ids)) == 100        # all unique
+    assert len(_actions) == 100         # store has every one

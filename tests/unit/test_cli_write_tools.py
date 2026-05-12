@@ -148,3 +148,53 @@ def test_set_interface_ip_sends_correct_commands(_mock_pool, _mock_snapshot):
     assert "10.1.1.1" in joined
     assert "255.255.255.0" in joined
     assert "no shutdown" in joined
+
+
+# ---------------------------------------------------------------------------
+# Input validation — audit #2 and #3 (command injection)
+# ---------------------------------------------------------------------------
+
+
+def test_set_hostname_rejects_newline_injection(_mock_pool, _mock_snapshot):
+    """A hostile new_name containing \\n would smuggle extra IOS commands.
+    Must raise ValueError BEFORE _guard / Netmiko."""
+    with pytest.raises(ValueError, match="invalid hostname"):
+        wt.set_hostname("r1\n enable password pwn", action_id="anything")
+    _mock_pool.send_config_set.assert_not_called()
+
+
+def test_set_hostname_rejects_special_chars(_mock_pool, _mock_snapshot):
+    for hostile in ("hostname with spaces", "name; reload", "x?", "-leading-hyphen",
+                    "1numericstart", "a" * 64, ""):
+        with pytest.raises(ValueError, match="invalid hostname"):
+            wt.set_hostname(hostile, action_id="anything")
+
+
+def test_set_hostname_accepts_valid_names():
+    """Validation must permit the actual hostnames we use in demos."""
+    for ok in ("LAB-R1", "c1111-lab", "a", "A1", "node-42-x-9", "Z" * 63):
+        wt._validate_hostname(ok)  # no exception
+
+
+def test_set_interface_ip_rejects_bad_ip(_mock_pool, _mock_snapshot):
+    with pytest.raises(ValueError, match="invalid IPv4 address"):
+        wt.set_interface_ip("Gi0/0/0", "999.999.999.999", "255.255.255.0",
+                            action_id="anything")
+    _mock_pool.send_config_set.assert_not_called()
+
+
+def test_set_interface_ip_rejects_bad_mask(_mock_pool, _mock_snapshot):
+    with pytest.raises(ValueError, match="invalid IPv4 mask"):
+        wt.set_interface_ip("Gi0/0/0", "10.0.0.1", "not-a-mask",
+                            action_id="anything")
+
+
+def test_set_interface_ip_rejects_bad_interface(_mock_pool, _mock_snapshot):
+    """Interface names with shell metacharacters or newlines must be rejected."""
+    for hostile in ("Gi0/0/0\n no shutdown\n config terminal",
+                    "Gi 0/0/0",  # space
+                    "x" * 32,    # too long
+                    ""):
+        with pytest.raises(ValueError, match="invalid interface name"):
+            wt.set_interface_ip(hostile, "10.0.0.1", "255.255.255.0",
+                                action_id="anything")
