@@ -61,36 +61,115 @@ class HostnamePage:
         """Click Administration → Device Properties from any post-login page.
 
         AngularJS renders the sidebar AFTER the post-login redirect resolves,
-        so we hard-wait DASHBOARD_SETTLE_MS for the menu to materialise. This
-        matches the timing pattern that script 07_inspect_dashboard.py proved
-        works — `wait_for(state="visible")` was less reliable because some
-        menu items render as hidden parents with visible children.
+        so we hard-wait DASHBOARD_SETTLE_MS for the menu to materialise.
+
+        Diagnostic note: every strategy attempt is logged so we can see
+        exactly which one resolved (or why none did) without running a
+        separate inspection script.
         """
-        log.info("hostname_page_goto_start")
+        log.info("hostname_page_goto_start", url=self.page.url)
 
-        # Hard wait for the AngularJS sidebar to render — same wait that
-        # 07_inspect_dashboard.py uses successfully.
+        # Hard wait for the AngularJS sidebar to render
         self.page.wait_for_timeout(DASHBOARD_SETTLE_MS)
+        log.info("hostname_page_settle_done")
 
-        admin = first_match(self.page, self._sel["nav"]["administration"])
+        admin = self._resolve_or_diagnose(
+            "administration",
+            self._sel["nav"]["administration"],
+        )
         if admin is None:
+            self._dump_diagnostics("admin-missing")
             raise HostnameNavigationError(
                 "Administration menu not visible — priv-15 user required, "
-                "or selectors out of date (run docs/codegen-howto.md)"
+                "or selectors out of date. See structlog 'strategy_*' entries "
+                "above for which selectors were tried and what they matched."
             )
         admin.click()
+        log.info("hostname_page_admin_clicked")
         wait_for_networkidle(self.page, 10_000)
-        # Sub-menu pops on click but Angular may still be settling
         self.page.wait_for_timeout(1_500)
 
-        dp = first_match(self.page, self._sel["hostname_nav"]["device_properties"])
+        dp = self._resolve_or_diagnose(
+            "device_properties",
+            self._sel["hostname_nav"]["device_properties"],
+        )
         if dp is None:
             raise HostnameNavigationError("Device Properties submenu not visible")
         dp.click()
+        log.info("hostname_page_dp_clicked")
         wait_for_networkidle(self.page, 10_000)
         self.page.wait_for_timeout(1_500)
 
         log.info("hostname_page_goto_complete", url=self.page.url)
+
+    def _dump_diagnostics(self, label: str) -> None:
+        """Log body text excerpt + count probes for the failing page."""
+        try:
+            body = self.page.locator("body").inner_text()[:1500]
+        except Exception as exc:
+            body = f"(failed to read body: {exc})"
+        log.warning(
+            "page_body_excerpt",
+            label=label,
+            url=self.page.url,
+            text=body.replace("\n", " | "),
+        )
+        # Probe a few likely Administration candidates so we see what's actually there
+        for probe in (
+            "text=Administration",
+            "a:has-text('Administration')",
+            "a.title:has-text('Administration')",
+            "[ng-if]:has-text('Administration')",
+            "text=Configuration",
+            "text=Dashboard",
+        ):
+            try:
+                cnt = self.page.locator(probe).count()
+            except Exception as exc:
+                cnt = f"ERR:{exc}"
+            log.warning("probe_count", probe=probe, count=cnt)
+
+    def _resolve_or_diagnose(self, label: str, strategies: list[dict]):
+        """Walk strategies; log each one's match count for visibility."""
+        for i, strat in enumerate(strategies):
+            try:
+                if "role" in strat:
+                    name = strat.get("name")
+                    loc = (
+                        self.page.get_by_role(strat["role"], name=name)
+                        if name
+                        else self.page.get_by_role(strat["role"])
+                    )
+                    repr_ = f"role={strat['role']!r} name={name!r}"
+                elif "label" in strat:
+                    loc = self.page.get_by_label(strat["label"], exact=False)
+                    repr_ = f"label={strat['label']!r}"
+                elif "text" in strat:
+                    loc = self.page.locator(f"text={strat['text']}")
+                    repr_ = f"text={strat['text']!r}"
+                elif "css" in strat:
+                    loc = self.page.locator(strat["css"])
+                    repr_ = f"css={strat['css']!r}"
+                else:
+                    continue
+                count = loc.count()
+                log.info(
+                    "strategy_attempt",
+                    target=label,
+                    index=i,
+                    selector=repr_,
+                    count=count,
+                )
+                if count > 0:
+                    return loc.first
+            except Exception as exc:
+                log.warning(
+                    "strategy_error",
+                    target=label,
+                    index=i,
+                    error=str(exc),
+                )
+        return None
 
     # ---------------------------------------------------------------------
     # Form interactions
