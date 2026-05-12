@@ -2,20 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
 from backend.orchestration import tool_registry as tr
 from backend.orchestration.confirmations import (
     NotApproved,
-    _reset_for_testing,
 )
 
-
-@pytest.fixture(autouse=True)
-def _clean():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 # ---------------------------------------------------------------------------

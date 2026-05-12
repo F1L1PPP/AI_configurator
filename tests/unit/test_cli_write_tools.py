@@ -10,7 +10,6 @@ import pytest
 import backend.cli_agent.write_tools as wt
 from backend.orchestration.confirmations import (
     NotApproved,
-    _reset_for_testing,
     approve_action,
     propose_action,
 )
@@ -20,11 +19,7 @@ from backend.orchestration.confirmations import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _clean_actions():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 @pytest.fixture(autouse=True)

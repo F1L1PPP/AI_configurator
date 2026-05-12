@@ -6,7 +6,6 @@ import pytest
 
 from backend.orchestration.confirmations import (
     ActionState,
-    _reset_for_testing,
     approve_action,
     get_action,
     is_approved,
@@ -16,12 +15,7 @@ from backend.orchestration.confirmations import (
     reject_action,
 )
 
-
-@pytest.fixture(autouse=True)
-def _clean():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 # ---------------------------------------------------------------------------

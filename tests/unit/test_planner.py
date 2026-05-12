@@ -5,21 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
-from backend.orchestration.confirmations import _reset_for_testing
 from backend.orchestration.planner import (
     MAX_ITERATIONS,
     PlannerResult,
     run_planner,
 )
 
-
-@pytest.fixture(autouse=True)
-def _clean():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 # ---------------------------------------------------------------------------
