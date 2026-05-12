@@ -22,11 +22,12 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-# How long to let AngularJS render the sidebar after the post-login redirect.
-# Empirically 5 s is plenty on a healthy C1111 — the inspector script proved
-# this. Bumping it costs latency but doesn't add value unless the device is
-# under heavy load.
-DASHBOARD_SETTLE_MS = 5_000
+# Direct hash route for the hostname form on IOS XE 17.6.3a — captured by
+# manual inspection (Administration → Device → General lands at #/general).
+# Bypassing the sidebar makes the flow robust to the sidebar's flaky
+# rendering under Playwright.
+HOSTNAME_ROUTE = "/webui/#/general"
+FORM_SETTLE_MS = 3_000
 
 
 class HostnameNavigationError(RuntimeError):
@@ -58,47 +59,34 @@ class HostnamePage:
     # ---------------------------------------------------------------------
 
     def goto(self) -> None:
-        """Click Administration → Device Properties from any post-login page.
+        """Navigate directly to the hostname form via hash route.
 
-        AngularJS renders the sidebar AFTER the post-login redirect resolves,
-        so we hard-wait DASHBOARD_SETTLE_MS for the menu to materialise.
-
-        Diagnostic note: every strategy attempt is logged so we can see
-        exactly which one resolved (or why none did) without running a
-        separate inspection script.
+        Skips the sidebar (Administration → Device → General) and goes
+        straight to /webui/#/general. The sidebar has been rendering
+        unreliably under Playwright; the hash route works regardless.
         """
         log.info("hostname_page_goto_start", url=self.page.url)
 
-        # Hard wait for the AngularJS sidebar to render
-        self.page.wait_for_timeout(DASHBOARD_SETTLE_MS)
-        log.info("hostname_page_settle_done")
+        # Reconstruct the base URL from whatever route we're currently on
+        parts = self.page.url.split("/webui/")
+        base = parts[0] if parts else self.page.url.rstrip("/")
+        target_url = f"{base}{HOSTNAME_ROUTE}"
+        log.info("hostname_page_direct_nav", target=target_url)
 
-        admin = self._resolve_or_diagnose(
-            "administration",
-            self._sel["nav"]["administration"],
-        )
-        if admin is None:
-            self._dump_diagnostics("admin-missing")
+        self.page.goto(target_url, wait_until="domcontentloaded", timeout=20_000)
+        wait_for_networkidle(self.page, 10_000)
+        # AngularJS still resolving + form rendering
+        self.page.wait_for_timeout(FORM_SETTLE_MS)
+
+        # Verify we actually landed on the form by probing for the input
+        loc = first_match(self.page, self._sel["hostname_form"]["hostname_input"])
+        if loc is None:
+            self._dump_diagnostics("hostname-form-missing")
             raise HostnameNavigationError(
-                "Administration menu not visible — priv-15 user required, "
-                "or selectors out of date. See structlog 'strategy_*' entries "
-                "above for which selectors were tried and what they matched."
+                f"Direct nav to {HOSTNAME_ROUTE} did not render the hostname "
+                "form (input field not found). See structlog probe_count "
+                "entries above for what the page actually has."
             )
-        admin.click()
-        log.info("hostname_page_admin_clicked")
-        wait_for_networkidle(self.page, 10_000)
-        self.page.wait_for_timeout(1_500)
-
-        dp = self._resolve_or_diagnose(
-            "device_properties",
-            self._sel["hostname_nav"]["device_properties"],
-        )
-        if dp is None:
-            raise HostnameNavigationError("Device Properties submenu not visible")
-        dp.click()
-        log.info("hostname_page_dp_clicked")
-        wait_for_networkidle(self.page, 10_000)
-        self.page.wait_for_timeout(1_500)
 
         log.info("hostname_page_goto_complete", url=self.page.url)
 
@@ -114,14 +102,17 @@ class HostnamePage:
             url=self.page.url,
             text=body.replace("\n", " | "),
         )
-        # Probe a few likely Administration candidates so we see what's actually there
+        # Probe the candidates that should appear on the hostname form page
         for probe in (
-            "text=Administration",
-            "a:has-text('Administration')",
-            "a.title:has-text('Administration')",
-            "[ng-if]:has-text('Administration')",
-            "text=Configuration",
-            "text=Dashboard",
+            "input[type='text']",
+            "text=Host Name",
+            "text=Hostname",
+            "label:has-text('Host Name')",
+            "input[name='hostname']",
+            "input[name='hostName']",
+            "button:has-text('Apply')",
+            "text=Administration",  # leftover from sidebar diagnostic
+            "text=Device",
         ):
             try:
                 cnt = self.page.locator(probe).count()

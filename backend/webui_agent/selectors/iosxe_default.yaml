@@ -117,27 +117,29 @@ vlan_form:
     - { role: "button", name: "Back" }
 
 # -----------------------------------------------------------------
-# Administration → Device Properties (the hostname-change flow)
+# Hostname change form — Administration → Device → General
+#
+# Captured from real C1111 with IOS XE 17.6.3a by manual inspection
+# (see screenshots in the Day-5 commit message). The form is reachable
+# directly via hash route /webui/#/general, which bypasses the sidebar
+# entirely — the sidebar has been rendering unreliably under Playwright
+# (priv-15 menus sometimes hidden even though the user has the role).
 # -----------------------------------------------------------------
-hostname_nav:
-  device_properties:
-    - { text: "Device Properties" }
-    - { css: "a:has-text('Device Properties')" }
-    - { css: "[routerlink*='device-properties' i]" }
-    - { css: "[routerlink*='device_properties' i]" }
-
 hostname_form:
   hostname_input:
-    - { label: "Hostname" }
     - { label: "Host Name" }
-    - { css: "input[name='hostname']" }
+    - { label: "Hostname" }
+    - { css: "input[name='hostname' i]" }
+    - { css: "input[name='hostName']" }
     - { css: "input[id*='hostname' i]" }
+    - { css: "input[id*='hostName' i]" }
+    - { css: "input[placeholder*='Host Name' i]" }
     - { css: "input[placeholder*='hostname' i]" }
   apply_button:
     - { role: "button", name: "Apply" }
-    - { role: "button", name: "Save" }
-    - { role: "button", name: "Submit" }
+    - { css: "button:has-text('Apply')" }
     - { css: "button[type='submit']" }
+    - { css: ".btn-apply" }
 
 # -----------------------------------------------------------------
 # Session-expired detection — if any of these resolve we're back on the

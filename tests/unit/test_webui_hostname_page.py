@@ -59,37 +59,43 @@ def _page_with(strategies_to_locator: dict) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-def test_goto_clicks_administration_then_device_properties():
-    admin_loc = _loc()
-    dp_loc    = _loc()
-    page = _page_with({
-        # New primary selector — a.title with text — matches IOS XE 17.x sidebar
-        "locator:a.title:has-text('Administration')": admin_loc,
-        "locator:text=Device Properties":             dp_loc,
-    })
+def test_goto_navigates_directly_to_hostname_route():
+    """The new goto() bypasses the sidebar and hits /webui/#/general directly."""
+    page = _page_with({"label:Host Name": _loc()})
+    page.url = "https://192.168.10.1/webui/#/dashboard"
 
     hp = HostnamePage(page)
     hp.goto()
 
-    admin_loc.click.assert_called_once()
-    dp_loc.click.assert_called_once()
+    # page.goto called with the /general route on the same host
+    page.goto.assert_called_once()
+    target_url = page.goto.call_args.args[0]
+    assert target_url.startswith("https://192.168.10.1")
+    assert target_url.endswith("/webui/#/general")
 
 
-def test_goto_raises_when_admin_menu_missing():
-    page = _page_with({})  # nothing resolves
+def test_goto_raises_when_form_not_found_after_nav():
+    """If the direct route lands somewhere without the hostname input, raise
+    with a clear message rather than failing later in set_hostname."""
+    page = _page_with({})  # no label:'Host Name' match → no form
+    page.url = "https://192.168.10.1/webui/#/dashboard"
+
     hp = HostnamePage(page)
-    with pytest.raises(HostnameNavigationError, match="Administration"):
+    with pytest.raises(HostnameNavigationError, match="hostname form"):
         hp.goto()
 
 
-def test_goto_raises_when_device_properties_missing():
-    page = _page_with({
-        "locator:a.title:has-text('Administration')": _loc(),
-        # No Device Properties locator
-    })
+def test_goto_extracts_base_url_from_current_page():
+    """The base URL is reconstructed from the current page.url so this works
+    against any router IP, not just the dev unit."""
+    page = _page_with({"label:Host Name": _loc()})
+    page.url = "https://10.20.30.40/webui/#/something"
+
     hp = HostnamePage(page)
-    with pytest.raises(HostnameNavigationError, match="Device Properties"):
-        hp.goto()
+    hp.goto()
+
+    target_url = page.goto.call_args.args[0]
+    assert target_url == "https://10.20.30.40/webui/#/general"
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +105,7 @@ def test_goto_raises_when_device_properties_missing():
 
 def test_get_current_hostname_returns_input_value():
     hostname_loc = _loc(input_value="c1111-lab")
-    page = _page_with({"label:Hostname": hostname_loc})
+    page = _page_with({"label:Host Name": hostname_loc})
     hp = HostnamePage(page)
     assert hp.get_current_hostname() == "c1111-lab"
 
@@ -118,7 +124,7 @@ def test_get_current_hostname_raises_when_field_missing():
 
 def test_set_hostname_triple_clicks_then_fills():
     hostname_loc = _loc()
-    page = _page_with({"label:Hostname": hostname_loc})
+    page = _page_with({"label:Host Name": hostname_loc})
     hp = HostnamePage(page)
     hp.set_hostname("LAB-R1")
     hostname_loc.triple_click.assert_called_once()
