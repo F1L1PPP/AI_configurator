@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from backend.core.logging import get_logger
@@ -56,8 +57,13 @@ def _pending_approval(events: list[PlannerEvent]) -> str | None:
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
+    # run_planner does blocking I/O (Anthropic API + Netmiko SSH).
+    # Offload to a threadpool so the FastAPI event loop stays free for
+    # concurrent requests (BackendStatus + RecentActions poll every few s).
     try:
-        result = run_planner(req.message, history=req.history)
+        result = await run_in_threadpool(
+            run_planner, req.message, history=req.history
+        )
     except Exception as exc:
         log.error("planner_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"planner failed: {exc}") from exc

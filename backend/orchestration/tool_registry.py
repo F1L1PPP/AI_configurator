@@ -5,9 +5,11 @@ name to a Python callable, runs it, and returns a JSON-serializable result.
 
 Design notes:
 - Read tools take no parameters and never need approval.
-- Write tools require an `action_id` parameter that must already be APPROVED
-  in the HITL state machine (defense-in-depth — the write tool itself also
-  checks is_approved()).
+- Write tools listed in `_REQUIRES_APPROVAL` MUST carry an `action_id` that
+  is already in state APPROVED. The dispatcher verifies this BEFORE calling
+  the underlying function (defense-in-depth layer 1). The write tool itself
+  also re-checks `is_approved()` server-side (layer 2) so neither layer
+  alone is the only gate.
 - Unknown tool names return a structured error instead of raising; this lets
   the planner recover instead of dying mid-conversation.
 """
@@ -19,9 +21,17 @@ from typing import Any
 
 from backend.cli_agent import read_tools, write_tools
 from backend.core.logging import get_logger
-from backend.orchestration.confirmations import NotApproved, propose_action
+from backend.orchestration.confirmations import (
+    NotApproved,
+    is_approved,
+    propose_action,
+)
 
 log = get_logger(__name__)
+
+# Tools in this set require an APPROVED action_id before the dispatcher
+# will invoke them. Mirrors the gate inside each write tool.
+_REQUIRES_APPROVAL: frozenset[str] = frozenset({"set_hostname", "set_interface_ip"})
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +200,27 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
         log.warning("unknown_tool", tool=name)
         return {"error": f"unknown tool: {name!r}", "available": list(_TOOL_FUNCS)}
 
+    # Defense-in-depth layer 1: dispatcher refuses write tools whose action_id
+    # is missing or not APPROVED, before the function is ever called.
+    if name in _REQUIRES_APPROVAL:
+        action_id = params.get("action_id")
+        if not action_id or not is_approved(action_id):
+            log.info("dispatcher_not_approved", tool=name, action_id=action_id)
+            return {
+                "error":   "not_approved",
+                "message": (
+                    f"action_id {action_id!r} is not APPROVED; "
+                    "call POST /api/approve/{action_id} first."
+                ),
+            }
+
     func = _TOOL_FUNCS[name]
     try:
         result = func(**params)
     except NotApproved as exc:
+        # Layer 2 still fires if approval was revoked between the dispatcher
+        # check and the function call (race), or if a future tool is added
+        # to _TOOL_FUNCS but forgotten in _REQUIRES_APPROVAL.
         log.info("tool_not_approved", tool=name, error=str(exc))
         return {"error": "not_approved", "message": str(exc)}
     except TypeError as exc:

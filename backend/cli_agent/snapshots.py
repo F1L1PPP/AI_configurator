@@ -37,8 +37,11 @@ def take_snapshot(action_id: str, phase: str = "pre") -> Path:
     snap_dir = settings.artifacts_dir / "device-snapshots" / action_id / phase
     snap_dir.mkdir(parents=True, exist_ok=True)
 
-    s = get_settings()
-    conn = pool.get_connection(s.router_host, s.router_ssh_user, s.router_ssh_password)
+    conn = pool.get_connection(
+        settings.router_host,
+        settings.router_ssh_user,
+        settings.router_ssh_password,
+    )
 
     for filename, command in _COMMANDS.items():
         raw: str = conn.send_command(command, read_timeout=60)

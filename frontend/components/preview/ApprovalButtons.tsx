@@ -46,10 +46,10 @@ export default function ApprovalButtons({ actionId }: Props) {
           className="mono flex-1 border border-ink bg-ink px-4 py-2.5 text-[9px] tracking-wider text-surface hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {state === "loading"
-            ? "EXECUTING…"
+            ? "APPROVING…"
             : state === "approved"
               ? "✓ APPROVED"
-              : "APPROVE & EXECUTE"}
+              : "APPROVE"}
         </button>
         <button
           disabled={disabled}
@@ -69,6 +69,12 @@ export default function ApprovalButtons({ actionId }: Props) {
       {!actionId && (
         <p className="mono text-[8px] tracking-wider text-ink-faint">
           NO ACTION ID — add ?action_id=act_… to the URL
+        </p>
+      )}
+
+      {state === "approved" && (
+        <p className="mono text-[8px] tracking-wider text-ink-faint">
+          ✓ AUTHORISED — return to chat and tell the agent to execute
         </p>
       )}
 

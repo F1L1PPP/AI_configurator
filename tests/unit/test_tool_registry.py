@@ -87,21 +87,68 @@ def test_dispatch_wraps_list_result(monkeypatch):
     assert result == {"result": rows}
 
 
-def test_dispatch_catches_not_approved(monkeypatch):
+def test_dispatcher_layer1_refuses_unknown_action_id(monkeypatch):
+    """Layer 1 (dispatcher): unknown action_id → not_approved BEFORE the
+    underlying function is ever called."""
+    called = []
+
+    def _spy(**kwargs):
+        called.append(kwargs)
+        return {}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "set_hostname", _spy)
+    result = tr.execute_tool(
+        "set_hostname",
+        {"new_name": "R1", "action_id": "act_nonexistent"},
+    )
+    assert result["error"] == "not_approved"
+    assert called == []  # function never invoked
+
+
+def test_dispatcher_layer1_refuses_missing_action_id(monkeypatch):
+    """Layer 1 (dispatcher): no action_id key at all → not_approved.
+    set_hostname takes new_name + action_id; calling it directly without
+    action_id would raise TypeError, but layer 1 catches it first."""
+    called = []
+
+    def _spy(**kwargs):
+        called.append(kwargs)
+        return {}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "set_hostname", _spy)
+    result = tr.execute_tool("set_hostname", {"new_name": "R1"})
+    assert result["error"] == "not_approved"
+    assert called == []
+
+
+def test_dispatcher_layer2_catches_not_approved_exception(monkeypatch):
+    """Layer 2 (exception): even when layer 1 lets the call through,
+    a NotApproved raised from the function (e.g. race after dispatcher
+    check) still returns the same structured error."""
+    from backend.orchestration.confirmations import approve_action, propose_action
+
+    action_id = propose_action("set_hostname", {"name": "R1"})
+    approve_action(action_id)
+
     def _raises(**kwargs):
-        raise NotApproved("nope")
+        raise NotApproved("simulated race")
 
     monkeypatch.setitem(tr._TOOL_FUNCS, "set_hostname", _raises)
     result = tr.execute_tool(
         "set_hostname",
-        {"new_name": "R1", "action_id": "act_x"},
+        {"new_name": "R1", "action_id": action_id},
     )
     assert result["error"] == "not_approved"
 
 
-def test_dispatch_catches_bad_parameters():
-    # set_hostname requires new_name and action_id; passing nothing → TypeError
-    result = tr.execute_tool("set_hostname", {})
+def test_dispatch_catches_bad_parameters(monkeypatch):
+    """Bad params on a non-write tool path still surface as bad_parameters."""
+
+    def _picky(required_arg: str) -> dict:
+        return {"ok": required_arg}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "show_version", _picky)
+    result = tr.execute_tool("show_version", {})
     assert result["error"] == "bad_parameters"
 
 

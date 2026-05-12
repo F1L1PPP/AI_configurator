@@ -109,6 +109,11 @@ def _serialize_assistant_content(response: Any) -> list[dict]:
 
     Anthropic SDK returns ContentBlock objects; for follow-up turns we need
     the dict form to append back to messages.
+
+    Known block types (text, tool_use) get an explicit shape. Unknown blocks
+    (e.g. future `thinking`/`server_tool_use`/`web_search_tool_result`) are
+    preserved via the Pydantic `model_dump()` fallback so follow-up turns
+    don't lose context and debugging stays readable.
     """
     out: list[dict] = []
     for block in response.content:
@@ -122,6 +127,14 @@ def _serialize_assistant_content(response: Any) -> list[dict]:
                 "name":  block.name,
                 "input": block.input,
             })
+        else:
+            # Future-proof: preserve unknown block via the SDK's Pydantic
+            # serializer. Log so we notice new block types showing up.
+            try:
+                out.append(block.model_dump(mode="json", exclude_none=True))
+                log.info("assistant_block_preserved", kind=kind)
+            except Exception as exc:
+                log.warning("assistant_block_dropped", kind=kind, error=str(exc))
     return out
 
 
