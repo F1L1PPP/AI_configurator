@@ -89,14 +89,8 @@ const Bubble = ({ msg }: { msg: Msg }) => {
             <span className="inline-flex items-center gap-2">
               <span className="mono inline-flex gap-0.5">
                 <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-current" />
-                <span
-                  className="inline-block h-1 w-1 animate-pulse rounded-full bg-current"
-                  style={{ animationDelay: "150ms" }}
-                />
-                <span
-                  className="inline-block h-1 w-1 animate-pulse rounded-full bg-current"
-                  style={{ animationDelay: "300ms" }}
-                />
+                <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-current delay-150" />
+                <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-current delay-300" />
               </span>
               {msg.text}
             </span>

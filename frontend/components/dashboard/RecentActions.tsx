@@ -5,8 +5,13 @@ import { useEffect, useState } from "react";
 import { getRecentLogs, type LogEntry } from "@/lib/api";
 
 function label(entry: LogEntry): string {
-  if (entry.tool) return `${entry.tool} (CLI)`;
-  if (entry.event) return String(entry.event);
+  // Discriminated union switch — narrowed types per branch.
+  if (entry.kind === "cli") return `${entry.tool} (CLI)`;
+  if (entry.kind === "event") return entry.event;
+  // Fallback for un-tagged entries (format drift or unknown shape)
+  const fallback = entry as { tool?: string; event?: string };
+  if (typeof fallback.tool === "string") return `${fallback.tool} (CLI)`;
+  if (typeof fallback.event === "string") return fallback.event;
   return "log entry";
 }
 
@@ -38,7 +43,7 @@ function ActionRow({ entry, id }: { entry: LogEntry; id: number }) {
         {ok ? "✓" : "!"}
       </span>
       <span className="flex-1 leading-snug">{label(entry)}</span>
-      {entry.duration_ms != null && (
+      {typeof entry.duration_ms === "number" && (
         <span className="mono shrink-0 text-[8px] text-ink-faint">
           {entry.duration_ms}ms
         </span>
@@ -83,8 +88,26 @@ export default function RecentActions({ limit = 4 }: { limit?: number }) {
   return (
     <div>
       {entries.slice(0, limit).map((entry, i) => (
-        <ActionRow key={i} entry={entry} id={i + 1} />
+        // Stable key (audit #13): timestamp+tool/event uniquely identifies
+        // the log line; fall back to index only as a last resort. With a
+        // stable key React reuses the right DOM node when the poll
+        // reorders/prepends rows, avoiding the animation/focus glitches
+        // that index-as-key caused.
+        <ActionRow
+          key={keyFor(entry, i)}
+          entry={entry}
+          id={i + 1}
+        />
       ))}
     </div>
   );
+}
+
+function keyFor(entry: LogEntry, fallbackIndex: number): string {
+  const ts = entry.timestamp ?? "";
+  const what = (entry as { tool?: string; event?: string }).tool
+    ?? (entry as { tool?: string; event?: string }).event
+    ?? "log";
+  if (ts) return `${ts}|${what}`;
+  return `idx-${fallbackIndex}`;
 }

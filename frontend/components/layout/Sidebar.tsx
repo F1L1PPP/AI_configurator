@@ -16,7 +16,20 @@ type IconName =
   | "preview"
   | "live";
 
+const ICON_LABELS: Record<IconName, string> = {
+  dashboard: "Dashboard",
+  devices:   "Devices",
+  ai:        "AI Chat",
+  config:    "Configurations",
+  templates: "Templates",
+  logs:      "Logs",
+  settings:  "Settings",
+  preview:   "Preview",
+  live:      "WebUI Live",
+};
+
 const Icon = ({ name }: { name: IconName }) => {
+  // SVGs get role='img' + aria-label so screen readers announce them (audit #19).
   const common = {
     width: 14,
     height: 14,
@@ -25,6 +38,8 @@ const Icon = ({ name }: { name: IconName }) => {
     strokeWidth: 1.4,
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
+    role: "img" as const,
+    "aria-label": ICON_LABELS[name],
   };
   switch (name) {
     case "dashboard":
