@@ -91,7 +91,12 @@ class HostnamePage:
         log.info("hostname_page_goto_complete", url=self.page.url)
 
     def _dump_diagnostics(self, label: str) -> None:
-        """Log body text excerpt + count probes for the failing page."""
+        """Log body text excerpt + count probes + full input inventory.
+
+        The input inventory is the key piece — it tells us name/id/ng-model
+        of every <input> on the page so we can pick the right selector
+        without another inspector round-trip.
+        """
         try:
             body = self.page.locator("body").inner_text()[:1500]
         except Exception as exc:
@@ -102,7 +107,8 @@ class HostnamePage:
             url=self.page.url,
             text=body.replace("\n", " | "),
         )
-        # Probe the candidates that should appear on the hostname form page
+
+        # Probe count for several candidate strategies
         for probe in (
             "input[type='text']",
             "text=Host Name",
@@ -111,14 +117,34 @@ class HostnamePage:
             "input[name='hostname']",
             "input[name='hostName']",
             "button:has-text('Apply')",
-            "text=Administration",  # leftover from sidebar diagnostic
-            "text=Device",
+            "input[ng-model*='hostname' i]",
+            "input[ng-model*='host' i]",
         ):
             try:
                 cnt = self.page.locator(probe).count()
             except Exception as exc:
                 cnt = f"ERR:{exc}"
             log.warning("probe_count", probe=probe, count=cnt)
+
+        # Full input inventory — name/id/ng-model/placeholder/type/visible
+        try:
+            inputs = self.page.locator("input").all()
+            for i, inp in enumerate(inputs[:15]):
+                try:
+                    log.warning(
+                        "input_inventory",
+                        index=i,
+                        type=inp.get_attribute("type"),
+                        name=inp.get_attribute("name"),
+                        id=inp.get_attribute("id"),
+                        ng_model=inp.get_attribute("ng-model"),
+                        placeholder=inp.get_attribute("placeholder"),
+                        visible=inp.is_visible(),
+                    )
+                except Exception as exc:
+                    log.warning("input_inventory_err", index=i, error=str(exc))
+        except Exception as exc:
+            log.warning("input_inventory_top_err", error=str(exc))
 
     def _resolve_or_diagnose(self, label: str, strategies: list[dict]):
         """Walk strategies; log each one's match count for visibility."""
