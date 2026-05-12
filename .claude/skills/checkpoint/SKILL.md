@@ -16,7 +16,7 @@ The argument is the conventional commit message. Required.
 2. Runs `pytest -q` — aborts on any failure.
 3. `git add -A` and commits with the provided message.
 4. `git push` to origin.
-5. Creates an annotated tag `backup-YYYYMMDD-HHMM` pointing at HEAD.
+5. Creates an annotated tag `backup-YYYYMMDD-HHMMSS` pointing at HEAD.
 6. Pushes the tag to origin.
 
 ## Invocation

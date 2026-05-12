@@ -1,4 +1,5 @@
 import MeshSphere from "@/components/mesh/MeshSphere";
+import RecentActions from "@/components/dashboard/RecentActions";
 import BackendStatus from "@/components/status/BackendStatus";
 
 type StatProps = { label: string; value: string | number; sub?: string };
@@ -21,29 +22,6 @@ const Panel = ({ title, right, children }: PanelProps) => (
   </section>
 );
 
-const mockActions: { id: string; text: string; time: string; status: "ok" | "pending" }[] = [
-  { id: "01", text: "show running-config (CLI)", time: "10:34", status: "ok" },
-  { id: "02", text: "set hostname LAB-R1 (CLI, approved)", time: "10:31", status: "ok" },
-  { id: "03", text: "show vlan brief (CLI)", time: "10:28", status: "ok" },
-  { id: "04", text: "Bootstrap healthz check", time: "10:25", status: "ok" },
-];
-
-const ActionRow = ({ row }: { row: (typeof mockActions)[number] }) => (
-  <div className="flex items-center gap-2 border-b border-rule-ghost py-1.5 text-[10px] last:border-0">
-    <span className="mono w-5 shrink-0 text-right text-[8px] text-ink-line">{row.id}</span>
-    <span
-      className={`flex h-5 w-5 shrink-0 items-center justify-center border ${
-        row.status === "ok" ? "border-ink bg-ink text-surface" : "border-rule"
-      } text-[9px]`}
-      aria-hidden
-    >
-      {row.status === "ok" ? "✓" : "·"}
-    </span>
-    <span className="flex-1 leading-snug">{row.text}</span>
-    <span className="mono shrink-0 text-[8px] text-ink-line">{row.time}</span>
-  </div>
-);
-
 export default function DashboardPage() {
   return (
     <div className="relative flex flex-col gap-4">
@@ -61,11 +39,7 @@ export default function DashboardPage() {
           title="Recent Activity"
           right={<span className="mono text-[8px] tracking-wider text-ink-faint">LAST 24H</span>}
         >
-          <div>
-            {mockActions.map((row) => (
-              <ActionRow key={row.id} row={row} />
-            ))}
-          </div>
+          <RecentActions limit={4} />
         </Panel>
 
         <Panel title="Quick Actions">
@@ -91,8 +65,9 @@ export default function DashboardPage() {
           The status dot above polls <span className="mono">GET /healthz</span> on the FastAPI
           backend every 5 seconds. Start it with{" "}
           <span className="mono">uvicorn backend.main:app --reload</span>. The
-          &quot;Recent Activity&quot; panel still uses mocked rows; Day 2 wires it to the
-          structlog JSONL stream at <span className="mono">logs/actions.log</span>.
+          &quot;Recent Activity&quot; panel polls{" "}
+          <span className="mono">GET /api/logs/recent</span> every 3 s and shows the last 4
+          entries from <span className="mono">logs/actions.log</span>.
         </p>
       </Panel>
     </div>
