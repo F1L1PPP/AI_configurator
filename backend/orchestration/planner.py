@@ -1,9 +1,14 @@
 """LLM-driven planner — Anthropic tool-use loop.
 
 Translates natural-language requests into tool calls against the Cisco C1111.
-Claude (Sonnet 4.6) picks the tool and extracts parameters; this module
+Claude (Haiku 4.5) picks the tool and extracts parameters; this module
 executes the picked tool deterministically and feeds results back to the
 model until it produces a final text answer.
+
+Model choice: Haiku 4.5 is the right size for this — 8 well-defined tools,
+short structured outputs, no deep reasoning required. ~2× faster and ~5×
+cheaper than Sonnet 4.6 for the same accuracy on this workload. Swap to
+Sonnet via the MODEL constant if you ever see quality regressions.
 
 Safety:
 - Read tools execute immediately.
@@ -28,7 +33,7 @@ from backend.orchestration.tool_registry import TOOL_SCHEMAS, execute_tool
 
 log = get_logger(__name__)
 
-MODEL          = "claude-sonnet-4-6"
+MODEL          = "claude-haiku-4-5-20251001"
 MAX_TOKENS     = 4096
 MAX_ITERATIONS = 8
 
