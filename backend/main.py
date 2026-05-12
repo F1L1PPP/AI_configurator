@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api import routes_logs
 from backend.core.logging import configure_logging, get_logger
 from backend.core.settings import get_settings
 
@@ -24,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(routes_logs.router)
 
 
 @app.get("/healthz")

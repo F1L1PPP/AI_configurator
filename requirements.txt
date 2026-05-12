@@ -12,6 +12,7 @@ playwright==1.49.1
 # Pulled forward from Day 2 — used by the real-router Playwright probe and the
 # upcoming cli_agent/connection.py. SSH transport to Cisco IOS XE devices.
 netmiko==4.4.0
+ntc-templates==9.1.0
 
 # Dev / test
 ruff==0.11.10
