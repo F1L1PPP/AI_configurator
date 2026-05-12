@@ -199,9 +199,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 def _propose_set_hostname(new_name: str) -> dict:
     action_id = propose_action("set_hostname", {"name": new_name})
     return {
-        "status":    "awaiting_approval",
-        "action_id": action_id,
-        "preview":   f"Will run: 'hostname {new_name}' on the C1111",
+        "status":         "awaiting_approval",
+        "action_id":      action_id,
+        "preview":        f"Will run: 'hostname {new_name}' on the C1111",
+        "execute_tool":   "set_hostname",
+        "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
             f"Open /preview?action_id={action_id} and click APPROVE, "
             "then ask me to execute."
@@ -215,9 +217,16 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
         {"interface": interface, "ip": ip, "mask": mask},
     )
     return {
-        "status":    "awaiting_approval",
-        "action_id": action_id,
-        "preview":   f"Will set {interface} -> {ip}/{mask}",
+        "status":         "awaiting_approval",
+        "action_id":      action_id,
+        "preview":        f"Will set {interface} -> {ip}/{mask}",
+        "execute_tool":   "set_interface_ip",
+        "execute_params": {
+            "interface": interface,
+            "ip":        ip,
+            "mask":      mask,
+            "action_id": action_id,
+        },
         "next_step": f"Open /preview?action_id={action_id} and click APPROVE.",
     }
 
@@ -225,9 +234,11 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
 def _propose_webui_set_hostname(new_name: str) -> dict:
     action_id = propose_action("webui_set_hostname", {"name": new_name})
     return {
-        "status":    "awaiting_approval",
-        "action_id": action_id,
-        "preview":   f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
+        "status":         "awaiting_approval",
+        "action_id":      action_id,
+        "preview":        f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
+        "execute_tool":   "webui_set_hostname",
+        "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
             f"Open /preview?action_id={action_id} and click APPROVE, "
             "then return to chat and ask me to execute. Headed Chromium "
