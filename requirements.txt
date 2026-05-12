@@ -9,6 +9,10 @@ python-dotenv==1.1.0
 # Pulled forward from Day 3 — used by playwright_playground/ for training
 playwright==1.49.1
 
+# Pulled forward from Day 2 — used by the real-router Playwright probe and the
+# upcoming cli_agent/connection.py. SSH transport to Cisco IOS XE devices.
+netmiko==4.4.0
+
 # Dev / test
 ruff==0.11.10
 pytest==8.3.5
