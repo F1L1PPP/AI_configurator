@@ -84,7 +84,9 @@ def _build(page: Page, strat: dict[str, Any]) -> Locator | None:
     """Convert one strategy dict into a Playwright Locator (no .count() yet)."""
     if "role" in strat:
         name = strat.get("name")
-        return page.get_by_role(strat["role"], name=name) if name else page.get_by_role(strat["role"])
+        return (
+            page.get_by_role(strat["role"], name=name) if name else page.get_by_role(strat["role"])
+        )
     if "label" in strat:
         return page.get_by_label(strat["label"], exact=False)
     if "text" in strat:

@@ -32,11 +32,13 @@ log = get_logger(__name__)
 
 # Tools in this set require an APPROVED action_id before the dispatcher
 # will invoke them. Mirrors the gate inside each write tool.
-_REQUIRES_APPROVAL: frozenset[str] = frozenset({
-    "set_hostname",
-    "set_interface_ip",
-    "webui_set_hostname",
-})
+_REQUIRES_APPROVAL: frozenset[str] = frozenset(
+    {
+        "set_hostname",
+        "set_interface_ip",
+        "webui_set_hostname",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +109,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "new_name":  {"type": "string"},
+                "new_name": {"type": "string"},
                 "action_id": {"type": "string"},
             },
             "required": ["new_name", "action_id"],
@@ -126,7 +128,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Full interface name, e.g. 'GigabitEthernet0/0/0'.",
                 },
-                "ip":   {"type": "string", "description": "IPv4 address."},
+                "ip": {"type": "string", "description": "IPv4 address."},
                 "mask": {"type": "string", "description": "Subnet mask (dotted)."},
             },
             "required": ["interface", "ip", "mask"],
@@ -135,15 +137,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "set_interface_ip",
         "description": (
-            "Execute a previously approved interface IP assignment. "
-            "Requires an APPROVED action_id."
+            "Execute a previously approved interface IP assignment. Requires an APPROVED action_id."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "interface": {"type": "string"},
-                "ip":        {"type": "string"},
-                "mask":      {"type": "string"},
+                "ip": {"type": "string"},
+                "mask": {"type": "string"},
                 "action_id": {"type": "string"},
             },
             "required": ["interface", "ip", "mask", "action_id"],
@@ -182,7 +183,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "new_name":  {"type": "string"},
+                "new_name": {"type": "string"},
                 "action_id": {"type": "string"},
             },
             "required": ["new_name", "action_id"],
@@ -199,14 +200,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 def _propose_set_hostname(new_name: str) -> dict:
     action_id = propose_action("set_hostname", {"name": new_name})
     return {
-        "status":         "awaiting_approval",
-        "action_id":      action_id,
-        "preview":        f"Will run: 'hostname {new_name}' on the C1111",
-        "execute_tool":   "set_hostname",
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": f"Will run: 'hostname {new_name}' on the C1111",
+        "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
-            f"Open /preview?action_id={action_id} and click APPROVE, "
-            "then ask me to execute."
+            f"Open /preview?action_id={action_id} and click APPROVE, then ask me to execute."
         ),
     }
 
@@ -217,14 +217,14 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
         {"interface": interface, "ip": ip, "mask": mask},
     )
     return {
-        "status":         "awaiting_approval",
-        "action_id":      action_id,
-        "preview":        f"Will set {interface} -> {ip}/{mask}",
-        "execute_tool":   "set_interface_ip",
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": f"Will set {interface} -> {ip}/{mask}",
+        "execute_tool": "set_interface_ip",
         "execute_params": {
             "interface": interface,
-            "ip":        ip,
-            "mask":      mask,
+            "ip": ip,
+            "mask": mask,
             "action_id": action_id,
         },
         "next_step": f"Open /preview?action_id={action_id} and click APPROVE.",
@@ -234,10 +234,10 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
 def _propose_webui_set_hostname(new_name: str) -> dict:
     action_id = propose_action("webui_set_hostname", {"name": new_name})
     return {
-        "status":         "awaiting_approval",
-        "action_id":      action_id,
-        "preview":        f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
-        "execute_tool":   "webui_set_hostname",
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
+        "execute_tool": "webui_set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
             f"Open /preview?action_id={action_id} and click APPROVE, "
@@ -248,16 +248,16 @@ def _propose_webui_set_hostname(new_name: str) -> dict:
 
 
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
-    "show_version":              read_tools.show_version,
-    "show_ip_interface_brief":   read_tools.show_ip_interface_brief,
-    "show_running_config":       read_tools.show_running_config,
-    "show_vlan_brief":           read_tools.show_vlan_brief,
-    "propose_set_hostname":      _propose_set_hostname,
-    "set_hostname":              write_tools.set_hostname,
-    "propose_set_interface_ip":  _propose_set_interface_ip,
-    "set_interface_ip":          write_tools.set_interface_ip,
+    "show_version": read_tools.show_version,
+    "show_ip_interface_brief": read_tools.show_ip_interface_brief,
+    "show_running_config": read_tools.show_running_config,
+    "show_vlan_brief": read_tools.show_vlan_brief,
+    "propose_set_hostname": _propose_set_hostname,
+    "set_hostname": write_tools.set_hostname,
+    "propose_set_interface_ip": _propose_set_interface_ip,
+    "set_interface_ip": write_tools.set_interface_ip,
     "propose_webui_set_hostname": _propose_webui_set_hostname,
-    "webui_set_hostname":         change_hostname_via_webui,
+    "webui_set_hostname": change_hostname_via_webui,
 }
 
 
@@ -278,7 +278,7 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
         if not action_id or not is_approved(action_id):
             log.info("dispatcher_not_approved", tool=name, action_id=action_id)
             return {
-                "error":   "not_approved",
+                "error": "not_approved",
                 "message": (
                     f"action_id {action_id!r} is not APPROVED; "
                     "call POST /api/approve/{action_id} first."
@@ -310,9 +310,9 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
             exc_info=True,
         )
         return {
-            "error":    "tool_failed",
+            "error": "tool_failed",
             "exc_type": type(exc).__name__,
-            "message":  msg,
+            "message": msg,
         }
 
     # Normalize to dict if a tool returns str/list

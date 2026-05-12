@@ -33,7 +33,7 @@ class ActionState(str, Enum):
     REJECTED = "REJECTED"
     EXECUTED = "EXECUTED"
     VERIFIED = "VERIFIED"
-    FAILED   = "FAILED"
+    FAILED = "FAILED"
 
 
 class NotApproved(Exception):
@@ -55,10 +55,10 @@ def propose_action(tool: str, params: dict) -> str:
     action_id = f"act_{datetime.now(UTC).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
     with _lock:
         _actions[action_id] = {
-            "action_id":  action_id,
-            "tool":       tool,
-            "params":     params,
-            "state":      ActionState.PROPOSED,
+            "action_id": action_id,
+            "tool": tool,
+            "params": params,
+            "state": ActionState.PROPOSED,
             "created_at": now,
             "updated_at": now,
         }
@@ -75,7 +75,7 @@ def _transition(action_id: str, new_state: ActionState) -> dict:
         if action_id not in _actions:
             raise KeyError(f"Unknown action_id: {action_id!r}")
         action = _actions[action_id]
-        action["state"]      = new_state
+        action["state"] = new_state
         action["updated_at"] = _now()
         return dict(action)
 

@@ -30,7 +30,9 @@ def main() -> None:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=400)
-        context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
+        context = browser.new_context(
+            ignore_https_errors=True, viewport={"width": 1280, "height": 800}
+        )
         page = context.new_page()
         step = Step(session)
 
@@ -56,7 +58,9 @@ def main() -> None:
             page.wait_for_load_state("networkidle")
             step("03-add-form-empty", page)
 
-            print(f"4. Fill form: id={VLAN_ID} name={VLAN_NAME} interface={VLAN_INTERFACE} mode={VLAN_MODE}")
+            print(
+                f"4. Fill form: id={VLAN_ID} name={VLAN_NAME} interface={VLAN_INTERFACE} mode={VLAN_MODE}"
+            )
             page.get_by_label("VLAN ID").fill(VLAN_ID)
             page.get_by_label("Name").fill(VLAN_NAME)
             # select_option accepts label= for the visible text or value= for the value attribute

@@ -25,7 +25,9 @@ def main() -> None:
         # headless=False shows the browser window. slow_mo=400 inserts a 400ms
         # pause between every action — invaluable for watching what's happening.
         browser = p.chromium.launch(headless=False, slow_mo=400)
-        context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
+        context = browser.new_context(
+            ignore_https_errors=True, viewport={"width": 1280, "height": 800}
+        )
         page = context.new_page()
         step = Step(session)
 

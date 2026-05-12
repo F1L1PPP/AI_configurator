@@ -53,8 +53,8 @@ def _page_with(strategies_to_locator: dict) -> MagicMock:
         return strategies_to_locator.get(f"locator:{selector}", _zero_loc())
 
     page.get_by_label = MagicMock(side_effect=by_label)
-    page.get_by_role  = MagicMock(side_effect=by_role)
-    page.locator      = MagicMock(side_effect=by_locator)
+    page.get_by_role = MagicMock(side_effect=by_role)
+    page.locator = MagicMock(side_effect=by_locator)
     page.wait_for_load_state = MagicMock()
     page.url = "https://192.168.10.1/admin"
     return page

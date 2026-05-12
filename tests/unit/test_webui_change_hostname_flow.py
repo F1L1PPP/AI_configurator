@@ -104,7 +104,9 @@ def _stub_hostname_page(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refuses_without_approval(_isolated_artifacts, _stub_browser, _stub_login, _stub_hostname_page):
+def test_refuses_without_approval(
+    _isolated_artifacts, _stub_browser, _stub_login, _stub_hostname_page
+):
     action_id = propose_action("webui_set_hostname", {"name": "LAB-R1"})
     # NOT approved
     with pytest.raises(NotApproved):
@@ -208,6 +210,7 @@ def test_verification_failure_raises_and_marks_failed(
 
     # action_id must be marked FAILED
     from backend.orchestration.confirmations import ActionState
+
     assert get_action(action_id)["state"] == ActionState.FAILED
 
 

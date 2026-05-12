@@ -65,9 +65,7 @@ def test_set_hostname_refuses_without_approval(_mock_snapshot):
         wt.set_hostname("LAB-R1", action_id=action_id)
 
 
-def test_set_hostname_never_touches_device_when_not_approved(
-    _mock_pool, _mock_snapshot
-):
+def test_set_hostname_never_touches_device_when_not_approved(_mock_pool, _mock_snapshot):
     action_id = propose_action("set_hostname", {"name": "LAB-R1"})
     with pytest.raises(NotApproved):
         wt.set_hostname("LAB-R1", action_id=action_id)
@@ -98,7 +96,7 @@ def test_set_hostname_pre_snapshot_fires_before_config_push(_mock_pool, _mock_sn
     approve_action(action_id)
     wt.set_hostname("R1", action_id=action_id)
 
-    assert call_order[0] == "snapshot"   # pre fires first
+    assert call_order[0] == "snapshot"  # pre fires first
     assert call_order[1] == "config"
 
 
@@ -164,8 +162,15 @@ def test_set_hostname_rejects_newline_injection(_mock_pool, _mock_snapshot):
 
 
 def test_set_hostname_rejects_special_chars(_mock_pool, _mock_snapshot):
-    for hostile in ("hostname with spaces", "name; reload", "x?", "-leading-hyphen",
-                    "1numericstart", "a" * 64, ""):
+    for hostile in (
+        "hostname with spaces",
+        "name; reload",
+        "x?",
+        "-leading-hyphen",
+        "1numericstart",
+        "a" * 64,
+        "",
+    ):
         with pytest.raises(ValueError, match="invalid hostname"):
             wt.set_hostname(hostile, action_id="anything")
 
@@ -178,23 +183,22 @@ def test_set_hostname_accepts_valid_names():
 
 def test_set_interface_ip_rejects_bad_ip(_mock_pool, _mock_snapshot):
     with pytest.raises(ValueError, match="invalid IPv4 address"):
-        wt.set_interface_ip("Gi0/0/0", "999.999.999.999", "255.255.255.0",
-                            action_id="anything")
+        wt.set_interface_ip("Gi0/0/0", "999.999.999.999", "255.255.255.0", action_id="anything")
     _mock_pool.send_config_set.assert_not_called()
 
 
 def test_set_interface_ip_rejects_bad_mask(_mock_pool, _mock_snapshot):
     with pytest.raises(ValueError, match="invalid IPv4 mask"):
-        wt.set_interface_ip("Gi0/0/0", "10.0.0.1", "not-a-mask",
-                            action_id="anything")
+        wt.set_interface_ip("Gi0/0/0", "10.0.0.1", "not-a-mask", action_id="anything")
 
 
 def test_set_interface_ip_rejects_bad_interface(_mock_pool, _mock_snapshot):
     """Interface names with shell metacharacters or newlines must be rejected."""
-    for hostile in ("Gi0/0/0\n no shutdown\n config terminal",
-                    "Gi 0/0/0",  # space
-                    "x" * 32,    # too long
-                    ""):
+    for hostile in (
+        "Gi0/0/0\n no shutdown\n config terminal",
+        "Gi 0/0/0",  # space
+        "x" * 32,  # too long
+        "",
+    ):
         with pytest.raises(ValueError, match="invalid interface name"):
-            wt.set_interface_ip(hostile, "10.0.0.1", "255.255.255.0",
-                                action_id="anything")
+            wt.set_interface_ip(hostile, "10.0.0.1", "255.255.255.0", action_id="anything")

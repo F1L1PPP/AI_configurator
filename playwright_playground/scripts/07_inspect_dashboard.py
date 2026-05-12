@@ -104,13 +104,13 @@ def main() -> int:
         print("Locator counts for 'Administration':")
         print("=" * 60)
         for label, selector in [
-            ("text=Administration",                 "text=Administration"),
-            ("a:has-text('Administration')",        "a:has-text('Administration')"),
-            ("span:has-text('Administration')",     "span:has-text('Administration')"),
-            ("[routerlink*='administration' i]",    "[routerlink*='administration' i]"),
-            ("[href*='administration' i]",          "[href*='administration' i]"),
-            ("text=Configuration",                  "text=Configuration"),
-            ("text=Dashboard",                      "text=Dashboard"),
+            ("text=Administration", "text=Administration"),
+            ("a:has-text('Administration')", "a:has-text('Administration')"),
+            ("span:has-text('Administration')", "span:has-text('Administration')"),
+            ("[routerlink*='administration' i]", "[routerlink*='administration' i]"),
+            ("[href*='administration' i]", "[href*='administration' i]"),
+            ("text=Configuration", "text=Configuration"),
+            ("text=Dashboard", "text=Dashboard"),
         ]:
             try:
                 count = page.locator(selector).count()

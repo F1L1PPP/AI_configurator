@@ -77,9 +77,7 @@ def _validate_ipv4(value: str, kind: str) -> None:
     try:
         ipaddress.IPv4Address(value)
     except (ipaddress.AddressValueError, ValueError) as exc:
-        raise ValueError(
-            f"invalid IPv4 {kind} {value!r}: {exc}"
-        ) from exc
+        raise ValueError(f"invalid IPv4 {kind} {value!r}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +111,7 @@ def set_hostname(new_name: str, action_id: str) -> dict:
 
     Raises ValueError on invalid hostname BEFORE any router contact.
     """
-    _validate_hostname(new_name)   # before the approval check — fail-fast
+    _validate_hostname(new_name)  # before the approval check — fail-fast
     _guard(action_id)
 
     t0 = time.monotonic()
@@ -153,12 +151,12 @@ def set_hostname(new_name: str, action_id: str) -> dict:
     )
 
     return {
-        "tool":          "set_hostname",
-        "params":        {"name": new_name},
-        "output":        output,
-        "snapshot_pre":  str(pre_dir),
+        "tool": "set_hostname",
+        "params": {"name": new_name},
+        "output": output,
+        "snapshot_pre": str(pre_dir),
         "snapshot_post": str(post_dir),
-        "duration_ms":   ms,
+        "duration_ms": ms,
     }
 
 
@@ -177,7 +175,7 @@ def set_interface_ip(
     Raises ValueError on invalid interface/ip/mask BEFORE any router contact.
     """
     _validate_interface(interface)
-    _validate_ipv4(ip,   "address")
+    _validate_ipv4(ip, "address")
     _validate_ipv4(mask, "mask")
     _guard(action_id)
 
@@ -217,10 +215,10 @@ def set_interface_ip(
     )
 
     return {
-        "tool":          "set_interface_ip",
-        "params":        {"interface": interface, "ip": ip, "mask": mask},
-        "output":        output,
-        "snapshot_pre":  str(pre_dir),
+        "tool": "set_interface_ip",
+        "params": {"interface": interface, "ip": ip, "mask": mask},
+        "output": output,
+        "snapshot_pre": str(pre_dir),
         "snapshot_post": str(post_dir),
-        "duration_ms":   ms,
+        "duration_ms": ms,
     }

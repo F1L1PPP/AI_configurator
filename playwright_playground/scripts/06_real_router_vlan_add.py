@@ -45,17 +45,18 @@ from playwright.sync_api import TimeoutError as PWTimeout
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
-BASE_URL   = os.environ.get("ROUTER_WEBUI_BASE_URL", "https://192.168.10.1")
-USERNAME   = os.environ.get("ROUTER_WEBUI_USER",     "cisco")
-PASSWORD   = os.environ.get("ROUTER_WEBUI_PASSWORD", "REPLACE-ME")
-VLAN_ID    = os.environ.get("VLAN_ID",               "99")
-VLAN_NAME  = os.environ.get("VLAN_NAME",             "TEST-PLAYWRIGHT")
-DRY_RUN    = os.environ.get("PLAYWRIGHT_DRY_RUN", "true").lower() not in ("false", "0", "no")
+BASE_URL = os.environ.get("ROUTER_WEBUI_BASE_URL", "https://192.168.10.1")
+USERNAME = os.environ.get("ROUTER_WEBUI_USER", "cisco")
+PASSWORD = os.environ.get("ROUTER_WEBUI_PASSWORD", "REPLACE-ME")
+VLAN_ID = os.environ.get("VLAN_ID", "99")
+VLAN_NAME = os.environ.get("VLAN_NAME", "TEST-PLAYWRIGHT")
+DRY_RUN = os.environ.get("PLAYWRIGHT_DRY_RUN", "true").lower() not in ("false", "0", "no")
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _first_visible(candidates: list[Locator]) -> Locator | None:
     """Return the first locator in the list that exists in the DOM."""
@@ -81,6 +82,7 @@ def _wait_idle(page: Page, timeout_ms: int = 10_000) -> None:
 # Step 1 — Login  (same multi-strategy approach as script 05)
 # ---------------------------------------------------------------------------
 
+
 def do_login(page: Page, step: Step, session: Path) -> bool:
     print("\n1. Open WebUI")
     page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -88,24 +90,30 @@ def do_login(page: Page, step: Step, session: Path) -> bool:
     step("01-login-page", page)
 
     print("\n2. Fill credentials")
-    user_loc = _first_visible([
-        page.get_by_label("Username", exact=False),
-        page.locator("input[name='username']"),
-        page.locator("input[id*='user' i]"),
-        page.locator("input[type='text']").first,
-    ])
-    pass_loc = _first_visible([
-        page.get_by_label("Password", exact=False),
-        page.locator("input[name='password']"),
-        page.locator("input[type='password']"),
-    ])
-    submit_loc = _first_visible([
-        page.get_by_role("button", name="Log In"),
-        page.get_by_role("button", name="Login"),
-        page.get_by_role("button", name="Sign In"),
-        page.locator("button[type='submit']"),
-        page.locator("input[type='submit']"),
-    ])
+    user_loc = _first_visible(
+        [
+            page.get_by_label("Username", exact=False),
+            page.locator("input[name='username']"),
+            page.locator("input[id*='user' i]"),
+            page.locator("input[type='text']").first,
+        ]
+    )
+    pass_loc = _first_visible(
+        [
+            page.get_by_label("Password", exact=False),
+            page.locator("input[name='password']"),
+            page.locator("input[type='password']"),
+        ]
+    )
+    submit_loc = _first_visible(
+        [
+            page.get_by_role("button", name="Log In"),
+            page.get_by_role("button", name="Login"),
+            page.get_by_role("button", name="Sign In"),
+            page.locator("button[type='submit']"),
+            page.locator("input[type='submit']"),
+        ]
+    )
 
     if not user_loc or not pass_loc:
         print("  ! login fields not found — dumping DOM")
@@ -133,6 +141,7 @@ def do_login(page: Page, step: Step, session: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Step 2 — Navigate to the VLAN page
 # ---------------------------------------------------------------------------
+
 
 def _click_first_match(page: Page, candidates: list[str], timeout_ms: int = 5_000) -> bool:
     """Try each CSS/text selector in order; click the first that is visible."""
@@ -247,6 +256,7 @@ def navigate_to_vlan_page(page: Page, step: Step, session: Path) -> bool:
 # Step 3 — Click Add, fill the VLAN form, cancel or save
 # ---------------------------------------------------------------------------
 
+
 def fill_vlan_form(page: Page, step: Step, session: Path) -> bool:
     print(f"\n6. Click Add (DRY_RUN={DRY_RUN}, VLAN_ID={VLAN_ID}, VLAN_NAME={VLAN_NAME})")
     add_candidates = [
@@ -268,33 +278,37 @@ def fill_vlan_form(page: Page, step: Step, session: Path) -> bool:
     step("06-add-form-opened", page)
 
     print("\n7. Fill VLAN ID")
-    vlan_id_loc = _first_visible([
-        page.get_by_label("VLAN ID", exact=False),
-        page.locator("input[placeholder*='VLAN ID' i]"),
-        page.locator("input[placeholder*='vlan' i]"),
-        page.locator("input[id*='vlan' i]"),
-        page.locator("input[name*='vlan' i]"),
-        page.locator("input[type='number']").first,
-        page.locator("input[type='text']").first,
-    ])
+    vlan_id_loc = _first_visible(
+        [
+            page.get_by_label("VLAN ID", exact=False),
+            page.locator("input[placeholder*='VLAN ID' i]"),
+            page.locator("input[placeholder*='vlan' i]"),
+            page.locator("input[id*='vlan' i]"),
+            page.locator("input[name*='vlan' i]"),
+            page.locator("input[type='number']").first,
+            page.locator("input[type='text']").first,
+        ]
+    )
     if not vlan_id_loc:
         print("  ! VLAN ID field not found — dumping DOM")
         _dump_dom(page, session, "07-no-vlan-id-field")
         step("07-vlan-id-missing", page)
         return False
-    vlan_id_loc.first.triple_click()   # select-all then replace
+    vlan_id_loc.first.triple_click()  # select-all then replace
     vlan_id_loc.first.fill(VLAN_ID)
     print(f"  filled VLAN ID = {VLAN_ID}")
 
     print("\n8. Fill VLAN Name")
-    vlan_name_loc = _first_visible([
-        page.get_by_label("VLAN Name", exact=False),
-        page.get_by_label("Name", exact=False),
-        page.locator("input[placeholder*='name' i]"),
-        page.locator("input[id*='name' i]"),
-        page.locator("input[name*='name' i]"),
-        page.locator("input[type='text']").nth(1),  # second text input after VLAN ID
-    ])
+    vlan_name_loc = _first_visible(
+        [
+            page.get_by_label("VLAN Name", exact=False),
+            page.get_by_label("Name", exact=False),
+            page.locator("input[placeholder*='name' i]"),
+            page.locator("input[id*='name' i]"),
+            page.locator("input[name*='name' i]"),
+            page.locator("input[type='text']").nth(1),  # second text input after VLAN ID
+        ]
+    )
     if vlan_name_loc:
         vlan_name_loc.first.triple_click()
         vlan_name_loc.first.fill(VLAN_NAME)
@@ -347,6 +361,7 @@ def fill_vlan_form(page: Page, step: Step, session: Path) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     if PASSWORD == "REPLACE-ME":
         print("ERROR: .env still has placeholder password. Populate ROUTER_WEBUI_PASSWORD first.")
@@ -361,14 +376,14 @@ def main() -> int:
         browser = p.chromium.launch(
             headless=False,
             slow_mo=500,
-            args=["--ignore-certificate-errors"],   # belt-and-suspenders for the self-signed cert
+            args=["--ignore-certificate-errors"],  # belt-and-suspenders for the self-signed cert
         )
         context = browser.new_context(
             ignore_https_errors=True,
             viewport={"width": 1400, "height": 900},
         )
         page = context.new_page()
-        page.on("console",   lambda m: print(f"  [console.{m.type}] {m.text[:200]}"))
+        page.on("console", lambda m: print(f"  [console.{m.type}] {m.text[:200]}"))
         page.on("pageerror", lambda e: print(f"  [pageerror] {e}"))
 
         step = Step(session)

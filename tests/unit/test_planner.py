@@ -86,7 +86,7 @@ def test_history_contains_user_and_assistant_messages():
 def test_tool_use_executes_then_continues(monkeypatch):
     # First response: model wants to call show_version
     # Second response: model has the result and produces final text
-    first  = _response(
+    first = _response(
         _tool_use_block("show_version", {}, "tu_a"),
         stop_reason="tool_use",
     )
@@ -118,7 +118,7 @@ def test_tool_use_executes_then_continues(monkeypatch):
 
 
 def test_awaiting_approval_event_emitted_for_propose_tool():
-    first  = _response(
+    first = _response(
         _tool_use_block("propose_set_hostname", {"new_name": "LAB-R1"}, "tu_b"),
         stop_reason="tool_use",
     )

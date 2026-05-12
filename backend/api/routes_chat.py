@@ -41,10 +41,10 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    final_text:        str
-    events:            list[dict[str, Any]]
-    history:           list[dict[str, Any]]
-    stop_reason:       str
+    final_text: str
+    events: list[dict[str, Any]]
+    history: list[dict[str, Any]]
+    stop_reason: str
     awaiting_approval: str | None = None
 
 
@@ -66,9 +66,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # Offload to a threadpool so the FastAPI event loop stays free for
     # concurrent requests (BackendStatus + RecentActions poll every few s).
     try:
-        result = await run_in_threadpool(
-            run_planner, req.message, history=req.history
-        )
+        result = await run_in_threadpool(run_planner, req.message, history=req.history)
     except NotApproved as exc:
         # Write attempted without approval — semantically 403 Forbidden, not 500
         log.info("chat_not_approved", error=str(exc))

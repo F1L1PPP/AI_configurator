@@ -33,8 +33,8 @@ from backend.orchestration.tool_registry import TOOL_SCHEMAS, execute_tool
 
 log = get_logger(__name__)
 
-MODEL          = "claude-haiku-4-5-20251001"
-MAX_TOKENS     = 4096
+MODEL = "claude-haiku-4-5-20251001"
+MAX_TOKENS = 4096
 MAX_ITERATIONS = 8
 
 
@@ -111,15 +111,15 @@ rather than dumping the raw output."""
 class PlannerEvent:
     """One event in the planner's execution trace."""
 
-    kind: str                              # agent_thinking | tool_call | tool_result | awaiting_approval | applied | error
+    kind: str  # agent_thinking | tool_call | tool_result | awaiting_approval | applied | error
     data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class PlannerResult:
     final_text: str
-    events:     list[PlannerEvent]
-    messages:   list[dict[str, Any]]       # full conversation, for follow-up turns
+    events: list[PlannerEvent]
+    messages: list[dict[str, Any]]  # full conversation, for follow-up turns
     stop_reason: str = "end_turn"
 
 
@@ -127,9 +127,7 @@ def _text_from_response(response: Any) -> str:
     """Concatenate all text blocks in an Anthropic Message response."""
     # Single-pass generator + join — no manual loop / list growth.
     return "\n".join(
-        block.text
-        for block in response.content
-        if getattr(block, "type", None) == "text"
+        block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
 
 
@@ -150,12 +148,14 @@ def _serialize_assistant_content(response: Any) -> list[dict]:
         if kind == "text":
             out.append({"type": "text", "text": block.text})
         elif kind == "tool_use":
-            out.append({
-                "type":  "tool_use",
-                "id":    block.id,
-                "name":  block.name,
-                "input": block.input,
-            })
+            out.append(
+                {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                }
+            )
         else:
             # Future-proof: preserve unknown block via the SDK's Pydantic
             # serializer. Log so we notice new block types showing up.
@@ -228,31 +228,48 @@ def run_planner(
             if getattr(block, "type", None) != "tool_use":
                 continue
 
-            events.append(PlannerEvent("tool_call", {
-                "name":  block.name,
-                "input": block.input,
-                "id":    block.id,
-            }))
+            events.append(
+                PlannerEvent(
+                    "tool_call",
+                    {
+                        "name": block.name,
+                        "input": block.input,
+                        "id": block.id,
+                    },
+                )
+            )
             log.info("tool_call", tool=block.name, params=block.input)
 
             result = execute_tool(block.name, dict(block.input))
-            events.append(PlannerEvent("tool_result", {
-                "name":   block.name,
-                "result": result,
-            }))
+            events.append(
+                PlannerEvent(
+                    "tool_result",
+                    {
+                        "name": block.name,
+                        "result": result,
+                    },
+                )
+            )
 
             # Surface action proposals as a dedicated event for UI consumption
             if isinstance(result, dict) and result.get("status") == "awaiting_approval":
-                events.append(PlannerEvent("awaiting_approval", {
-                    "action_id": result.get("action_id"),
-                    "preview":   result.get("preview"),
-                }))
+                events.append(
+                    PlannerEvent(
+                        "awaiting_approval",
+                        {
+                            "action_id": result.get("action_id"),
+                            "preview": result.get("preview"),
+                        },
+                    )
+                )
 
-            tool_result_blocks.append({
-                "type":        "tool_result",
-                "tool_use_id": block.id,
-                "content":     json.dumps(result, default=str),
-            })
+            tool_result_blocks.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result, default=str),
+                }
+            )
 
         messages.append({"role": "user", "content": tool_result_blocks})
 

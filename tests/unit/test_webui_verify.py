@@ -58,7 +58,7 @@ def test_verify_hostname_handles_regex_special_chars_in_name():
 
 def test_verify_vlan_true_when_id_present():
     rows = [
-        {"vlan_id": "1",  "name": "default"},
+        {"vlan_id": "1", "name": "default"},
         {"vlan_id": "10", "name": "MANAGEMENT"},
     ]
     with patch("backend.webui_agent.verify.show_vlan_brief", return_value=rows):

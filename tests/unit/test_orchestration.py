@@ -139,6 +139,7 @@ def test_concurrent_approve_reject_lands_in_one_consistent_state():
     def reject_worker():
         barrier.wait()
         from backend.orchestration.confirmations import reject_action
+
         reject_action(action_id)
         results.append("reject")
 
@@ -177,5 +178,5 @@ def test_concurrent_propose_does_not_collide():
         t.join()
 
     assert len(ids) == 100
-    assert len(set(ids)) == 100        # all unique
-    assert len(_actions) == 100         # store has every one
+    assert len(set(ids)) == 100  # all unique
+    assert len(_actions) == 100  # store has every one
