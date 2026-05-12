@@ -1,3 +1,5 @@
+import ApprovalButtons from "@/components/preview/ApprovalButtons";
+
 const plannedActions = [
   {
     n: "01",
@@ -38,7 +40,13 @@ const KeyVal = ({ k, v }: { k: string; v: string }) => (
   </div>
 );
 
-export default function PreviewPage() {
+export default function PreviewPage({
+  searchParams,
+}: {
+  searchParams?: { action_id?: string };
+}) {
+  const actionId = searchParams?.action_id;
+
   return (
     <div className="grid grid-cols-[1fr_280px] gap-4">
       <section className="flex flex-col gap-4">
@@ -74,23 +82,11 @@ export default function PreviewPage() {
             <span className="tech-label">Change Summary</span>
           </div>
           <pre className="mono overflow-x-auto bg-terminal-bg p-3.5 text-[10px] leading-relaxed text-terminal-fg">
-            {`- hostname Router-12345
-+ hostname LAB-R1`}
+            {`- hostname Router-12345\n+ hostname LAB-R1`}
           </pre>
         </section>
 
-        <div className="flex gap-3">
-          <button className="mono flex-1 border border-ink bg-ink px-4 py-2.5 text-[9px] tracking-wider text-surface hover:opacity-90">
-            APPROVE & EXECUTE
-          </button>
-          <button className="mono flex-1 border border-ink px-4 py-2.5 text-[9px] tracking-wider text-ink hover:bg-page">
-            REJECT
-          </button>
-        </div>
-
-        <p className="mono text-[8px] tracking-wider text-ink-faint">
-          DAY 1: BUTTONS ARE DECORATIVE · DAY 3: POST /API/APPROVE/{"{action_id}"}
-        </p>
+        <ApprovalButtons actionId={actionId} />
       </section>
 
       <aside className="flex flex-col gap-4">
@@ -121,11 +117,11 @@ export default function PreviewPage() {
             <span className="tech-label">Action Context</span>
           </div>
           <div className="p-3.5">
-            <KeyVal k="ACTION_ID" v="act_2026-05-11_8af3c2" />
+            <KeyVal k="ACTION_ID" v={actionId ?? "—"} />
             <KeyVal k="REQUESTED_BY" v="filip" />
-            <KeyVal k="TARGET" v="192.168.1.1" />
-            <KeyVal k="DEVICE" v="C1111-8P (LAB)" />
-            <KeyVal k="TOOL" v="webui_change_hostname" />
+            <KeyVal k="TARGET" v="192.168.10.1" />
+            <KeyVal k="DEVICE" v="C1111 (LAB)" />
+            <KeyVal k="TOOL" v="set_hostname" />
             <KeyVal k="WRITES" v="1" />
             <KeyVal k="READS" v="1 (verify)" />
           </div>
@@ -136,11 +132,11 @@ export default function PreviewPage() {
             <span className="tech-label">Pre-snapshot</span>
           </div>
           <div className="space-y-1 p-3.5 text-[10px] text-ink-muted">
-            <div>· running-config (2.4 kB)</div>
+            <div>· running-config</div>
             <div>· show version</div>
             <div>· show ip int brief</div>
             <div className="mono mt-2 text-[8px] tracking-wider text-ink-line">
-              artifacts/device-snapshots/act_…
+              artifacts/device-snapshots/{actionId ?? "act_…"}
             </div>
           </div>
         </section>
