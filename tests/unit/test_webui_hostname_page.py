@@ -31,6 +31,9 @@ def _page_with(strategies_to_locator: dict) -> MagicMock:
     """Build a mock Page that returns specific locators for specific calls.
 
     Strategies key shape: {label}, {role:name}, {locator:selector}.
+    The mock also supplies a wait_for on every returned locator so the
+    'wait for menu to render' preamble in HostnamePage.goto() resolves
+    cleanly in unit tests.
     """
     page = MagicMock()
 
@@ -60,8 +63,8 @@ def test_goto_clicks_administration_then_device_properties():
     admin_loc = _loc()
     dp_loc    = _loc()
     page = _page_with({
-        "locator:text=/^Administration$/i":      admin_loc,
-        "locator:text=/Device Properties/i":     dp_loc,
+        "locator:text=Administration":         admin_loc,
+        "locator:text=Device Properties":      dp_loc,
     })
 
     hp = HostnamePage(page)
@@ -80,7 +83,7 @@ def test_goto_raises_when_admin_menu_missing():
 
 def test_goto_raises_when_device_properties_missing():
     page = _page_with({
-        "locator:text=/^Administration$/i": _loc(),
+        "locator:text=Administration": _loc(),
         # No Device Properties locator
     })
     hp = HostnamePage(page)

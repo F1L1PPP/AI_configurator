@@ -32,26 +32,34 @@ login:
 
 # -----------------------------------------------------------------
 # Top-level navigation (priv-15 user)
+#
+# IMPORTANT: Cisco IOS XE wraps menu labels in <span> inside <a> elements,
+# with whitespace and icon nodes around the text. ANCHORED regex like
+# /^Administration$/i FAILS because the element's full text content is
+# " Administration\n..." not "Administration".
+#
+# Use plain substring matching: `text=Administration` is case-insensitive
+# and ignores whitespace by default in Playwright.
 # -----------------------------------------------------------------
 nav:
   dashboard:
-    - { text: "/^Dashboard$/i" }
+    - { text: "Dashboard" }
     - { css: "a:has-text('Dashboard')" }
     - { css: "[routerlink*='dashboard' i]" }
   monitoring:
-    - { text: "/^Monitoring$/i" }
+    - { text: "Monitoring" }
     - { css: "a:has-text('Monitoring')" }
   configuration:
-    - { text: "/^Configuration$/i" }
+    - { text: "Configuration" }
     - { css: "a:has-text('Configuration')" }
     - { css: "[routerlink*='configuration' i]" }
     - { css: "[href*='configuration' i]" }
   administration:
-    - { text: "/^Administration$/i" }
+    - { text: "Administration" }
     - { css: "a:has-text('Administration')" }
     - { css: "[routerlink*='administration' i]" }
   troubleshooting:
-    - { text: "/^Troubleshooting$/i" }
+    - { text: "Troubleshooting" }
     - { css: "a:has-text('Troubleshooting')" }
 
 # -----------------------------------------------------------------
@@ -59,15 +67,13 @@ nav:
 # -----------------------------------------------------------------
 vlan_nav:
   layer2:
-    - { text: "/layer.?2/i" }
+    - { text: "Layer 2" }
     - { css: "a:has-text('Layer 2')" }
     - { css: "span:has-text('Layer 2')" }
     - { css: "[routerlink*='layer2' i]" }
     - { css: "[routerlink*='layer-2' i]" }
   vlan:
-    - { text: "/^VLAN$/i" }
-    - { text: "/vlan.database/i" }
-    - { text: "/vlan.config/i" }
+    - { text: "VLAN" }
     - { css: "a:has-text('VLAN')" }
     - { css: "[routerlink*='vlan' i]" }
 
@@ -105,7 +111,7 @@ vlan_form:
 # -----------------------------------------------------------------
 hostname_nav:
   device_properties:
-    - { text: "/Device Properties/i" }
+    - { text: "Device Properties" }
     - { css: "a:has-text('Device Properties')" }
     - { css: "[routerlink*='device-properties' i]" }
     - { css: "[routerlink*='device_properties' i]" }

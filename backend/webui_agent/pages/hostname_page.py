@@ -10,7 +10,10 @@ any locator. If the yaml changes, the POM keeps working.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
+
+from playwright.sync_api import TimeoutError as PWTimeout
 
 from backend.core.logging import get_logger
 from backend.webui_agent.browser import wait_for_networkidle
@@ -21,6 +24,8 @@ if TYPE_CHECKING:
     from playwright.sync_api import Page
 
 log = get_logger(__name__)
+
+MENU_RENDER_TIMEOUT_MS = 15_000  # Angular dashboard render after login
 
 
 class HostnameNavigationError(RuntimeError):
@@ -52,16 +57,37 @@ class HostnamePage:
     # ---------------------------------------------------------------------
 
     def goto(self) -> None:
-        """Click Administration → Device Properties from any post-login page."""
+        """Click Administration → Device Properties from any post-login page.
+
+        Angular renders the sidebar AFTER the initial post-login redirect, so
+        we wait up to MENU_RENDER_TIMEOUT_MS for the Administration menu item
+        to appear before resolving the locator chain. Without this wait the
+        flow races the dashboard and finds nothing.
+        """
         log.info("hostname_page_goto_start")
+
+        # Wait for the dashboard to actually render the sidebar
+        with contextlib.suppress(PWTimeout, Exception):
+            self.page.locator("text=Administration").first.wait_for(
+                state="visible",
+                timeout=MENU_RENDER_TIMEOUT_MS,
+            )
 
         admin = first_match(self.page, self._sel["nav"]["administration"])
         if admin is None:
             raise HostnameNavigationError(
-                "Administration menu not visible — priv-15 user required"
+                "Administration menu not visible — priv-15 user required, "
+                "or selectors out of date (run docs/codegen-howto.md)"
             )
         admin.click()
         wait_for_networkidle(self.page, 10_000)
+
+        # Same race: the submenu pops on click but the route may need a beat
+        with contextlib.suppress(PWTimeout, Exception):
+            self.page.locator("text=Device Properties").first.wait_for(
+                state="visible",
+                timeout=MENU_RENDER_TIMEOUT_MS,
+            )
 
         dp = first_match(self.page, self._sel["hostname_nav"]["device_properties"])
         if dp is None:
