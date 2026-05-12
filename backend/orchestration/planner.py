@@ -1,0 +1,220 @@
+"""LLM-driven planner — Anthropic tool-use loop.
+
+Translates natural-language requests into tool calls against the Cisco C1111.
+Claude (Sonnet 4.6) picks the tool and extracts parameters; this module
+executes the picked tool deterministically and feeds results back to the
+model until it produces a final text answer.
+
+Safety:
+- Read tools execute immediately.
+- Write tools are always two-step: Claude calls `propose_*` first, which
+  registers an action_id in PROPOSED state. The human must approve it via
+  POST /api/approve/{action_id} before Claude calls the matching execute
+  tool. The execute tool itself also re-checks `is_approved()` server-side.
+- Hard cap on tool-use iterations to prevent runaway loops.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+from anthropic import Anthropic
+
+from backend.core.logging import get_logger
+from backend.core.settings import get_settings
+from backend.orchestration.tool_registry import TOOL_SCHEMAS, execute_tool
+
+log = get_logger(__name__)
+
+MODEL          = "claude-sonnet-4-6"
+MAX_TOKENS     = 4096
+MAX_ITERATIONS = 8
+
+
+SYSTEM_PROMPT = """\
+You are a Cisco network configuration assistant for a single Cisco C1111 \
+router. Speak Slovak by default; switch to English if the user writes in \
+English or asks for it.
+
+## Tools you have
+
+Read (safe to call anytime):
+- show_version, show_ip_interface_brief, show_running_config, show_vlan_brief
+
+Write (two-step — always propose first, then wait for human approval):
+- propose_set_hostname -> set_hostname
+- propose_set_interface_ip -> set_interface_ip
+
+## Hard rules
+
+1. Never call set_hostname or set_interface_ip directly. Always call the
+   matching propose_* tool first. The propose_* tool returns an action_id;
+   stop and tell the user to approve it in the Preview screen. Only call
+   the execute tool when the user comes back and confirms approval (and
+   includes the action_id, or it's clear from context which one).
+
+2. Never invent device data. If the user asks something you don't know,
+   call a read tool first.
+
+3. Stay in scope: hostname changes, interface IP assignments, and read
+   operations. If asked for OSPF/ACL/DHCP/static routes/anything else,
+   politely refuse and explain what's in scope.
+
+4. One C1111 only — no multi-device targeting.
+
+5. If a tool returns an error, surface it to the user clearly. Never retry
+   a write operation automatically.
+
+## Response style
+
+Concise. Use Markdown sparingly. When you've shown the user data from a
+read tool, summarize the key fact (e.g. "Vlan1 is up at 192.168.10.1") \
+rather than dumping the raw output."""
+
+
+@dataclass
+class PlannerEvent:
+    """One event in the planner's execution trace."""
+
+    kind: str                              # agent_thinking | tool_call | tool_result | awaiting_approval | applied | error
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PlannerResult:
+    final_text: str
+    events:     list[PlannerEvent]
+    messages:   list[dict[str, Any]]       # full conversation, for follow-up turns
+    stop_reason: str = "end_turn"
+
+
+def _text_from_response(response: Any) -> str:
+    """Concatenate all text blocks in an Anthropic Message response."""
+    chunks: list[str] = []
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            chunks.append(block.text)
+    return "\n".join(chunks).strip()
+
+
+def _serialize_assistant_content(response: Any) -> list[dict]:
+    """Convert response.content (list of typed blocks) into wire-format dicts.
+
+    Anthropic SDK returns ContentBlock objects; for follow-up turns we need
+    the dict form to append back to messages.
+    """
+    out: list[dict] = []
+    for block in response.content:
+        kind = getattr(block, "type", None)
+        if kind == "text":
+            out.append({"type": "text", "text": block.text})
+        elif kind == "tool_use":
+            out.append({
+                "type":  "tool_use",
+                "id":    block.id,
+                "name":  block.name,
+                "input": block.input,
+            })
+    return out
+
+
+def run_planner(
+    user_message: str,
+    history: list[dict[str, Any]] | None = None,
+    client: Anthropic | None = None,
+) -> PlannerResult:
+    """Run one turn of the planner.
+
+    Args:
+        user_message: The new user message to append to the conversation.
+        history: Previous messages from earlier turns (assistant + tool_result
+            blocks). Pass None on the first turn.
+        client: Inject an Anthropic client for tests. Defaults to a fresh
+            client built from settings.
+
+    Returns a PlannerResult with the final text, the event trace, and the
+    full message history to pass to the next turn.
+    """
+    settings = get_settings()
+    if client is None:
+        client = Anthropic(api_key=settings.anthropic_api_key)
+
+    messages: list[dict[str, Any]] = list(history or [])
+    messages.append({"role": "user", "content": user_message})
+
+    events: list[PlannerEvent] = []
+
+    for iteration in range(MAX_ITERATIONS):
+        events.append(PlannerEvent("agent_thinking", {"iteration": iteration}))
+        log.info("planner_iteration", iteration=iteration)
+
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            tools=TOOL_SCHEMAS,
+            messages=messages,
+        )
+
+        stop_reason = response.stop_reason
+
+        # Always append the assistant's full content (text + tool_use blocks)
+        assistant_content = _serialize_assistant_content(response)
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if stop_reason != "tool_use":
+            # end_turn, max_tokens, stop_sequence, etc.
+            final_text = _text_from_response(response)
+            log.info("planner_done", stop_reason=stop_reason, iterations=iteration + 1)
+            return PlannerResult(
+                final_text=final_text,
+                events=events,
+                messages=messages,
+                stop_reason=stop_reason,
+            )
+
+        # Tool use — execute each tool_use block and append tool_results
+        tool_result_blocks: list[dict] = []
+        for block in response.content:
+            if getattr(block, "type", None) != "tool_use":
+                continue
+
+            events.append(PlannerEvent("tool_call", {
+                "name":  block.name,
+                "input": block.input,
+                "id":    block.id,
+            }))
+            log.info("tool_call", tool=block.name, params=block.input)
+
+            result = execute_tool(block.name, dict(block.input))
+            events.append(PlannerEvent("tool_result", {
+                "name":   block.name,
+                "result": result,
+            }))
+
+            # Surface action proposals as a dedicated event for UI consumption
+            if isinstance(result, dict) and result.get("status") == "awaiting_approval":
+                events.append(PlannerEvent("awaiting_approval", {
+                    "action_id": result.get("action_id"),
+                    "preview":   result.get("preview"),
+                }))
+
+            tool_result_blocks.append({
+                "type":        "tool_result",
+                "tool_use_id": block.id,
+                "content":     json.dumps(result, default=str),
+            })
+
+        messages.append({"role": "user", "content": tool_result_blocks})
+
+    # Hit iteration cap
+    events.append(PlannerEvent("error", {"reason": "iteration_cap_reached"}))
+    log.warning("planner_iteration_cap", iterations=MAX_ITERATIONS)
+    return PlannerResult(
+        final_text="(stopped: too many tool-use iterations)",
+        events=events,
+        messages=messages,
+        stop_reason="iteration_cap",
+    )
