@@ -299,8 +299,21 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
         log.warning("tool_bad_params", tool=name, params=params, error=str(exc))
         return {"error": "bad_parameters", "message": str(exc)}
     except Exception as exc:
-        log.error("tool_exception", tool=name, error=str(exc))
-        return {"error": "tool_failed", "message": str(exc)}
+        # Some exceptions stringify to empty (bare Exception()). Always include
+        # the exception class name so the operator has *something* to grep.
+        msg = str(exc) or repr(exc) or type(exc).__name__
+        log.error(
+            "tool_exception",
+            tool=name,
+            exc_type=type(exc).__name__,
+            error=msg,
+            exc_info=True,
+        )
+        return {
+            "error":    "tool_failed",
+            "exc_type": type(exc).__name__,
+            "message":  msg,
+        }
 
     # Normalize to dict if a tool returns str/list
     if isinstance(result, dict):
