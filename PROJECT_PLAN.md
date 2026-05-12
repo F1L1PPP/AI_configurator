@@ -315,23 +315,23 @@ Each day allocates roughly **3.5h backend + 1.5h GUI + 1h test/commit/push**. Ha
 - Full round-trip proven on real router: hostname `c1111-lab` → `LAB-R1` → restored
 - **Tag:** `v0.1.0-cli-core` (created 2026-05-12)
 
-### 🟡 Day 4 — Orchestrator (DONE 2026-05-12) + WebUI discovery (REMAINING)
+### ✓ Day 4 — Orchestrator + WebUI discovery (DONE 2026-05-12)
 
-**Done early (was Day 6 of the plan):**
-- `orchestration/tool_registry.py` — 8 Anthropic-format schemas (4 read + 2 propose + 2 execute) with dispatcher that catches `NotApproved`/`TypeError`/exceptions
-- `orchestration/planner.py` — Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) tool-use loop, SK/EN bilingual prompt, hard cap 8 iterations, structured events
-- `api/routes_chat.py` — sync `POST /api/chat`, surfaces `awaiting_approval` action_id at top level
-- 19 new tests, 66 total, all green
+**Orchestrator (commits `e5c4414` + `684ead8`):**
+- `orchestration/tool_registry.py` — 8 Anthropic-format schemas (4 read + 2 propose + 2 execute) with two-layer defense-in-depth approval gate (PR review fix in `809cdf0`)
+- `orchestration/planner.py` — Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) tool-use loop, SK/EN bilingual prompt, hard cap 8 iterations, structured events, model_dump fallback for unknown content blocks
+- `api/routes_chat.py` — `POST /api/chat` with `run_in_threadpool` to keep the FastAPI loop responsive while planner does blocking I/O
 - Full natural-language round-trip proven: "ukáž mi rozhrania" parsed in Slovak; "zmeň hostname na LAB-R1" → propose → approve → execute in 1.29 s
 
-**Remaining for Day 4 (next session):**
-- Playwright codegen on real router for both flows (Configuration → VLANs → Add VLAN; Administration → Device Properties), save to `playwright_playground/draft_real_router_codegen.py` (gitignored)
-- `backend/webui_agent/browser.py` — headed-dev launcher, `ignore_https_errors=True`, pinned viewport, `--ignore-certificate-errors` Chromium arg, `wait_for_networkidle` helper
-- `backend/webui_agent/login.py` — login class, 5-min keepalive, relogin detection on session-expired redirect
-- `backend/webui_agent/selectors/iosxe_default.yaml` — role/text/css fallback strategies per element captured from codegen output
-- `backend/webui_agent/evidence.py` — `Step` helper (numbered screenshots + DOM dump on error) lifted from playground `_helpers.py`
-- GUI: `/webui-live` action-timeline component skeleton (mocked steps; real WS in Day 5)
-- **Commit + push + Playwright trace stored as artifact**
+**WebUI discovery scaffolds (commit `5c048b0`):**
+- `backend/webui_agent/browser.py` — `webui_browser()` context manager, viewport-pinned, cert-bypassed, console+pageerror → structlog, networkidle suppression helper
+- `backend/webui_agent/login.py` — `first_match()` yaml-driven strategy walker, `login()`/`ensure_logged_in()`/`start_keepalive()` for 5-min idle timeout
+- `backend/webui_agent/evidence.py` — `EvidenceCollector` with auto-numbered screenshots + DOM dump
+- `backend/webui_agent/selectors/iosxe_default.yaml` — role/label/text/css fallback chains for login, top nav, VLAN form, hostname form, session-expired detection
+- `frontend/components/webui-agent/PhaseProgress.tsx` + `ActionTimeline.tsx` — extracted from `/webui-live` page, prop-driven so Day 5 swaps mocks for real events with zero page changes
+- `docs/codegen-howto.md` — step-by-step for running `playwright codegen` against the real C1111
+- **Deferred (Filip-driven):** Playwright codegen capture against the real router; not blocking — scripts 05/06 seeded the yaml fallbacks well enough that Day 5 flows should work; refinement when needed.
+- 97 unit tests passing
 
 ### Day 5 — WebUI hostname flow + WebSocket events
 
