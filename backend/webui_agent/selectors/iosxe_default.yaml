@@ -126,31 +126,39 @@ vlan_form:
 # (priv-15 menus sometimes hidden even though the user has the role).
 # -----------------------------------------------------------------
 hostname_form:
-  # The Cisco IOS XE 17.6.3a form does NOT use proper <label> elements for
-  # field captions — the "Host Name" caption is loose text in a sibling
-  # element. So get_by_label() fails. Real DOM is AngularJS 1.x with
-  # ng-model bindings. The XPath-via-text strategy is the most reliable
-  # fallback: find the "Host Name" text, then the first <input> after it.
+  # Verified from actual DOM (IOS XE 17.6.3a, Kendo UI + AngularJS 1.x):
+  #   <input name="switchName" id="switchName"
+  #          data-ng-model="jsonData.general.name"
+  #          class="k-textbox form-control ..."
+  #          required data-maximum="33" ng-change="enableApplyButton('general')">
+  # The input is called 'switchName' because the same form is used for
+  # switches and routers — quirky but consistent.
   hostname_input:
+    - { css: "input[name='switchName']" }
+    - { css: "input[id='switchName']" }
+    - { css: "input[data-ng-model='jsonData.general.name']" }
+    - { css: "input[ng-model='jsonData.general.name']" }
+    - { css: "input.k-textbox[required]" }
+    # Generic fallbacks (kept in case the build changes):
     - { role: "textbox", name: "Host Name" }
     - { label: "Host Name" }
-    - { css: "input[ng-model*='hostname' i]" }
-    - { css: "input[ng-model*='hostName']" }
-    - { css: "input[ng-model*='HostName']" }
-    - { css: "input[ng-model*='deviceName' i]" }
-    - { css: "input[name*='host' i]" }
-    - { css: "input[id*='host' i]" }
-    - { css: "input[placeholder*='Host' i]" }
-    # Proximity fallback — find the input after the "Host Name" text:
+    - { css: "input[ng-model*='name' i]" }
     - { css: "xpath=//*[normalize-space(text())='Host Name*' or normalize-space(text())='Host Name']/following::input[@type='text'][1]" }
-    # Last resort — first visible text input on the General tab:
     - { css: "input[type='text']:visible" }
+
+  # Verified DOM:
+  #   <button kendo-button="saveBtn"
+  #           class="k-button btn btn-primary ng-binding ..."
+  #           ng-click="apply('General')" ...>Apply</button>
+  # There are several Apply buttons (one per form section / tab). Target
+  # the General-tab one explicitly. Button is initially disabled; Playwright
+  # click() waits for it to become enabled after our fill triggers ng-change.
   apply_button:
-    - { role: "button", name: "Apply" }
+    - { css: "button[ng-click=\"apply('General')\"]" }
+    - { css: "button[kendo-button='saveBtn'].btn-primary:has-text('Apply')" }
+    - { css: "button.btn-primary:has-text('Apply')" }
     - { css: "button:has-text('Apply'):visible" }
-    - { css: "button:has-text('Apply')" }
-    - { css: "button[type='submit']:visible" }
-    - { css: ".btn-apply" }
+    - { role: "button", name: "Apply" }
 
 # -----------------------------------------------------------------
 # Session-expired detection — if any of these resolve we're back on the

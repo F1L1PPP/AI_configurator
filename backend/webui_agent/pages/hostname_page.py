@@ -202,11 +202,15 @@ class HostnamePage:
     def set_hostname(self, new_name: str) -> None:
         """Clear the hostname field and type the new value.
 
-        Uses triple_click + fill so we replace any existing value cleanly
-        (Cisco's Angular forms don't always clear on .fill alone).
+        Playwright's `Locator.fill` already focuses and clears the field
+        before typing, so no manual select-all needed. Triggering the
+        input event also fires the form's ng-change handler, which enables
+        the Apply button (Cisco's Apply is initially disabled).
         """
         loc = self._hostname_input_or_raise()
-        loc.triple_click()
+        # Click first so AngularJS's ng-focus / ng-touch fire correctly,
+        # then fill to clear+type+trigger ng-change.
+        loc.click()
         loc.fill(new_name)
         log.info("hostname_page_filled", new_name=new_name)
 

@@ -122,12 +122,13 @@ def test_get_current_hostname_raises_when_field_missing():
 # ---------------------------------------------------------------------------
 
 
-def test_set_hostname_triple_clicks_then_fills():
+def test_set_hostname_focuses_then_fills():
     hostname_loc = _loc()
     page = _page_with({"label:Host Name": hostname_loc})
     hp = HostnamePage(page)
     hp.set_hostname("LAB-R1")
-    hostname_loc.triple_click.assert_called_once()
+    # click() focuses + triggers ng-focus, fill() clears+types+ng-change
+    hostname_loc.click.assert_called_once()
     hostname_loc.fill.assert_called_once_with("LAB-R1")
 
 
