@@ -97,6 +97,19 @@ class ConnectionPool:
             f"Could not connect to {host!r} after {_MAX_RETRIES} attempts"
         ) from last_exc
 
+    def invalidate(self, host: str, user: str) -> None:
+        """Remove a connection from the pool and disconnect it.
+
+        Call this after any operation that changes device state in a way that
+        affects the SSH session — specifically after a hostname change, which
+        alters the router prompt and makes the cached base_prompt stale.
+        """
+        conn = self._pool.pop((host, user), None)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.disconnect()
+            log.info("connection_invalidated", host=host, user=user)
+
     def close_all(self) -> None:
         for conn in list(self._pool.values()):
             with contextlib.suppress(Exception):

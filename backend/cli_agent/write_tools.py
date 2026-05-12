@@ -66,6 +66,11 @@ def set_hostname(new_name: str, action_id: str) -> dict:
         )
         raise  # never auto-retry
 
+    # Hostname change alters the router prompt. Invalidate the pooled
+    # connection so the next call reconnects and detects the new prompt.
+    s = get_settings()
+    pool.invalidate(s.router_host, s.router_ssh_user)
+
     post_dir: Path = take_snapshot(action_id, "post")
     mark_executed(action_id)
 

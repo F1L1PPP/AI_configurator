@@ -11,6 +11,7 @@ a Day 4+ enhancement if needed.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 from backend.cli_agent.connection import pool
@@ -68,13 +69,30 @@ def restore_config(snapshot_path: str | Path) -> dict:
     s = get_settings()
     conn = pool.get_connection(s.router_host, s.router_ssh_user, s.router_ssh_password)
 
+    # Re-detect the live prompt before sending config. This is required when
+    # the router hostname changed since the connection was created — the cached
+    # base_prompt would be stale and config_mode() would time out waiting for
+    # the old hostname pattern.
+    with contextlib.suppress(Exception):
+        conn.find_prompt()
+
     log.info(
         "restore_started",
         snapshot=str(snap_dir),
         lines=len(config_lines),
     )
 
-    output: str = conn.send_config_set(config_lines, read_timeout=120)
+    try:
+        output: str = conn.send_config_set(config_lines, read_timeout=120)
+    except Exception:
+        # If send_config_set fails mid-flight the connection may be stuck in
+        # config mode. Try to exit cleanly; if that also fails, invalidate the
+        # pooled connection so the next caller gets a fresh one.
+        try:
+            conn.exit_config_mode()
+        except Exception:
+            pool.invalidate(s.router_host, s.router_ssh_user)
+        raise
 
     log.info("restore_complete", snapshot=str(snap_dir))
 
