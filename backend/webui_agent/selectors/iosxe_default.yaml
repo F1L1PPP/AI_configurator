@@ -1,0 +1,133 @@
+# Cisco IOS XE 17.x WebUI selector map — fallback chains per element.
+#
+# Each entry is a list of strategies. The login/flow code tries strategies
+# in order and uses the first one that resolves to a visible element. Order
+# matters: most-stable strategies (role + ARIA name) first, CSS class
+# selectors last (Angular class names change between builds).
+#
+# Selectors here are seeded from scripts/05 (login + nav probe) and 06
+# (VLAN add). Refine them by running `playwright codegen https://<router-ip>`
+# locally and lifting the captured selectors into this file — see
+# docs/codegen-howto.md.
+
+# -----------------------------------------------------------------
+# Login page
+# -----------------------------------------------------------------
+login:
+  username:
+    - { label: "Username" }
+    - { css: "input[name='username']" }
+    - { css: "input[id*='user' i]" }
+    - { css: "input[type='text']" }
+  password:
+    - { label: "Password" }
+    - { css: "input[name='password']" }
+    - { css: "input[type='password']" }
+  submit:
+    - { role: "button", name: "Log In" }
+    - { role: "button", name: "Login" }
+    - { role: "button", name: "Sign In" }
+    - { css: "button[type='submit']" }
+    - { css: "input[type='submit']" }
+
+# -----------------------------------------------------------------
+# Top-level navigation (priv-15 user)
+# -----------------------------------------------------------------
+nav:
+  dashboard:
+    - { text: "/^Dashboard$/i" }
+    - { css: "a:has-text('Dashboard')" }
+    - { css: "[routerlink*='dashboard' i]" }
+  monitoring:
+    - { text: "/^Monitoring$/i" }
+    - { css: "a:has-text('Monitoring')" }
+  configuration:
+    - { text: "/^Configuration$/i" }
+    - { css: "a:has-text('Configuration')" }
+    - { css: "[routerlink*='configuration' i]" }
+    - { css: "[href*='configuration' i]" }
+  administration:
+    - { text: "/^Administration$/i" }
+    - { css: "a:has-text('Administration')" }
+    - { css: "[routerlink*='administration' i]" }
+  troubleshooting:
+    - { text: "/^Troubleshooting$/i" }
+    - { css: "a:has-text('Troubleshooting')" }
+
+# -----------------------------------------------------------------
+# Configuration → Layer 2 → VLAN (the VLAN-add flow)
+# -----------------------------------------------------------------
+vlan_nav:
+  layer2:
+    - { text: "/layer.?2/i" }
+    - { css: "a:has-text('Layer 2')" }
+    - { css: "span:has-text('Layer 2')" }
+    - { css: "[routerlink*='layer2' i]" }
+    - { css: "[routerlink*='layer-2' i]" }
+  vlan:
+    - { text: "/^VLAN$/i" }
+    - { text: "/vlan.database/i" }
+    - { text: "/vlan.config/i" }
+    - { css: "a:has-text('VLAN')" }
+    - { css: "[routerlink*='vlan' i]" }
+
+vlan_form:
+  add_button:
+    - { role: "button", name: "Add" }
+    - { role: "button", name: "+" }
+    - { role: "button", name: "New" }
+    - { css: "button:has-text('Add')" }
+    - { css: ".add-btn" }
+  vlan_id:
+    - { label: "VLAN ID" }
+    - { css: "input[placeholder*='VLAN ID' i]" }
+    - { css: "input[placeholder*='vlan' i]" }
+    - { css: "input[id*='vlan' i]" }
+    - { css: "input[name*='vlan' i]" }
+    - { css: "input[type='number']" }
+  vlan_name:
+    - { label: "VLAN Name" }
+    - { label: "Name" }
+    - { css: "input[placeholder*='name' i]" }
+    - { css: "input[id*='name' i]" }
+  save_button:
+    - { role: "button", name: "Save" }
+    - { role: "button", name: "Apply" }
+    - { role: "button", name: "OK" }
+    - { css: "button[type='submit']" }
+  cancel_button:
+    - { role: "button", name: "Cancel" }
+    - { role: "button", name: "Close" }
+    - { role: "button", name: "Back" }
+
+# -----------------------------------------------------------------
+# Administration → Device Properties (the hostname-change flow)
+# -----------------------------------------------------------------
+hostname_nav:
+  device_properties:
+    - { text: "/Device Properties/i" }
+    - { css: "a:has-text('Device Properties')" }
+    - { css: "[routerlink*='device-properties' i]" }
+    - { css: "[routerlink*='device_properties' i]" }
+
+hostname_form:
+  hostname_input:
+    - { label: "Hostname" }
+    - { label: "Host Name" }
+    - { css: "input[name='hostname']" }
+    - { css: "input[id*='hostname' i]" }
+    - { css: "input[placeholder*='hostname' i]" }
+  apply_button:
+    - { role: "button", name: "Apply" }
+    - { role: "button", name: "Save" }
+    - { role: "button", name: "Submit" }
+    - { css: "button[type='submit']" }
+
+# -----------------------------------------------------------------
+# Session-expired detection — if any of these resolve we're back on the
+# login page and need to relogin (Cisco WebUI 5-min idle timeout).
+# -----------------------------------------------------------------
+session_expired:
+  - { label: "Username" }
+  - { css: "input[name='username']" }
+  - { text: "/Session.{0,5}(expired|timeout)/i" }
