@@ -1,6 +1,10 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
+// Same base as API_BASE but with the WS scheme — derived so a single env
+// var (NEXT_PUBLIC_API_BASE) controls both HTTP and WS endpoints.
+export const WS_BASE = API_BASE.replace(/^http/, "ws");
+
 // Pre-built endpoint URLs — components import these instead of string-
 // templating in their JSX (audit #21). One place to update if routes move.
 export const endpoints = {
