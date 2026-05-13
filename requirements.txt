@@ -20,6 +20,15 @@ anthropic==0.101.0
 # Day 4 (WebUI scaffolds) — selectors loaded from YAML files.
 pyyaml==6.0.2
 
+# Day 6 — RAG (knowledge_agent): chunk PDFs, embed via MiniLM, persist to Chroma.
+# torch is a transitive dep of sentence-transformers; force CPU build to skip
+# the multi-GB CUDA wheels:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+# THEN: pip install -r requirements.txt
+sentence-transformers==5.5.0
+chromadb==1.5.9
+pypdf==6.11.0
+
 # Dev / test
 ruff==0.11.10
 mypy==1.14.1

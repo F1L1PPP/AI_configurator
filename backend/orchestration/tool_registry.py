@@ -21,6 +21,7 @@ from typing import Any
 
 from backend.cli_agent import read_tools, write_tools
 from backend.core.logging import get_logger
+from backend.knowledge_agent import retrieve as kb_retrieve
 from backend.orchestration.confirmations import (
     NotApproved,
     is_approved,
@@ -78,6 +79,31 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "and assigned ports. Read-only."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "search_docs",
+        "description": (
+            "Semantic search over the curated Cisco C1111 / IOS XE 17.x documentation "
+            "corpus. Returns up to top_k chunks, each with source filename, section "
+            "heading, and a relevance score. Call this BEFORE generating CLI commands "
+            "or WebUI steps for any topic you're not certain about — it grounds your "
+            "answer in real Cisco docs. Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language search query, e.g. 'how to change hostname on ISR 1100'.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Max number of chunks to return (default 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
     },
     {
         "name": "propose_set_hostname",
@@ -252,6 +278,7 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "show_ip_interface_brief": read_tools.show_ip_interface_brief,
     "show_running_config": read_tools.show_running_config,
     "show_vlan_brief": read_tools.show_vlan_brief,
+    "search_docs": kb_retrieve.search_docs,
     "propose_set_hostname": _propose_set_hostname,
     "set_hostname": write_tools.set_hostname,
     "propose_set_interface_ip": _propose_set_interface_ip,

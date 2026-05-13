@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     artifacts_dir: Path = Field(default=Path("artifacts"), alias="ARTIFACTS_DIR")
     logs_dir: Path = Field(default=Path("logs"), alias="LOGS_DIR")
 
+    # Day 6 — RAG (knowledge_agent)
+    # Chunk sizes are tuned to fit the MiniLM-L6 model's 256-token input window.
+    knowledge_base_dir: Path = Field(default=Path("knowledge_base"), alias="KNOWLEDGE_BASE_DIR")
+    chroma_persist_dir: Path = Field(
+        default=Path("knowledge_base/vectorstore"), alias="CHROMA_PERSIST_DIR"
+    )
+    chroma_collection: str = Field(default="cisco_docs", alias="CHROMA_COLLECTION")
+    embedding_model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2", alias="EMBEDDING_MODEL"
+    )
+    rag_top_k: int = Field(default=5, alias="RAG_TOP_K")
+    rag_chunk_tokens: int = Field(default=250, alias="RAG_CHUNK_TOKENS")
+    rag_chunk_overlap: int = Field(default=30, alias="RAG_CHUNK_OVERLAP")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
