@@ -193,6 +193,13 @@ def set_interface_ip(
 
     Requires prior approval. Takes pre+post snapshots.
     Raises ValueError on invalid interface/ip/mask BEFORE any router contact.
+
+    Note: prepends `no switchport` to the config block. On the C1111-4P
+    Gi0/1/0..Gi0/1/3 are switchports by default and IOS XE rejects
+    `ip address` on a Layer-2 port ("% Invalid input detected"). The
+    `no switchport` converts the port to a routed L3 interface
+    implicitly. If the port is already routed (e.g. Gi0/0/0 WAN), the
+    command is a no-op — safe to send unconditionally.
     """
     _validate_interface(interface)
     _validate_ipv4(ip, "address")
@@ -207,6 +214,7 @@ def set_interface_ip(
         output: str = conn.send_config_set(
             [
                 f"interface {interface}",
+                " no switchport",
                 f" ip address {ip} {mask}",
                 " no shutdown",
             ],

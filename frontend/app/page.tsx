@@ -1,4 +1,3 @@
-import MeshSphere from "@/components/mesh/MeshSphere";
 import ScenarioCard from "@/components/actions/ScenarioCard";
 import RecentActions from "@/components/dashboard/RecentActions";
 import ActionsCount from "@/components/dashboard/ActionsCount";
@@ -17,10 +16,11 @@ const Panel = ({ title, right, children }: PanelProps) => (
 
 export default function DashboardPage() {
   return (
-    <div className="relative flex flex-col gap-4">
-      <div className="pointer-events-none absolute -right-10 -bottom-10 opacity-100">
-        <MeshSphere size={220} opacity={0.08} />
-      </div>
+    <div className="flex flex-col gap-4">
+      {/* The decorative MeshSphere used to live here (-right-10 -bottom-10
+          absolute) but it overlapped the Backend Status / Actions Today
+          panels at the new grid layout and looked weirdly placed.
+          Removed entirely — Dashboard is functional, not decorative. */}
 
       {/* Quick Actions is now the primary CTA — full width, 2-column grid,
           larger cards. Filip's feedback: "make that quick actions more

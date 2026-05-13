@@ -132,15 +132,31 @@ def test_set_interface_ip_refuses_without_approval(_mock_snapshot):
 
 
 def test_set_interface_ip_sends_correct_commands(_mock_pool, _mock_snapshot):
+    """Must send: interface X / no switchport / ip address Y Z / no shutdown.
+
+    `no switchport` is needed because C1111-4P Gi0/1/0..Gi0/1/3 are L2
+    switchports by default and IOS rejects `ip address` on a switchport
+    ("% Invalid input detected"). On a routed port like Gi0/0/0 the
+    command is a no-op — safe to send unconditionally.
+    """
     action_id = propose_action("set_interface_ip", {})
     approve_action(action_id)
-    wt.set_interface_ip("GigabitEthernet0/0/0", "10.1.1.1", "255.255.255.0", action_id=action_id)
+    wt.set_interface_ip("GigabitEthernet0/1/2", "10.1.1.1", "255.255.255.0", action_id=action_id)
     cmd_list = _mock_pool.send_config_set.call_args.args[0]
     joined = " ".join(cmd_list)
-    assert "GigabitEthernet0/0/0" in joined
+    assert "GigabitEthernet0/1/2" in joined
+    assert "no switchport" in joined
     assert "10.1.1.1" in joined
     assert "255.255.255.0" in joined
     assert "no shutdown" in joined
+    # Order matters: `no switchport` must come BEFORE `ip address` or the
+    # IP command still hits the L2 port and errors out.
+    no_switch_idx = next(i for i, c in enumerate(cmd_list) if "no switchport" in c)
+    ip_idx = next(i for i, c in enumerate(cmd_list) if "ip address" in c)
+    assert no_switch_idx < ip_idx, (
+        f"`no switchport` (idx {no_switch_idx}) must precede `ip address` "
+        f"(idx {ip_idx}); cmd_list={cmd_list}"
+    )
 
 
 # ---------------------------------------------------------------------------
