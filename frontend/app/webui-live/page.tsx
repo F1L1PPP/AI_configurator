@@ -1,3 +1,4 @@
+import LiveEventStream from "@/components/LiveEventStream";
 import MeshSphere from "@/components/mesh/MeshSphere";
 import ActionTimeline, {
   type AgentAction,
@@ -6,9 +7,9 @@ import PhaseProgress, {
   type Phase,
 } from "@/components/webui-agent/PhaseProgress";
 
-// Day 4 skeleton — mocked phase + action data, presentational components in
-// frontend/components/webui-agent/ ready to receive real WebSocket events on
-// Day 5 (no page changes needed beyond swapping data sources).
+// Phase progress + screenshot pane stay mocked for now (no backend signal
+// for phases or screenshot stream yet). The "Live Activity" panel below
+// consumes real planner events via /ws/agent.
 
 const phaseSteps: Phase[] = [
   { n: "01", label: "Prompt", status: "done" },
@@ -113,9 +114,12 @@ export default function WebUILivePage() {
           </div>
         </section>
 
-        <aside className="flex flex-col gap-3 border border-rule bg-surface p-3.5">
-          <div className="tech-label">AI Next Actions</div>
-          <ActionTimeline actions={agentActions} />
+        <aside className="flex flex-col gap-3">
+          <div className="border border-rule bg-surface p-3.5">
+            <div className="tech-label mb-2">AI Next Actions</div>
+            <ActionTimeline actions={agentActions} />
+          </div>
+          <LiveEventStream emptyText="WAITING FOR WEBUI AGENT..." />
         </aside>
       </div>
 
