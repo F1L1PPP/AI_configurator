@@ -23,13 +23,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from anthropic import Anthropic
 
+from backend.core.eventbus import bus
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
 from backend.orchestration.tool_registry import TOOL_SCHEMAS, execute_tool
+
+_WRITE_TOOLS: frozenset[str] = frozenset({"set_hostname", "set_interface_ip", "webui_set_hostname"})
 
 log = get_logger(__name__)
 
@@ -121,8 +125,20 @@ rather than dumping the raw output."""
 class PlannerEvent:
     """One event in the planner's execution trace."""
 
-    kind: str  # agent_thinking | tool_call | tool_result | awaiting_approval | applied | error
+    kind: str  # agent_thinking | tool_call | tool_result | awaiting_approval | applied | verified | error
     data: dict[str, Any] = field(default_factory=dict)
+
+
+def _emit(events: list[PlannerEvent], kind: str, data: dict[str, Any]) -> None:
+    """Append to the in-memory trace AND publish to the live event bus."""
+    events.append(PlannerEvent(kind, data))
+    bus.publish(
+        {
+            "type": kind,
+            "ts": datetime.now(UTC).isoformat(),
+            "data": data,
+        }
+    )
 
 
 @dataclass
@@ -204,7 +220,7 @@ def run_planner(
     events: list[PlannerEvent] = []
 
     for iteration in range(MAX_ITERATIONS):
-        events.append(PlannerEvent("agent_thinking", {"iteration": iteration}))
+        _emit(events, "agent_thinking", {"iteration": iteration, "model": MODEL})
         log.info("planner_iteration", iteration=iteration)
 
         response = client.messages.create(
@@ -238,39 +254,45 @@ def run_planner(
             if getattr(block, "type", None) != "tool_use":
                 continue
 
-            events.append(
-                PlannerEvent(
-                    "tool_call",
-                    {
-                        "name": block.name,
-                        "input": block.input,
-                        "id": block.id,
-                    },
-                )
+            _emit(
+                events,
+                "tool_call",
+                {"name": block.name, "input": dict(block.input), "id": block.id},
             )
             log.info("tool_call", tool=block.name, params=block.input)
 
             result = execute_tool(block.name, dict(block.input))
-            events.append(
-                PlannerEvent(
-                    "tool_result",
-                    {
-                        "name": block.name,
-                        "result": result,
-                    },
-                )
-            )
+            _emit(events, "tool_result", {"name": block.name, "result": result})
 
             # Surface action proposals as a dedicated event for UI consumption
             if isinstance(result, dict) and result.get("status") == "awaiting_approval":
-                events.append(
-                    PlannerEvent(
-                        "awaiting_approval",
-                        {
-                            "action_id": result.get("action_id"),
-                            "preview": result.get("preview"),
-                        },
-                    )
+                _emit(
+                    events,
+                    "awaiting_approval",
+                    {
+                        "action_id": result.get("action_id"),
+                        "preview": result.get("preview"),
+                    },
+                )
+
+            # Successful write → emit `applied` so the UI can advance the timeline.
+            # We infer success from: no `error` key in result + a `snapshot_post`
+            # path (write tools always set this on success).
+            if (
+                block.name in _WRITE_TOOLS
+                and isinstance(result, dict)
+                and "error" not in result
+                and result.get("snapshot_post")
+            ):
+                _emit(
+                    events,
+                    "applied",
+                    {
+                        "tool": block.name,
+                        "summary": result.get("output", "")[:200],
+                        "snapshot_post": result.get("snapshot_post"),
+                        "duration_ms": result.get("duration_ms"),
+                    },
                 )
 
             tool_result_blocks.append(
@@ -284,7 +306,7 @@ def run_planner(
         messages.append({"role": "user", "content": tool_result_blocks})
 
     # Hit iteration cap
-    events.append(PlannerEvent("error", {"reason": "iteration_cap_reached"}))
+    _emit(events, "error", {"message": "iteration_cap_reached", "max": MAX_ITERATIONS})
     log.warning("planner_iteration_cap", iterations=MAX_ITERATIONS)
     return PlannerResult(
         final_text="(stopped: too many tool-use iterations)",
