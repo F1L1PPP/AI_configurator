@@ -8,6 +8,7 @@ call to keep import cost low (especially for processes that don't use RAG).
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -21,21 +22,30 @@ log = structlog.get_logger(__name__)
 
 _model: SentenceTransformer | None = None
 _collection: Any | None = None
+_load_lock = threading.Lock()
 
 
 def _ensure_loaded() -> None:
     global _model, _collection
+    # Fast path — already loaded, no lock needed.
     if _model is not None and _collection is not None:
         return
-    settings = get_settings()
-    if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
-    if _collection is None:
-        client = chromadb.PersistentClient(path=str(settings.chroma_persist_dir))
-        _collection = client.get_or_create_collection(
-            settings.chroma_collection,
-            metadata={"hnsw:space": "cosine"},
-        )
+    # Slow path — serialise the first-time load so two threads can't both
+    # construct a SentenceTransformer (~50 MB extra alloc). Double-check
+    # inside the lock so we don't pay the lock cost after the first caller
+    # has populated the globals.
+    with _load_lock:
+        if _model is not None and _collection is not None:
+            return
+        settings = get_settings()
+        if _model is None:
+            _model = SentenceTransformer(settings.embedding_model)
+        if _collection is None:
+            client = chromadb.PersistentClient(path=str(settings.chroma_persist_dir))
+            _collection = client.get_or_create_collection(
+                settings.chroma_collection,
+                metadata={"hnsw:space": "cosine"},
+            )
 
 
 def search_docs(query: str, top_k: int = 5) -> dict[str, Any]:

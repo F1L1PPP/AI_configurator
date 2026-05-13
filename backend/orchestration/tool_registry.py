@@ -33,13 +33,16 @@ log = get_logger(__name__)
 
 # Tools in this set require an APPROVED action_id before the dispatcher
 # will invoke them. Mirrors the gate inside each write tool.
-_REQUIRES_APPROVAL: frozenset[str] = frozenset(
+# Re-exported as the canonical "this tool writes to the router" set —
+# the planner imports it to decide when to emit `applied` events.
+WRITE_TOOLS: frozenset[str] = frozenset(
     {
         "set_hostname",
         "set_interface_ip",
         "webui_set_hostname",
     }
 )
+_REQUIRES_APPROVAL = WRITE_TOOLS
 
 
 # ---------------------------------------------------------------------------

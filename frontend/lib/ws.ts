@@ -42,29 +42,61 @@ export type WsHandle = {
   close: () => void;
 };
 
-// Open a WS to /ws/agent. Returns a handle whose close() tears down the
-// connection. Reconnect-on-close is intentionally NOT included — the caller
-// reconnects on unmount/mount via React's effect cleanup, which is enough
-// for local dev.
+// Open a WS to /ws/agent with automatic reconnect-on-close (exponential
+// backoff 500ms -> 10s). Returns a handle whose close() permanently tears
+// down the connection and stops further reconnect attempts.
+//
+// Why reconnect: if the backend restarts mid-session (or uvicorn reloads
+// after a code change) we'd otherwise silently stop receiving events.
+// onStatus("closed") still fires between reconnects so the UI dot reflects
+// reality.
 export function connectAgentWs(
   onEvent: (event: AgentEvent) => void,
-  onStatus?: (status: "open" | "closed" | "error") => void
+  onStatus?: (status: "open" | "closed" | "error") => void,
 ): WsHandle {
-  const ws = new WebSocket(`${WS_BASE}/ws/agent`);
-  ws.onopen = () => onStatus?.("open");
-  ws.onclose = () => onStatus?.("closed");
-  ws.onerror = () => onStatus?.("error");
-  ws.onmessage = (msg) => {
-    try {
-      const ev = JSON.parse(msg.data) as AgentEvent;
-      onEvent(ev);
-    } catch {
-      // Drop unparseable frames silently — the backend only sends JSON.
-    }
-  };
+  const MAX_BACKOFF_MS = 10_000;
+  let ws: WebSocket | null = null;
+  let closedByCaller = false;
+  let backoffMs = 500;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function open(): void {
+    if (closedByCaller) return;
+    ws = new WebSocket(`${WS_BASE}/ws/agent`);
+    ws.onopen = () => {
+      backoffMs = 500;
+      onStatus?.("open");
+    };
+    ws.onclose = () => {
+      onStatus?.("closed");
+      if (!closedByCaller) {
+        reconnectTimer = setTimeout(open, backoffMs);
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+      }
+    };
+    ws.onerror = () => onStatus?.("error");
+    ws.onmessage = (msg) => {
+      try {
+        const ev = JSON.parse(msg.data) as AgentEvent;
+        onEvent(ev);
+      } catch (err) {
+        // Surface to the console — the backend only sends JSON, so this
+        // means an event-type mismatch or a corrupted frame worth knowing.
+        // eslint-disable-next-line no-console
+        console.warn("[ws/agent] failed to parse frame:", err, msg.data);
+      }
+    };
+  }
+
+  open();
   return {
     close: () => {
-      ws.close();
+      closedByCaller = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      ws?.close();
     },
   };
 }

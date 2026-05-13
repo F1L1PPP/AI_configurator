@@ -106,7 +106,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     const handle = connectAgentWs(
-      (ev) => setEvents((prev) => [...prev, ev]),
+      // Cap retained events at 200 so a long-running session doesn't bloat
+      // React state. The UI only renders the last 30 anyway.
+      (ev) => setEvents((prev) => [...prev.slice(-199), ev]),
       (status) => setWsStatus(status),
     );
     return () => handle.close();

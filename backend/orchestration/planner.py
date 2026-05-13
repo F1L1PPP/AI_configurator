@@ -31,9 +31,7 @@ from anthropic import Anthropic
 from backend.core.eventbus import bus
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
-from backend.orchestration.tool_registry import TOOL_SCHEMAS, execute_tool
-
-_WRITE_TOOLS: frozenset[str] = frozenset({"set_hostname", "set_interface_ip", "webui_set_hostname"})
+from backend.orchestration.tool_registry import TOOL_SCHEMAS, WRITE_TOOLS, execute_tool
 
 log = get_logger(__name__)
 
@@ -279,7 +277,7 @@ def run_planner(
             # We infer success from: no `error` key in result + a `snapshot_post`
             # path (write tools always set this on success).
             if (
-                block.name in _WRITE_TOOLS
+                block.name in WRITE_TOOLS
                 and isinstance(result, dict)
                 and "error" not in result
                 and result.get("snapshot_post")

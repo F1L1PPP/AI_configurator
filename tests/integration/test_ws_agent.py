@@ -74,3 +74,24 @@ def test_ws_agent_unsubscribes_on_disconnect(client: TestClient) -> None:
             break
         time.sleep(0.01)
     assert bus.subscriber_count() == before
+
+
+def test_ws_agent_idle_disconnect_unsubscribes_without_events(
+    client: TestClient,
+) -> None:
+    """Regression: server must detect a never-receiving client closing.
+
+    The old code parked in q.get() forever, so an idle client that
+    connected and immediately disconnected stayed in the subscriber list
+    until the next event flushed through send_json. Cycling three idle
+    connections in a row should not accumulate subscribers.
+    """
+    before = bus.subscriber_count()
+    for _ in range(3):
+        with client.websocket_connect("/ws/agent"):
+            pass  # connect and immediately close — publish nothing
+    for _ in range(100):
+        if bus.subscriber_count() == before:
+            break
+        time.sleep(0.01)
+    assert bus.subscriber_count() == before

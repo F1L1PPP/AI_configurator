@@ -40,7 +40,8 @@ export default function LiveEventStream({
     const handle = connectAgentWs(
       (ev) => {
         if (!filter || filter(ev)) {
-          setEvents((prev) => [...prev, ev]);
+          // Cap retained events at 200 — UI only renders last 50.
+          setEvents((prev) => [...prev.slice(-199), ev]);
         }
       },
       (s) => setStatus(s),
