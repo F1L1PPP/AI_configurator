@@ -43,8 +43,8 @@ after the change.
 │  └────┬────┘  └────┬─────┘  └─────┬────┘  └──────┬──────┘   │
 │       │            │              │              │           │
 └───────┼────────────┼──────────────┼──────────────┼───────────┘
-        │ POST       │ POST         │ GET          │ (Day 6:
-        │ /api/chat  │ /api/approve │ /api/logs    │  WebSocket)
+        │ POST       │ POST         │ GET          │ GET
+        │ /api/chat  │ /api/approve │ /api/logs    │ /ws/agent (WS)
         ▼            ▼              ▼              ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  Backend (FastAPI)                                           │
@@ -89,7 +89,7 @@ after the change.
 | **Pydantic Settings** | A library that loads typed config from `.env` | Loads `ROUTER_HOST`, `ROUTER_SSH_USER`, etc. with type safety |
 | **structlog** | A library that produces structured JSON log lines | Writes one JSON line per tool call to `logs/actions.log` |
 | **Next.js 14 + Tailwind** | The frontend framework + CSS | The web GUI you see at `localhost:3000` |
-| **ChromaDB** *(Day 6)* | A local vector database | Stores Cisco doc chunks for RAG retrieval |
+| **ChromaDB** | A local vector database | Stores Cisco doc chunks for RAG retrieval (Day 6: shipped; 692 chunks from ISR1100 SW Config Guide) |
 
 ---
 
@@ -335,7 +335,7 @@ All six §2 demo scenarios from `PROJECT_PLAN.md`:
 | 4 | CLI: change interface IP | `set_interface_ip` | built + unit-tested (live smoke deferred to avoid breaking `Gi0/1/0` management) |
 | 5 | **WebUI: change hostname** | `webui_set_hostname` | ✓ **proven on real router today, 23 s end-to-end** |
 | 6 | WebUI: add VLAN | (Day 7) | not built yet |
-| — | RAG: query Cisco docs with citations | (Day 6) | not built yet |
+| 7 | **RAG: query Cisco docs with citations** | `search_docs` | ✓ shipped Day 6; 692 chunks; chat shows Sources badges |
 
 **Plus everything around it:**
 
@@ -344,10 +344,13 @@ All six §2 demo scenarios from `PROJECT_PLAN.md`:
 - Screenshot evidence on every WebUI step
 - structlog JSONL log of every tool call (visible live in the Dashboard)
 - Real-time Slovak chat with Claude Haiku 4.5
-- The 3 GUI pages already wired to real data (Dashboard, Preview, /chat
-  uses sync POST until Day 6 adds WebSocket)
+- The 4 GUI pages all wired to real data (Dashboard, Preview, /chat,
+  WebUI Live — /chat does sync POST for the reply + live WS event
+  stream from `/ws/agent` for the planner's tool_call / applied /
+  awaiting_approval activity)
 
-**Test coverage:** 122 unit tests passing, ruff clean.
+**Test coverage:** 156 tests passing (130 + 26 from Day 6: chunker,
+retrieve, eventbus pub/sub, /ws/agent integration), ruff clean.
 
 ---
 
