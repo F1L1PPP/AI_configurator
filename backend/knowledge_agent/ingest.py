@@ -103,7 +103,10 @@ def run_ingest() -> int:
 
     settings.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(settings.chroma_persist_dir))
-    collection = client.get_or_create_collection(settings.chroma_collection)
+    collection = client.get_or_create_collection(
+        settings.chroma_collection,
+        metadata={"hnsw:space": "cosine"},
+    )
     collection.upsert(
         ids=[c.id for c in all_chunks],
         embeddings=embeddings,

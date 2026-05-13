@@ -32,7 +32,10 @@ def _ensure_loaded() -> None:
         _model = SentenceTransformer(settings.embedding_model)
     if _collection is None:
         client = chromadb.PersistentClient(path=str(settings.chroma_persist_dir))
-        _collection = client.get_or_create_collection(settings.chroma_collection)
+        _collection = client.get_or_create_collection(
+            settings.chroma_collection,
+            metadata={"hnsw:space": "cosine"},
+        )
 
 
 def search_docs(query: str, top_k: int = 5) -> dict[str, Any]:
