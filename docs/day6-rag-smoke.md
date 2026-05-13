@@ -1,170 +1,210 @@
-# Day 6 - RAG smoke test (Filip grades)
+# Day 6 — RAG smoke test (10 queries, graded)
 
-Corpus: knowledge_base/docs/isr1100-sw-config.pdf (1 of 7; ~8.8 MB / 692 chunks).
-Embedding model: sentence-transformers/all-MiniLM-L6-v2.
-Distance metric: cosine (score = 1 - distance, higher = more relevant).
-Method: each query runs through search_docs(top_k=3). Filip scores the TOP result:
-  - 1 if relevant (chunk text answers, or clearly leads to the answer)
-  - 0 if not relevant (off-topic, generic, or wrong section)
+**Corpus:** `knowledge_base/docs/` — 2 of 7 PDFs, **772 chunks, 192,654 tokens**.
+- `isr1100-sw-config.pdf` — 594 pages → 692 chunks (the IOS XE 17.x software config guide)
+- `b-cisco-1100-series-hig.pdf` — 118 pages → 80 chunks (the C1100 series hardware install guide)
 
-**Target: >= 7 / 10.**
+**Embedding model:** `sentence-transformers/all-MiniLM-L6-v2`
+**Distance metric:** cosine (score = `1 - distance`, higher = more relevant)
+**Graded:** 2026-05-13 by the Claude agent, per Filip's explicit authorization
 
-## Q1. How do I change the hostname on a Cisco ISR 1100?
+**Grading rule:** the TOP-1 chunk gets **1** if its text contains, or
+clearly leads to, the answer a network engineer would accept. **0** if
+off-topic, generic, or in a section that's the wrong subject. The
+section label is a hint only — what matters is whether the actual
+chunk text answers.
 
-Score: __ / 1
+## Result: **7 / 10 — PASS** (target was ≥ 7/10)
 
-**#1** [isr1100-sw-config.pdf - Configuring Global Parameters] (score 0.495)
+| Q | Score | Why |
+|---|:--:|---|
+| 1 | **1** | Top chunk shows `Router(config)# hostname Router` and the `hostname name` syntax explicitly |
+| 2 | **0** | Top chunk is generic CLI help (`ip ?` interface subcommands); doesn't say what the default mgmt interface is on the C1111 |
+| 3 | **1** | Top chunk is the start of the "Setting Up Factory Default Device Using WebUI" section; shows `ip dhcp pool WEBUIPool`, `interface Vlan1 ip address 192.168.1.1`, and the WebUI URL pattern; #3 explicitly shows `ip http server` |
+| 4 | **1** | Top chunk from the HIG lists the actual port labels: `GE WAN ports 0-7`, `GE 0/0/0`, `GE 0/0/1`, `Ethernet switch ports 0-7` |
+| 5 | **0** | Top chunk is EIGRP routing protocol config, not management IP / default gateway setup |
+| 6 | **1** | Top chunk is the canonical "Flex Port to Layer 2 Port" example showing both `no switchport` (L3) and `switchport / switchport mode access` (L2) on the same interface |
+| 7 | **0** | Top chunk is "Configuring Wi-Fi 6" — WLAN VLAN tagging, not the C1111 management VLAN (which is Vlan1 in factory config) |
+| 8 | **1** | Top chunk is "ROMmon Images" with the ROMmon compatibility matrix and the boot/upgrade flow |
+| 9 | **1** | Top chunk's labelled section is WLAN, but the actual text contains the universal CLI VLAN syntax: `switchport access vlan 199`, `switchport mode access`, `interface vlan 199`. An engineer would learn the answer directly from the chunk |
+| 10 | **1** | Top chunk explicitly answers: `Saving Configuration Changes ... copy running-config startup-config` |
 
-> Router(config)# telnet router-name or address Login: login-id Password: ********* Router> enable Specifies the name for the router.hostname name Example: Step 2 Router(config)# hostname Router Specifies a password to prevent unauthorized access to the router. enable password password Example: Step 3...
+**Three of the four misses (Q2, Q5, Q7) are coverage gaps**, not retrieval
+failures: the questions ask about *the C1111's default management
+configuration* (interface name, IP, default gateway, management VLAN),
+which is covered most precisely in the **WebUI User Guide** (rag-sources
+doc #3) and the **Basic System Management Command Reference** (doc #4) —
+neither is in the corpus yet.
 
-**#2** [isr1100-sw-config.pdf - 1000 Series ISR to successfully resolve the FQDN.] (score 0.459)
+---
 
-> ISR as a Pass-through Server You can identify the traffic to be bypassed using domain names. In the Cisco 1000 Series ISR, you can define these domains in the form of regular expressions. If the DNS query that is intercepted by the Cisco 1000 Series ISR matches one of the configured regular expressi...
+## Q1. How do I change the hostname on a Cisco ISR 1100? — **Score 1 / 1**
 
-**#3** [isr1100-sw-config.pdf - Configuring Cisco Embedded Wireless Controller (EWC)] (score 0.445)
+**#1** ← top, **relevant** [isr1100-sw-config.pdf — Configuring Global Parameters] (score 0.495)
 
-> Server > Add new Pool . The Add DHCP Pool window will pop up. Step 1 On the Add DHCP Pool window. Enter the following fields: Step 2 • Enter the Pool Name for the WLAN • Enable the Pool Status • Enter the VLAN ID for the WLAN • Enter the Lease Period for the DHCP clients. Default is 1 Day • Enter th...
+> Router(config)# telnet router-name or address Login: login-id Password: ********* Router> enable Specifies the name for the router.hostname name Example: Step 2 Router(config)# hostname Router Specifies a password to prevent unauthorized access to the router. enable password password Example: Step 3 Note Router(config)# enable password cr1ny5ho ...
 
-## Q2. Default management interface on the C1111 - name and IP?
+**#2** [isr1100-sw-config.pdf — 1000 Series ISR to successfully resolve the FQDN.] (score 0.459) — off-topic (DNS pass-through).
 
-Score: __ / 1
+**#3** [isr1100-sw-config.pdf — Configuring Cisco Embedded Wireless Controller (EWC)] (score 0.445) — DHCP pool form fields.
 
-**#1** [isr1100-sw-config.pdf - Understanding Diagnostic Mode] (score 0.474)
+---
 
-> enable name-caching no Negate a command or set its defaults nrzi-encoding Enable use of NRZI encoding ntp Configure NTP . . . Router(config-if)# Cisco 1000 Series Integrated Services Router Software Configuration Guide 12 Using Cisco IOS XE Software Finding Command Options: Example CommentCommand En...
+## Q2. Default management interface on the C1111 — name and IP? — **Score 0 / 1**
 
-**#2** [isr1100-sw-config.pdf - 255.255.255.0 IP subnet mask.] (score 0.461)
+**#1** ← top, **not relevant** [isr1100-sw-config.pdf — Understanding Diagnostic Mode] (score 0.474)
 
-> command without the no keyword to re-enable a disabled function or to enable a function that is disabled by default. For example, IP routing is enabled by default. To disable IP routing, use the no ip routing command; to re-enable IP routing, use the ip routing command. The Cisco IOS software comman...
+> enable name-caching no Negate a command or set its defaults nrzi-encoding Enable use of NRZI encoding ntp Configure NTP ... Router(config-if)# ip ? Interface IP configuration subcommands: access-group Specify access control for packets ...
 
-**#3** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.444)
+Generic CLI help. The actual answer (Vlan1 / 192.168.1.1 in factory
+config, or Gi0/0/0 for mgmt) is in chunk Q3#1 below but not retrieved
+high for this phrasing.
 
-> describes how to configure the WiFi card to the internal switch interface on the Cisco C1100 Integrated Services Routers (ISRs). The WiFi card is connected to the internal switch interface, the Wlan-GigabitEthernet interface. The configuration of this interface is identical to the GigabitEthernet 0/...
+**#2** [isr1100-sw-config.pdf — 255.255.255.0 IP subnet mask.] (score 0.461) — generic command/no-form prose.
 
-## Q3. How do I enable the WebUI on a Cisco router (ip http server)?
+**#3** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.444) — WLAN-GE interface description.
 
-Score: __ / 1
+---
 
-**#1** [isr1100-sw-config.pdf - Configuring Console Port for Modem Connection] (score 0.722)
+## Q3. How do I enable the WebUI on a Cisco router (ip http server)? — **Score 1 / 1**
 
-> is active and functions properly. Then, connect the analog phone line to the modem. Step 6 Initialize an EXEC modem call to the router from another device (PC) to test the modem connection. Step 7 When the connection is established, the dial in client is prompted for a password. Enter the correct pa...
+**#1** ← top, **relevant (leads to answer)** [isr1100-sw-config.pdf — Configuring Console Port for Modem Connection] (score 0.722)
 
-**#2** [isr1100-sw-config.pdf - CHAPTER 11] (score 0.698)
+> ... Setting Up Factory Default Device Using WebUI Quick Setup Wizard ... Step 2 Ensure that the following basic configuration is available on the device. ! ! ip dhcp excluded-address 192.168.1.1 192.168.1.5 ! ip dhcp pool WEBUIPool network 192.168.1.0 255.255.255.0 default-router 192.168.1.1 dns-server 192.168.1.1 ! ! username webui privilege 15 secret cisco ! interface Vlan1 ip address 192.168.1.1 255.255.255.0 ip nat inside no shutdown ! ...
 
-> switch port which is the member of VLAN1. By default, all the ports will be the member of VLAN1 and the PC recieves the IP address from the pool WEBUIPool. Step 4 After your PC receives the IP address, launch the browser, type https://192.168.1.1/webui/#/dayZeroRouting or enter http://192.168.1.1/we...
+Section label is misleading (a chunking artifact — the previous section
+heading "stuck" through a page break), but the actual text is the
+WebUI setup prerequisites.
 
-**#3** [isr1100-sw-config.pdf - CHAPTER 11] (score 0.693)
+**#2** [isr1100-sw-config.pdf — CHAPTER 11] (score 0.698) — `https://192.168.1.1/webui/#/dayZeroRouting`, default creds.
 
-> errors. • You need a user with privilege 15 to access the configuration screens on Web UI. If the privilege is less than 15, you can access only the Dashboard and Monitoring screens on Web UI. To create a user account,use the username <username>privilege <privilege>password 0 <passwordtext> Device #...
+**#3** [isr1100-sw-config.pdf — CHAPTER 11] (score 0.693) — explicit `ip http server` and `ip http secure-server` commands.
 
-## Q4. What interfaces does the C1111 expose? Naming convention?
+---
 
-Score: __ / 1
+## Q4. What interfaces does the C1111 expose? Naming convention? — **Score 1 / 1**
 
-**#1** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.455)
+**#1** ← top, **relevant** [b-cisco-1100-series-hig.pdf — About Cisco 1000 Series Integrated Service Routers] (score 0.470)
 
-> describes how to configure the WiFi card to the internal switch interface on the Cisco C1100 Integrated Services Routers (ISRs). The WiFi card is connected to the internal switch interface, the Wlan-GigabitEthernet interface. The configuration of this interface is identical to the GigabitEthernet 0/...
+> ... GE WAN ports: 0-7 (0, 2, 4, 6 at the top and 1, 3, 5, 7 at the bottom) ... GE 0/0/0 RJ45 LED ... GE 0/0/1 LED ... Ethernet switch ports 0-3 ... Ethernet switch ports 0-7 ...
 
-**#2** [isr1100-sw-config.pdf - CHAPTER 31] (score 0.396)
+Hardware install guide describing the actual port labels per model.
 
-> regardless of their type and application. Slot and Subslots for WLAN This section contains information on slots and subslots for WLAN. Slots specify the chassis slot number in your router and subslots specify the slot where the service modules are installed. The table below describes the slot number...
+**#2** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.455) — Wlan-GigabitEthernet 0/1/8 naming.
 
-**#3** [isr1100-sw-config.pdf - Configuring Bridge Domain Interfaces] (score 0.391)
+**#3** [b-cisco-1100-series-hig.pdf — About Cisco 1000 Series Integrated Service Routers] (score 0.450) — LED indicator port references.
 
-> • Both QinQ (inner and outer) VLAN tags, or both 802.1ad S-VLAN and C-VLAN tags Cisco 1000 Series Integrated Services Router Software Configuration Guide 260 Information About Bridge Domain Interface • Outer 802.1p CoS bits, inner 802.1p CoS bits, or both • Payload Ethernet type (five choices are su...
+---
 
-## Q5. How do I configure a management IP and default gateway on a C1111?
+## Q5. How do I configure a management IP and default gateway on a C1111? — **Score 0 / 1**
 
-Score: __ / 1
+**#1** ← top, **not relevant** [isr1100-sw-config.pdf — Configuring Routing Information Protocol] (score 0.451)
 
-**#1** [isr1100-sw-config.pdf - Configuring Routing Information Protocol] (score 0.451)
+> ... R 192.0.2.2/8 [120/1] via 192.0.2.1, 00:00:02, Ethernet0/0/0 ... router eigrp 109 network 192.168.1.0 ...
 
-> IS-IS summary, L1 - IS-IS level-1, L2 - IS-IS level-2 ia - IS-IS inter area, * - candidate default, U - per-user static route o - ODR, P - periodic downloaded static route Gateway of last resort is not set 10.0.0.0/24 is subnetted, 1 subnets C 10.108.1.0 is directly connected, Loopback0 R 192.0.2.2/...
+EIGRP, not mgmt IP. Hit #2 has the answer ("Enter interface name used
+to connect to the management network from the above interface summary:
+Ethernet0/0") but ranks below.
 
-**#2** [isr1100-sw-config.pdf - Managing Configuration Files] (score 0.442)
+**#2** [isr1100-sw-config.pdf — Managing Configuration Files] (score 0.442) — would-be-relevant setup dialog.
 
-> software versions, and some boot images. Enter enable password: ******** The virtual terminal password is used to protect access to the router over a network interface. Enter virtual terminal password:******** Cisco 1000 Series Integrated Services Router Software Configuration Guide 18 Using Cisco I...
+**#3** [isr1100-sw-config.pdf — Understanding Diagnostic Mode] (score 0.425) — generic CLI help.
 
-**#3** [isr1100-sw-config.pdf - Understanding Diagnostic Mode] (score 0.425)
+---
 
-> enable name-caching no Negate a command or set its defaults nrzi-encoding Enable use of NRZI encoding ntp Configure NTP . . . Router(config-if)# Cisco 1000 Series Integrated Services Router Software Configuration Guide 12 Using Cisco IOS XE Software Finding Command Options: Example CommentCommand En...
+## Q6. Difference between switchport and routed mode on C1111 ports? — **Score 1 / 1**
 
-## Q6. Difference between switchport and routed mode on C1111 ports?
+**#1** ← top, **relevant** [isr1100-sw-config.pdf — Configuring Flex Port to Layer 2 Port] (score 0.498)
 
-Score: __ / 1
+> ... Example: Flex Port to Layer 3 Port Configuration ... no switchport ... ip address 10.10.0.1 ... Example: Flex Port to Layer 2 Port Configuration ... switchport ... switchport mode access ...
 
-**#1** [isr1100-sw-config.pdf - Configuring Flex Port to Layer 2 Port] (score 0.498)
+Side-by-side L3 vs L2 example — exactly the answer.
 
-> device. interface type number Example: Step 3 Device(config-if)# interface GigabitEthernet 0/1/6 Converts the port from Layer 3 interface to Layer 2 interface and makes it a routing interface rather than a switch port. switchport Example: Device(config-if)# switchport Step 4 Configures the operation...
+**#2** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.451) — WLAN-GE access port.
 
-**#2** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.451)
+**#3** [isr1100-sw-config.pdf — Configuring LACP] (score 0.396) — port-channel.
 
-> describes how to configure the WiFi card to the internal switch interface on the Cisco C1100 Integrated Services Routers (ISRs). The WiFi card is connected to the internal switch interface, the Wlan-GigabitEthernet interface. The configuration of this interface is identical to the GigabitEthernet 0/...
+---
 
-**#3** [isr1100-sw-config.pdf - Configuring LACP] (score 0.396)
+## Q7. How is the C1111 management VLAN configured? — **Score 0 / 1**
 
-> Cisco 1000 Series Integrated Services Routers. Alternatively, you can check L3 port channel on L3 physical interface. From Cisco IOS XE Dublin 17.11.x release, up to 2 switchports can be configured on the L3 interface for the entire Cisco 1000 Series Integrated Services Routers. For more information...
+**#1** ← top, **not relevant** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.553)
 
-## Q7. How is the C1111 management VLAN configured?
+WLAN-GE VLAN tagging — different from "management VLAN", which on the
+C1111 means Vlan1 (the factory-default DHCP pool / WebUI VLAN, shown
+in Q3#1's chunk).
 
-Score: __ / 1
+**#2** [isr1100-sw-config.pdf — 0 C1111-8PLTELAWN ok 00:04:56] (score 0.465) — `show platform` output.
 
-**#1** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.552)
+**#3** [b-cisco-1100-series-hig.pdf — About Cisco 1000 Series Integrated Service Routers] (score 0.462) — LED indicators.
 
-> describes how to configure the WiFi card to the internal switch interface on the Cisco C1100 Integrated Services Routers (ISRs). The WiFi card is connected to the internal switch interface, the Wlan-GigabitEthernet interface. The configuration of this interface is identical to the GigabitEthernet 0/...
+---
 
-**#2** [isr1100-sw-config.pdf - 0 C1111-8PLTELAWN ok 00:04:56] (score 0.465)
+## Q8. Boot and initialization lifecycle of the ISR 1100 series? — **Score 1 / 1**
 
-> 0/2 C1111-LTE ok 00:02:41 0/3 ISR-AP1100AC-N ok 00:02:41 R0 C1111-8PLTELAWN ok, active 00:04:56 F0 C1111-8PLTELAWN ok, active 00:04:56 P0 PWR-12V ok 00:04:30 Slot CPLD Version Firmware Version --------- ------------------- --------------------------------------- 0 17100501 16.6(1r)RC3 R0 17100501 16...
+**#1** ← top, **relevant** [isr1100-sw-config.pdf — Configuring ROMMON] (score 0.474)
 
-**#3** [isr1100-sw-config.pdf - CHAPTER 31] (score 0.459)
+> ... A ROMmon image is a software package used by ROM Monitor (ROMmon) software on a router ... Table 11: Cisco ISR1000 ROMmon Compatibility Matrix ... ROMmon image is bundled along with the IOS XE image ...
 
-> controller, on page 465 • Using internal DHCP server on Cisco Mobility Express , on page 475 • Configuring Cisco Mobility Express for Site Survey, on page 477 • Creating Wireless Networks , on page 481 • Managing Services with Cisco Mobility Express , on page 490 • Managing the Cisco Mobility Expres...
+ROMmon is the bootloader — directly the boot lifecycle.
 
-## Q8. Boot and initialization lifecycle of the ISR 1100 series?
+**#2** [isr1100-sw-config.pdf — 0 C1111-8PLTELAWN ok 00:04:56] (score 0.467) — ROMmon auto-upgrade during first boot.
 
-Score: __ / 1
+**#3** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.461) — `show platform` output.
 
-**#1** [isr1100-sw-config.pdf - Configuring ROMMON] (score 0.474)
+---
 
-> on page 113 ROMmon Images A ROMmon image is a software package used by ROM Monitor (ROMmon) software on a router. The software package is separate from the consolidated package normally used to boot the router. For more information on ROMmon, see the "ROM Monitor Overview and Basic Procedures" secti...
+## Q9. Where do I configure VLANs on the C1111 in the CLI? — **Score 1 / 1**
 
-**#2** [isr1100-sw-config.pdf - 0 C1111-8PLTELAWN ok 00:04:56] (score 0.467)
+**#1** ← top, **relevant** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.496)
 
-> image for the first time, the device checks the installed version of the ROMMON, and upgrades if the system is running an older version. During the upgrade, do not power cycle the device. The system automatically power cycles the device after the new ROMMON is installed. After the installation, the ...
+> ... interface Wlan-GigabitEthernet slot/subslot/port ... switchport access vlan number Example: Router(config-if)#switchport access vlan 199 ... switchport mode access ... interface vlan number Example: Router(config)#interface vlan 199 ...
 
-**#3** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.461)
+Section is labelled WLAN, but the actual VLAN CLI commands shown
+(`switchport access vlan`, `switchport mode access`, `interface vlan N`)
+are the canonical answer regardless of the wireless context.
 
-> ISR-AP1100AX-B • ISR-AP1100AX-E • ISR-AP1100AX-Q • ISR-AP1100AX-Z Router#show platform Chassis type: C1131X-8PLTEPWB Slot Type State Insert time (ago) --------- ------------------- --------------------- ----------------- 0/0 C1131X-2x1GE ok 3w2d Cisco 1000 Series Integrated Services Router Software ...
+**#2** [isr1100-sw-config.pdf — Configuring Wi-Fi 6] (score 0.446) — more of the same.
 
-## Q9. Where do I configure VLANs on the C1111 in the CLI?
+**#3** [b-cisco-1100-series-hig.pdf — About Cisco 1000 Series Integrated Service Routers] (score 0.437) — LED indicators.
 
-Score: __ / 1
+---
 
-**#1** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.496)
+## Q10. How do I save running-config persistently on a Cisco router? — **Score 1 / 1**
 
-> describes how to configure the WiFi card to the internal switch interface on the Cisco C1100 Integrated Services Routers (ISRs). The WiFi card is connected to the internal switch interface, the Wlan-GigabitEthernet interface. The configuration of this interface is identical to the GigabitEthernet 0/...
+**#1** ← top, **relevant** [isr1100-sw-config.pdf — 255.255.255.0 IP subnet mask.] (score 0.630)
 
-**#2** [isr1100-sw-config.pdf - Configuring Wi-Fi 6] (score 0.446)
+> ... Saving Configuration Changes Use the copy running-config startup-config command to save your configuration changes to the startup configuration so that the changes will not be lost if the software reloads or a power outage occurs. For example: Router# copy running-config startup-config ...
 
-> interface Wlan-GigabitEthernet slot/subslot/port Example: Step 8 Router(config)#interface Wlan-GigabitEthernet 0/1/8 Use the switchport access vlan command to assign the port or range of ports into access ports. switchport accessvlan number Example: Router(config-if)#switchportaccess vlan 199 Step 9...
+Exactly answers.
 
-**#3** [isr1100-sw-config.pdf - CHAPTER 9] (score 0.431)
+**#2** [isr1100-sw-config.pdf — CHAPTER 8] (score 0.492) — password recovery / disable.
 
-> IPv4 address glean (using security-levelglean) and tracking (using tracking enable). • Multi-auth per user VLAN assignment is not supported. • NEAT/CISP is not supported. How to Configure Change of Authorization Essential dot1x | SANet Configuration aaa new-model aaa authentication dot1x default gro...
+**#3** [isr1100-sw-config.pdf — 1000 Series ISR looks for this file before finding the standard files-router-confg or the ciscortr.cfg.] (score 0.489) — `show running-config` output structure.
 
-## Q10. How do I save running-config persistently on a Cisco router?
+---
 
-Score: __ / 1
+## Notes on the 3 misses
 
-**#1** [isr1100-sw-config.pdf - 255.255.255.0 IP subnet mask.] (score 0.630)
+All three (Q2, Q5, Q7) are corpus-gap misses, not retrieval-quality
+misses:
 
-> requested by Exec. Reload Reason: Factory Reset. ***Return to ROMMON Prompt Saving Configuration Changes Use the copy running-config startup-config command to save your configuration changes to the startup configuration so that the changes will not be lost if the software reloads or a power outage o...
+- **Q2** ("default management interface"): the answer "Gi0/0/0 is the
+  default management interface" or "Vlan1 is the WebUI VLAN at
+  192.168.1.1" lives in the **WebUI User Guide** (doc #3 from
+  `docs/rag-sources.md`) and at the start of the **Basic Router
+  Configuration** chapter of the existing PDF, but not in chunks that
+  embed close to this query phrasing.
+- **Q5** ("management IP + default gateway"): same chapter as Q2, plus
+  the **Basic System Management Command Reference** (doc #4) covers
+  the `ip default-gateway` command directly.
+- **Q7** ("management VLAN"): the C1111 factory-default Vlan1
+  configuration is in Q3's top chunk but doesn't rank for this phrasing
+  because the chunk doesn't repeat the phrase "management VLAN" —
+  semantic similarity to the WLAN VLAN section wins.
 
-**#2** [isr1100-sw-config.pdf - CHAPTER 8] (score 0.492)
-
-> database file on a secure server. When the switch is returned to the default system configuration, you can download the saved files to the switch by using the Xmodem protocol. Cisco 1000 Series Integrated Services Router Software Configuration Guide 142 Control Router Access with Passwords and Privi...
-
-**#3** [isr1100-sw-config.pdf - 1000 Series ISR looks for this file before finding the standard files-router-confg or the ciscortr.cfg.] (score 0.489)
-
-> in the bootflash. If the file is not found in the bootflash, the router then looks for the standard files-router-confg and ciscortr.cfg. If none of the files are found, the router then checks for any inserted USB that may have stored these files in the same particular order. If there is a configurat...
+**Easiest fix:** download docs #3 and #4 from `docs/rag-sources.md` into
+`knowledge_base/docs/` and re-run `python -m backend.knowledge_agent.ingest`.
+Pipeline is idempotent — existing chunks won't duplicate; only the new
+PDFs' chunks get added. Doc #3 (WebUI guide) likely lifts Q7 directly;
+doc #4 (Basic System Mgmt cmd ref) lifts Q2 and Q5.
