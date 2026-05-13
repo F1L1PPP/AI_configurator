@@ -112,10 +112,26 @@ vlan_form:
     - { css: "input[id*='vlan' i]" }
     - { css: "input[name*='vlan' i]" }
   vlan_name:
+    # Cisco IOS XE 17.6.3a doesn't use <label> elements — "Name" is loose
+    # text in a sibling div. Label-based selectors silently fail, so the
+    # VLAN ends up created with no name. Lead with CSS targeting the
+    # ng-model / id / placeholder, fall back to label, and as a last
+    # resort target the 2nd text input in the Create VLAN modal
+    # (1st is VLAN ID, 2nd is Name).
+    - { css: "input[data-ng-model*='name' i]" }
+    - { css: "input[ng-model*='name' i]" }
+    - { css: "input[id*='vlanName' i]" }
+    - { css: "input[id*='vlan-name' i]" }
+    - { css: "input[id*='name' i]:not([id*='switchName'])" }
+    - { css: "input[name*='vlanName' i]" }
+    - { css: "input[name*='vlan-name' i]" }
+    - { css: "input[placeholder*='name' i]" }
     - { label: "Name" }
     - { label: "VLAN Name" }
-    - { css: "input[placeholder*='name' i]" }
-    - { css: "input[id*='name' i]" }
+    # Pragmatic positional fallback — Create VLAN modal has 2 text inputs
+    # in order: VLAN ID, Name.
+    - { css: ".k-window-content input[type='text']:not([readonly]):nth-of-type(2)" }
+    - { css: ".modal-content input[type='text']:not([readonly]):nth-of-type(2)" }
   save_button:
     # Cisco IOS XE 17.6.3a labels the save button "Apply to Device".
     # Order strategies most-specific-first.

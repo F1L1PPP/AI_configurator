@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 
+import ApprovalButtons from "@/components/preview/ApprovalButtons";
 import { endpoints } from "../../lib/api";
 import {
   AgentEvent,
@@ -17,6 +18,10 @@ type Msg = {
   time: string;
   sources?: AgentSource[];
   error?: boolean;
+  // Set on agent replies that proposed an action — renders inline
+  // APPROVE / REJECT / EXECUTE NOW buttons under the bubble so the
+  // user doesn't have to navigate to /preview.
+  actionId?: string;
 };
 
 type WsStatus = "open" | "closed" | "error";
@@ -38,7 +43,11 @@ const Bubble = ({ msg }: { msg: Msg }) => {
       >
         {isUser ? "U" : "AI"}
       </div>
-      <div className={`flex max-w-[70%] flex-col gap-1 ${isUser ? "items-end" : ""}`}>
+      <div
+        className={`flex ${msg.actionId ? "max-w-[85%]" : "max-w-[70%]"} flex-col gap-1 ${
+          isUser ? "items-end" : ""
+        }`}
+      >
         <div
           className={`whitespace-pre-wrap border px-3 py-2 text-[11px] leading-relaxed ${
             isUser
@@ -62,6 +71,14 @@ const Bubble = ({ msg }: { msg: Msg }) => {
                 {s.source.replace(/\.pdf$/i, "")} · {s.section.slice(0, 40)}
               </span>
             ))}
+          </div>
+        )}
+        {msg.actionId && (
+          <div className="w-full pt-1">
+            <div className="mono mb-1 text-[8px] tracking-wider text-ink-faint">
+              ACTION: {msg.actionId}
+            </div>
+            <ApprovalButtons actionId={msg.actionId} />
           </div>
         )}
         <span className="mono text-[8px] tracking-wider text-ink-line">{msg.time}</span>
@@ -163,6 +180,11 @@ export default function ChatPage() {
           text: body.final_text || "(empty reply)",
           time: nowTime(),
           sources: sources.length > 0 ? sources : undefined,
+          // When the planner proposed a write, the response carries the
+          // action_id. Surface it on the bubble so inline APPROVE /
+          // EXECUTE NOW buttons render directly under the agent reply.
+          // No /preview navigation needed.
+          actionId: body.awaiting_approval ?? undefined,
         },
       ]);
       setHistory(body.history);

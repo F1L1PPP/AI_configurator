@@ -151,10 +151,19 @@ class VlanPage:
         log.info("vlan_page_id_filled", vlan_id=vlan_id)
 
     def set_vlan_name(self, name: str) -> None:
-        """Fill the VLAN Name field. Some IOS XE builds omit it — log + skip."""
+        """Fill the VLAN Name field.
+
+        On IOS XE 17.6.3a the modal exposes a Name field. If
+        `first_match` can't locate it (selectors haven't caught up
+        with this firmware's DOM), dump the input inventory so the
+        operator can refine the yaml — the silent skip previously here
+        meant VLANs were created with empty Name, and verify_vlan_exists
+        then failed with a confusing "name mismatch".
+        """
         loc = first_match(self.page, self._sel["vlan_form"]["vlan_name"])
         if loc is None:
-            log.warning("vlan_page_name_field_absent", name=name)
+            log.warning("vlan_page_name_field_absent_dumping_inputs", name=name)
+            self._dump_diagnostics("vlan-name-field-missing")
             return
         loc.click()
         loc.fill(name)

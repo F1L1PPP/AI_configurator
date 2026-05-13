@@ -54,10 +54,10 @@ export default function DashboardPage() {
           <div className="flex flex-col gap-1.5">
             <ScenarioCard
               title="Change hostname"
-              description="Rename the router (LAB-R1 → LAB-R5). CLI fast path."
+              description="Rename the router. Pick CLI (fast) or WebUI (screenshots)."
               href="/actions/change-hostname"
               status="shipped"
-              badge="CLI"
+              badge="CLI · WebUI"
             />
             <ScenarioCard
               title="Set interface IP"
