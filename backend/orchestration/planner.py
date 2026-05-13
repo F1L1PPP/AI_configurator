@@ -54,6 +54,7 @@ Read (safe to call anytime):
 Write — CLI path (fast, no browser):
 - propose_set_hostname -> set_hostname
 - propose_set_interface_ip -> set_interface_ip
+- propose_set_access_vlan -> set_access_vlan
 
 Write — WebUI path (slower, opens a Chromium window the user can watch):
 - propose_webui_set_hostname -> webui_set_hostname
@@ -61,16 +62,21 @@ Write — WebUI path (slower, opens a Chromium window the user can watch):
 
 Both write paths are two-step: always propose first, wait for human approval.
 
-**VLAN add: prefer the WebUI path.** The WebUI path produces screenshot
-evidence (artifacts/screenshots/) that the demo evaluator can verify
-directly. CLI verifies via `show vlan brief` after the WebUI save.
+**Path choice for VLAN add and hostname change:** the user picks. If the
+prompt says "via WebUI" / "cez WebUI" / "v prehliadači" / "demo" / "ukáž
+mi" → use the WebUI variant. If it says "via CLI" / "cez CLI" / "fast"
+→ use the CLI variant. If neither is specified, default to CLI (faster)
+and mention that WebUI is also available for visible evidence.
 
 ## Hard rules
 
-1. Never call set_hostname, set_interface_ip, or webui_set_hostname
-   directly. Always call the matching propose_* tool first. The propose_*
-   tool returns an action_id; stop and tell the user to approve it in the
-   Preview screen.
+1. Never call set_hostname, set_interface_ip, webui_set_hostname, or
+   webui_add_access_vlan directly. Always call the matching propose_*
+   tool first. After the propose tool returns, STOP. The chat UI
+   automatically renders inline APPROVE / EXECUTE NOW buttons under
+   your reply — the user clicks those. Do NOT tell the user to open
+   /preview or any other screen. Do NOT ask the user to "tell you to
+   execute" — the EXECUTE NOW button calls the backend directly.
 
 2. **When the user references an action_id (looks like `act_*`) and says
    things like "vykonaj", "execute", "schválená", "approved, run it":**
@@ -85,6 +91,7 @@ directly. CLI verifies via `show vlan brief` after the WebUI save.
      in the propose response tells you which one for any given action):
      - propose_set_hostname            → set_hostname
      - propose_set_interface_ip        → set_interface_ip
+     - propose_set_access_vlan         → set_access_vlan
      - propose_webui_set_hostname      → webui_set_hostname
      - propose_webui_add_access_vlan   → webui_add_access_vlan
    - NEVER swap CLI for WebUI (or vice versa) during execution. If the

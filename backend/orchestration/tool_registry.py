@@ -54,6 +54,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
     {
         "set_hostname",
         "set_interface_ip",
+        "set_access_vlan",
         "webui_set_hostname",
         "webui_add_access_vlan",
     }
@@ -235,6 +236,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "propose_set_access_vlan",
+        "description": (
+            "Propose a CLI access-VLAN add. Does NOT touch the router — "
+            "registers the action and returns an action_id that must be "
+            "approved before set_access_vlan executes. Use this when the "
+            "user wants the fast CLI path (no browser); for visible "
+            "screenshot evidence, prefer propose_webui_add_access_vlan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {
+                    "type": "integer",
+                    "description": "VLAN number (1–4094).",
+                },
+                "vlan_name": {
+                    "type": "string",
+                    "description": "Human-readable VLAN name (1–32 chars, letters/digits/_/-).",
+                },
+            },
+            "required": ["vlan_id", "vlan_name"],
+        },
+    },
+    {
+        "name": "set_access_vlan",
+        "description": (
+            "Execute a previously approved CLI access-VLAN add. Runs "
+            "'vlan <id>' + 'name <name>' inside config mode via SSH, "
+            "takes pre/post snapshots, and returns the raw output. "
+            "Requires an APPROVED action_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {"type": "integer"},
+                "vlan_name": {"type": "string"},
+                "action_id": {"type": "string"},
+            },
+            "required": ["vlan_id", "vlan_name", "action_id"],
+        },
+    },
+    {
         "name": "propose_webui_add_access_vlan",
         "description": (
             "Propose an access VLAN add executed via the Cisco WebUI "
@@ -300,7 +343,8 @@ def _propose_set_hostname(new_name: str) -> dict:
         "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
-            f"Open /preview?action_id={action_id} and click APPROVE, then ask me to execute."
+            "Use the APPROVE and EXECUTE NOW buttons below this message. "
+            "No need to open another screen."
         ),
     }
 
@@ -321,7 +365,25 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
             "mask": mask,
             "action_id": action_id,
         },
-        "next_step": f"Open /preview?action_id={action_id} and click APPROVE.",
+        "next_step": ("Use the APPROVE and EXECUTE NOW buttons below this message."),
+    }
+
+
+def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
+    action_id = propose_action("set_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name})
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": (
+            f"Will run: 'vlan {vlan_id}' + ' name {vlan_name}' in config mode on the C1111"
+        ),
+        "execute_tool": "set_access_vlan",
+        "execute_params": {
+            "vlan_id": vlan_id,
+            "vlan_name": vlan_name,
+            "action_id": action_id,
+        },
+        "next_step": ("Use the APPROVE and EXECUTE NOW buttons below this message."),
     }
 
 
@@ -336,9 +398,9 @@ def _propose_webui_set_hostname(new_name: str) -> dict:
         "execute_tool": "webui_set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
-            f"Open /preview?action_id={action_id} and click APPROVE, "
-            "then return to chat and ask me to execute. Headed Chromium "
-            "will open so you can watch the clicks."
+            "Use the APPROVE and EXECUTE NOW buttons below this message. "
+            "Headed Chromium will open when you click EXECUTE NOW so you "
+            "can watch the clicks."
         ),
     }
 
@@ -362,9 +424,9 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "action_id": action_id,
         },
         "next_step": (
-            f"Open /preview?action_id={action_id} and click APPROVE, "
-            "then return to chat and ask me to execute. Headed Chromium "
-            "will open so you can watch the clicks."
+            "Use the APPROVE and EXECUTE NOW buttons below this message. "
+            "Headed Chromium will open when you click EXECUTE NOW so you "
+            "can watch the clicks."
         ),
     }
 
@@ -379,6 +441,8 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "set_hostname": write_tools.set_hostname,
     "propose_set_interface_ip": _propose_set_interface_ip,
     "set_interface_ip": write_tools.set_interface_ip,
+    "propose_set_access_vlan": _propose_set_access_vlan,
+    "set_access_vlan": write_tools.set_access_vlan,
     "propose_webui_set_hostname": _propose_webui_set_hostname,
     "webui_set_hostname": change_hostname_via_webui,
     "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,

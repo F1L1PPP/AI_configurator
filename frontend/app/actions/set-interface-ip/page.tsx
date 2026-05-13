@@ -21,10 +21,10 @@ export default function SetInterfaceIpPage() {
     <ScenarioForm
       title="Set interface IP (CLI)"
       description="Assigns an IPv4 address + mask to a routed interface and brings it
-        up (`no shutdown`). Will propose first — review the diff on the
-        Preview screen and approve before the agent sends the commands."
+        up (`no shutdown`). Will propose first — APPROVE and EXECUTE NOW
+        on the next screen run it for real."
       buildPrompt={() =>
-        `Configure interface ${iface.trim()} with IP ${ip.trim()} mask ${mask.trim()} and bring it up.`
+        `Set the IP address ${ip.trim()} with mask ${mask.trim()} on interface ${iface.trim()} via CLI on the C1111.`
       }
       canSubmit={canSubmit}
     >

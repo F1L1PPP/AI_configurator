@@ -197,3 +197,68 @@ def test_set_interface_ip_rejects_bad_interface(_mock_pool, _mock_snapshot):
     ):
         with pytest.raises(ValueError, match="invalid interface name"):
             wt.set_interface_ip(hostile, "10.0.0.1", "255.255.255.0", action_id="anything")
+
+
+# ---------------------------------------------------------------------------
+# set_access_vlan
+# ---------------------------------------------------------------------------
+
+
+def test_set_access_vlan_refuses_without_approval(_mock_snapshot):
+    aid = propose_action("set_access_vlan", {"vlan_id": 40, "vlan_name": "OFFICE"})
+    with pytest.raises(NotApproved):
+        wt.set_access_vlan(40, "OFFICE", action_id=aid)
+
+
+def test_set_access_vlan_sends_correct_commands(_mock_pool, _mock_snapshot):
+    aid = propose_action("set_access_vlan", {"vlan_id": 40, "vlan_name": "OFFICE"})
+    approve_action(aid)
+    result = wt.set_access_vlan(40, "OFFICE", action_id=aid)
+    _mock_pool.send_config_set.assert_called_once()
+    cmds = _mock_pool.send_config_set.call_args.args[0]
+    assert "vlan 40" in cmds
+    assert " name OFFICE" in cmds
+    assert result["tool"] == "set_access_vlan"
+    assert result["params"] == {"vlan_id": 40, "vlan_name": "OFFICE"}
+
+
+def test_set_access_vlan_takes_pre_then_post_snapshot(_mock_pool, _mock_snapshot):
+    aid = propose_action("set_access_vlan", {"vlan_id": 40, "vlan_name": "OFFICE"})
+    approve_action(aid)
+    wt.set_access_vlan(40, "OFFICE", action_id=aid)
+    assert _mock_snapshot.call_args_list[0] == call(aid, "pre")
+    assert _mock_snapshot.call_args_list[1] == call(aid, "post")
+
+
+def test_set_access_vlan_rejects_out_of_range_id(_mock_pool, _mock_snapshot):
+    for bad in (0, -1, 4095, 9999):
+        with pytest.raises(ValueError, match="invalid VLAN id"):
+            wt.set_access_vlan(bad, "OFFICE", action_id="anything")
+    _mock_pool.send_config_set.assert_not_called()
+
+
+def test_set_access_vlan_rejects_bool_id(_mock_pool, _mock_snapshot):
+    """bool is a subclass of int — guard against True/False being accepted."""
+    with pytest.raises(ValueError, match="invalid VLAN id"):
+        wt.set_access_vlan(True, "OFFICE", action_id="anything")  # type: ignore[arg-type]
+
+
+def test_set_access_vlan_rejects_injection_in_name(_mock_pool, _mock_snapshot):
+    """VLAN names with newlines / spaces / shell chars must be rejected before SSH."""
+    for hostile in (
+        "OFFICE\n shutdown",
+        "OFFICE 2",
+        "office;rm",
+        "x" * 33,
+        "",
+    ):
+        with pytest.raises(ValueError, match="invalid VLAN name"):
+            wt.set_access_vlan(40, hostile, action_id="anything")
+    _mock_pool.send_config_set.assert_not_called()
+
+
+def test_set_access_vlan_accepts_valid_names(_mock_pool, _mock_snapshot):
+    aid = propose_action("set_access_vlan", {"vlan_id": 40, "vlan_name": "OFFICE"})
+    approve_action(aid)
+    for ok in ("OFFICE", "lab-vlan-1", "DMZ_INTERNAL", "v" * 32):
+        wt._validate_vlan_name(ok)  # no exception

@@ -48,6 +48,11 @@ _HOSTNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,62}$")
 # Covers GigabitEthernet0/0/1, Vlan10, FastEthernet1/0/2, etc.
 _INTERFACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9/.:\-]{1,30}$")
 
+# Cisco VLAN name grammar: 1-32 chars; letters/digits/underscores/hyphens.
+# Cisco IOS docs say names are alphanumeric "without spaces or punctuation
+# other than _ and -". Mirrors the form validation on the frontend.
+_VLAN_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
 
 # ---------------------------------------------------------------------------
 # Validators — raise ValueError on bad input; never reach Netmiko
@@ -78,6 +83,21 @@ def _validate_ipv4(value: str, kind: str) -> None:
         ipaddress.IPv4Address(value)
     except (ipaddress.AddressValueError, ValueError) as exc:
         raise ValueError(f"invalid IPv4 {kind} {value!r}: {exc}") from exc
+
+
+def _validate_vlan_id(vlan_id: int) -> None:
+    if not isinstance(vlan_id, int) or isinstance(vlan_id, bool):
+        raise ValueError(f"invalid VLAN id {vlan_id!r}: must be int")
+    if not (1 <= vlan_id <= 4094):
+        raise ValueError(f"invalid VLAN id {vlan_id}: must be 1..4094")
+
+
+def _validate_vlan_name(name: str) -> None:
+    if not isinstance(name, str) or not _VLAN_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"invalid VLAN name {name!r}: must be 1-32 chars, "
+            "letters/digits/_/- only (no spaces or punctuation)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +237,68 @@ def set_interface_ip(
     return {
         "tool": "set_interface_ip",
         "params": {"interface": interface, "ip": ip, "mask": mask},
+        "output": output,
+        "snapshot_pre": str(pre_dir),
+        "snapshot_post": str(post_dir),
+        "duration_ms": ms,
+    }
+
+
+def set_access_vlan(vlan_id: int, vlan_name: str, action_id: str) -> dict:
+    """Create an access VLAN via CLI: `vlan <id>` + `name <name>`.
+
+    Example:
+        set_access_vlan(40, "OFFICE", action_id)
+
+    Mirrors `set_hostname` / `set_interface_ip` shape exactly. Validates
+    BOTH inputs before the approval check so a bad VLAN id never reaches
+    Netmiko. Takes pre/post snapshots around the change.
+
+    Note: this only CREATES the VLAN in the VLAN database. Assigning it
+    to a switchport (`switchport access vlan <id>` on an interface) is a
+    separate operation — out of scope for the §2 scenarios.
+    """
+    _validate_vlan_id(vlan_id)
+    _validate_vlan_name(vlan_name)
+    _guard(action_id)
+
+    t0 = time.monotonic()
+    pre_dir: Path = take_snapshot(action_id, "pre")
+
+    try:
+        conn = _get_conn()
+        output: str = conn.send_config_set(
+            [
+                f"vlan {vlan_id}",
+                f" name {vlan_name}",
+            ],
+            read_timeout=CONFIG_READ_TIMEOUT_S,
+        )
+        ms = int((time.monotonic() - t0) * 1000)
+    except Exception as exc:
+        mark_failed(action_id)
+        log.error(
+            "write_failed",
+            tool="set_access_vlan",
+            action_id=action_id,
+            error=str(exc),
+        )
+        raise
+
+    post_dir: Path = take_snapshot(action_id, "post")
+    mark_executed(action_id)
+
+    log.info(
+        "tool_call",
+        tool="set_access_vlan",
+        params={"vlan_id": vlan_id, "vlan_name": vlan_name, "action_id": action_id},
+        result_summary=f"vlan {vlan_id} name {vlan_name}",
+        duration_ms=ms,
+    )
+
+    return {
+        "tool": "set_access_vlan",
+        "params": {"vlan_id": vlan_id, "vlan_name": vlan_name},
         "output": output,
         "snapshot_pre": str(pre_dir),
         "snapshot_post": str(post_dir),
