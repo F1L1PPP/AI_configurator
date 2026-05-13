@@ -31,7 +31,9 @@ def main() -> int:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=300)
-        context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
+        context = browser.new_context(
+            ignore_https_errors=True, viewport={"width": 1280, "height": 800}
+        )
         page = context.new_page()
         step = Step(session)
 

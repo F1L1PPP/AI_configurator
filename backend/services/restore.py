@@ -98,6 +98,6 @@ def restore_config(snapshot_path: str | Path) -> dict:
 
     return {
         "restored_from": str(snap_dir),
-        "lines_sent":    len(config_lines),
-        "output":        output[:500],
+        "lines_sent": len(config_lines),
+        "output": output[:500],
     }

@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -34,19 +35,47 @@ log = get_logger(__name__)
 VIEWPORT = {"width": 1400, "height": 900}
 
 
+def _env_truthy(name: str) -> bool:
+    """Treat 1/true/yes (any case) as on. Empty / unset → off."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_headless(explicit: bool | None) -> bool:
+    """Pick headless mode: explicit caller > PLAYWRIGHT_HEADLESS > CI=1 > False.
+
+    Audit #26 — playground + production both need to flip to headless when
+    running in CI (no display server). Env var override lets you toggle
+    without code changes.
+    """
+    if explicit is not None:
+        return explicit
+    return _env_truthy("PLAYWRIGHT_HEADLESS") or _env_truthy("CI")
+
+
 @contextmanager
-def webui_browser(*, headless: bool = False, slow_mo: int = 400) -> Iterator[Page]:
+def webui_browser(
+    *,
+    headless: bool | None = None,
+    slow_mo: int | None = None,
+) -> Iterator[Page]:
     """Launch Chromium configured for the Cisco WebUI and yield a fresh Page.
 
     Args:
-        headless: False for dev (you watch it click), True for CI/smoke runs.
-        slow_mo:  ms between actions; only meaningful headed.
+        headless: True for CI/smoke runs. None (default) reads
+                  PLAYWRIGHT_HEADLESS or CI env vars; falls back to False
+                  (dev / watch-it-click).
+        slow_mo:  ms between actions. None (default) reads PLAYWRIGHT_SLOW_MO
+                  env var or falls back to 400 (headed) / 0 (headless).
 
     The browser closes automatically on context exit.
     """
+    headless_final = _resolve_headless(headless)
+    if slow_mo is None:
+        env_slow = os.environ.get("PLAYWRIGHT_SLOW_MO", "").strip()
+        slow_mo = int(env_slow) if env_slow.isdigit() else (0 if headless_final else 400)
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=headless,
+            headless=headless_final,
             slow_mo=slow_mo,
             args=["--ignore-certificate-errors"],
         )
@@ -56,7 +85,12 @@ def webui_browser(*, headless: bool = False, slow_mo: int = 400) -> Iterator[Pag
         )
         page = context.new_page()
         _attach_listeners(page)
-        log.info("webui_browser_launched", headless=headless, viewport=VIEWPORT)
+        log.info(
+            "webui_browser_launched",
+            headless=headless_final,
+            slow_mo=slow_mo,
+            viewport=VIEWPORT,
+        )
         try:
             yield page
         finally:

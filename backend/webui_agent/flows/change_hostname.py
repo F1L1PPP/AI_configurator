@@ -126,13 +126,13 @@ def change_hostname_via_webui(
         )
 
         return {
-            "tool":          "webui_set_hostname",
-            "old_hostname":  old_hostname,
-            "new_hostname":  new_name,
-            "snapshot_pre":  str(pre_dir),
+            "tool": "webui_set_hostname",
+            "old_hostname": old_hostname,
+            "new_hostname": new_name,
+            "snapshot_pre": str(pre_dir),
             "snapshot_post": str(post_dir),
-            "screenshots":   str(ev.session_dir),
-            "verified":      True,
+            "screenshots": str(ev.session_dir),
+            "verified": True,
         }
 
     except Exception as exc:

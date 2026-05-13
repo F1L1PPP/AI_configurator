@@ -23,18 +23,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from anthropic import Anthropic
 
+from backend.core.eventbus import bus
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
-from backend.orchestration.tool_registry import TOOL_SCHEMAS, execute_tool
+from backend.orchestration.tool_registry import TOOL_SCHEMAS, WRITE_TOOLS, execute_tool
 
 log = get_logger(__name__)
 
-MODEL          = "claude-haiku-4-5-20251001"
-MAX_TOKENS     = 4096
+MODEL = "claude-haiku-4-5-20251001"
+MAX_TOKENS = 4096
 MAX_ITERATIONS = 8
 
 
@@ -47,22 +49,34 @@ English or asks for it.
 
 Read (safe to call anytime):
 - show_version, show_ip_interface_brief, show_running_config, show_vlan_brief
+- search_docs — semantic search over the curated Cisco C1111 / IOS XE 17.x doc corpus
 
 Write — CLI path (fast, no browser):
 - propose_set_hostname -> set_hostname
 - propose_set_interface_ip -> set_interface_ip
+- propose_set_access_vlan -> set_access_vlan
 
 Write — WebUI path (slower, opens a Chromium window the user can watch):
 - propose_webui_set_hostname -> webui_set_hostname
+- propose_webui_add_access_vlan -> webui_add_access_vlan
 
 Both write paths are two-step: always propose first, wait for human approval.
 
+**Path choice for VLAN add and hostname change:** the user picks. If the
+prompt says "via WebUI" / "cez WebUI" / "v prehliadači" / "demo" / "ukáž
+mi" → use the WebUI variant. If it says "via CLI" / "cez CLI" / "fast"
+→ use the CLI variant. If neither is specified, default to CLI (faster)
+and mention that WebUI is also available for visible evidence.
+
 ## Hard rules
 
-1. Never call set_hostname, set_interface_ip, or webui_set_hostname
-   directly. Always call the matching propose_* tool first. The propose_*
-   tool returns an action_id; stop and tell the user to approve it in the
-   Preview screen.
+1. Never call set_hostname, set_interface_ip, webui_set_hostname, or
+   webui_add_access_vlan directly. Always call the matching propose_*
+   tool first. After the propose tool returns, STOP. The chat UI
+   automatically renders inline APPROVE / EXECUTE NOW buttons under
+   your reply — the user clicks those. Do NOT tell the user to open
+   /preview or any other screen. Do NOT ask the user to "tell you to
+   execute" — the EXECUTE NOW button calls the backend directly.
 
 2. **When the user references an action_id (looks like `act_*`) and says
    things like "vykonaj", "execute", "schválená", "approved, run it":**
@@ -75,9 +89,11 @@ Both write paths are two-step: always propose first, wait for human approval.
      call, plus `action_id` = the one the user mentioned.
    - Examples of the propose → execute mapping (the `execute_tool` field
      in the propose response tells you which one for any given action):
-     - propose_set_hostname        → set_hostname
-     - propose_set_interface_ip    → set_interface_ip
-     - propose_webui_set_hostname  → webui_set_hostname
+     - propose_set_hostname            → set_hostname
+     - propose_set_interface_ip        → set_interface_ip
+     - propose_set_access_vlan         → set_access_vlan
+     - propose_webui_set_hostname      → webui_set_hostname
+     - propose_webui_add_access_vlan   → webui_add_access_vlan
    - NEVER swap CLI for WebUI (or vice versa) during execution. If the
      user originally asked for the WebUI path, execute via webui_set_*.
 
@@ -88,12 +104,21 @@ Both write paths are two-step: always propose first, wait for human approval.
      reliable; WebUI is for demos and visual verification).
 
 4. Never invent device data. If the user asks something you don't know,
-   call a read tool first.
+   call a read tool first. For ANY configuration question (CLI syntax,
+   WebUI nav, defaults, supported features), call `search_docs` with a
+   focused query FIRST to ground your answer in the actual Cisco docs —
+   then summarize. When you used `search_docs` results, end your reply
+   with a short **Sources** section listing each cited document and
+   section, e.g.:
+       **Sources**
+       - isr1100-sw-config.pdf — Basic Router Configuration
+   Skip the Sources section only if you did not call `search_docs` in
+   this turn.
 
 5. Stay in scope: hostname changes (CLI or WebUI), interface IP
-   assignments, VLAN add (Day 7), and read operations. If asked for
-   OSPF/ACL/DHCP/static routes/anything else, politely refuse and explain
-   what's in scope.
+   assignments, access VLAN add (WebUI), and read operations. If asked
+   for OSPF/ACL/DHCP/static routes/trunk VLANs/VLAN delete/anything
+   else, politely refuse and explain what's in scope.
 
 6. One C1111 only — no multi-device targeting.
 
@@ -111,25 +136,36 @@ rather than dumping the raw output."""
 class PlannerEvent:
     """One event in the planner's execution trace."""
 
-    kind: str                              # agent_thinking | tool_call | tool_result | awaiting_approval | applied | error
+    kind: str  # agent_thinking | tool_call | tool_result | awaiting_approval | applied | verified | error
     data: dict[str, Any] = field(default_factory=dict)
+
+
+def _emit(events: list[PlannerEvent], kind: str, data: dict[str, Any]) -> None:
+    """Append to the in-memory trace AND publish to the live event bus."""
+    events.append(PlannerEvent(kind, data))
+    bus.publish(
+        {
+            "type": kind,
+            "ts": datetime.now(UTC).isoformat(),
+            "data": data,
+        }
+    )
 
 
 @dataclass
 class PlannerResult:
     final_text: str
-    events:     list[PlannerEvent]
-    messages:   list[dict[str, Any]]       # full conversation, for follow-up turns
+    events: list[PlannerEvent]
+    messages: list[dict[str, Any]]  # full conversation, for follow-up turns
     stop_reason: str = "end_turn"
 
 
 def _text_from_response(response: Any) -> str:
     """Concatenate all text blocks in an Anthropic Message response."""
-    chunks: list[str] = []
-    for block in response.content:
-        if getattr(block, "type", None) == "text":
-            chunks.append(block.text)
-    return "\n".join(chunks).strip()
+    # Single-pass generator + join — no manual loop / list growth.
+    return "\n".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    ).strip()
 
 
 def _serialize_assistant_content(response: Any) -> list[dict]:
@@ -149,12 +185,14 @@ def _serialize_assistant_content(response: Any) -> list[dict]:
         if kind == "text":
             out.append({"type": "text", "text": block.text})
         elif kind == "tool_use":
-            out.append({
-                "type":  "tool_use",
-                "id":    block.id,
-                "name":  block.name,
-                "input": block.input,
-            })
+            out.append(
+                {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                }
+            )
         else:
             # Future-proof: preserve unknown block via the SDK's Pydantic
             # serializer. Log so we notice new block types showing up.
@@ -193,7 +231,7 @@ def run_planner(
     events: list[PlannerEvent] = []
 
     for iteration in range(MAX_ITERATIONS):
-        events.append(PlannerEvent("agent_thinking", {"iteration": iteration}))
+        _emit(events, "agent_thinking", {"iteration": iteration, "model": MODEL})
         log.info("planner_iteration", iteration=iteration)
 
         response = client.messages.create(
@@ -227,36 +265,59 @@ def run_planner(
             if getattr(block, "type", None) != "tool_use":
                 continue
 
-            events.append(PlannerEvent("tool_call", {
-                "name":  block.name,
-                "input": block.input,
-                "id":    block.id,
-            }))
+            _emit(
+                events,
+                "tool_call",
+                {"name": block.name, "input": dict(block.input), "id": block.id},
+            )
             log.info("tool_call", tool=block.name, params=block.input)
 
             result = execute_tool(block.name, dict(block.input))
-            events.append(PlannerEvent("tool_result", {
-                "name":   block.name,
-                "result": result,
-            }))
+            _emit(events, "tool_result", {"name": block.name, "result": result})
 
             # Surface action proposals as a dedicated event for UI consumption
             if isinstance(result, dict) and result.get("status") == "awaiting_approval":
-                events.append(PlannerEvent("awaiting_approval", {
-                    "action_id": result.get("action_id"),
-                    "preview":   result.get("preview"),
-                }))
+                _emit(
+                    events,
+                    "awaiting_approval",
+                    {
+                        "action_id": result.get("action_id"),
+                        "preview": result.get("preview"),
+                    },
+                )
 
-            tool_result_blocks.append({
-                "type":        "tool_result",
-                "tool_use_id": block.id,
-                "content":     json.dumps(result, default=str),
-            })
+            # Successful write → emit `applied` so the UI can advance the timeline.
+            # We infer success from: no `error` key in result + a `snapshot_post`
+            # path (write tools always set this on success).
+            if (
+                block.name in WRITE_TOOLS
+                and isinstance(result, dict)
+                and "error" not in result
+                and result.get("snapshot_post")
+            ):
+                _emit(
+                    events,
+                    "applied",
+                    {
+                        "tool": block.name,
+                        "summary": result.get("output", "")[:200],
+                        "snapshot_post": result.get("snapshot_post"),
+                        "duration_ms": result.get("duration_ms"),
+                    },
+                )
+
+            tool_result_blocks.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result, default=str),
+                }
+            )
 
         messages.append({"role": "user", "content": tool_result_blocks})
 
     # Hit iteration cap
-    events.append(PlannerEvent("error", {"reason": "iteration_cap_reached"}))
+    _emit(events, "error", {"message": "iteration_cap_reached", "max": MAX_ITERATIONS})
     log.warning("planner_iteration_cap", iterations=MAX_ITERATIONS)
     return PlannerResult(
         final_text="(stopped: too many tool-use iterations)",

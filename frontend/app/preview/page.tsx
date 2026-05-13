@@ -1,3 +1,4 @@
+import LiveEventStream from "@/components/LiveEventStream";
 import ApprovalButtons from "@/components/preview/ApprovalButtons";
 
 const plannedActions = [
@@ -87,6 +88,7 @@ export default function PreviewPage({
         </section>
 
         <ApprovalButtons actionId={actionId} />
+        <LiveEventStream emptyText="WAITING FOR PLANNER EVENTS..." />
       </section>
 
       <aside className="flex flex-col gap-4">

@@ -2,20 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
 from backend.orchestration import tool_registry as tr
 from backend.orchestration.confirmations import (
     NotApproved,
-    _reset_for_testing,
 )
 
-
-@pytest.fixture(autouse=True)
-def _clean():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +166,13 @@ def test_propose_set_hostname_returns_awaiting_approval():
 
 
 def test_propose_set_interface_ip_returns_awaiting_approval():
-    result = tr.execute_tool("propose_set_interface_ip", {
-        "interface": "Gi0/0/0",
-        "ip":        "10.0.0.1",
-        "mask":      "255.255.255.0",
-    })
+    result = tr.execute_tool(
+        "propose_set_interface_ip",
+        {
+            "interface": "Gi0/0/0",
+            "ip": "10.0.0.1",
+            "mask": "255.255.255.0",
+        },
+    )
     assert result["status"] == "awaiting_approval"
     assert "Gi0/0/0" in result["preview"]

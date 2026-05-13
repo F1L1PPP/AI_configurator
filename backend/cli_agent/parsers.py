@@ -20,9 +20,7 @@ def parse(platform: str, command: str, raw_output: str) -> list[dict] | str:
     no template is available for (platform, command).
     """
     try:
-        result: list[dict] = _ntc_parse(
-            platform=platform, command=command, data=raw_output
-        )
+        result: list[dict] = _ntc_parse(platform=platform, command=command, data=raw_output)
         if result:
             log.debug("parse_ok", platform=platform, command=command, rows=len(result))
             return result

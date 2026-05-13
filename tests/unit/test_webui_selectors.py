@@ -17,7 +17,7 @@ def test_default_map_has_login_section():
     assert "login" in sel
     assert "username" in sel["login"]
     assert "password" in sel["login"]
-    assert "submit"   in sel["login"]
+    assert "submit" in sel["login"]
 
 
 def test_login_username_strategies_are_a_list_of_dicts():
@@ -49,7 +49,7 @@ def test_default_map_has_hostname_form_section():
     sel = load_selectors()
     assert "hostname_form" in sel
     assert "hostname_input" in sel["hostname_form"]
-    assert "apply_button"   in sel["hostname_form"]
+    assert "apply_button" in sel["hostname_form"]
 
 
 def test_missing_map_raises():

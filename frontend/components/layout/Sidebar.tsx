@@ -16,7 +16,20 @@ type IconName =
   | "preview"
   | "live";
 
+const ICON_LABELS: Record<IconName, string> = {
+  dashboard: "Dashboard",
+  devices:   "Devices",
+  ai:        "AI Chat",
+  config:    "Configurations",
+  templates: "Templates",
+  logs:      "Logs",
+  settings:  "Settings",
+  preview:   "Preview",
+  live:      "WebUI Live",
+};
+
 const Icon = ({ name }: { name: IconName }) => {
+  // SVGs get role='img' + aria-label so screen readers announce them (audit #19).
   const common = {
     width: 14,
     height: 14,
@@ -25,6 +38,8 @@ const Icon = ({ name }: { name: IconName }) => {
     strokeWidth: 1.4,
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
+    role: "img" as const,
+    "aria-label": ICON_LABELS[name],
   };
   switch (name) {
     case "dashboard":
@@ -103,19 +118,17 @@ const Icon = ({ name }: { name: IconName }) => {
 
 type NavItem = { label: string; icon: IconName; href: string };
 
+// Only pages that actually exist + work. The System section used to list
+// Devices / Configurations / Templates / Logs / Settings — all dead links
+// that confused users into thinking the app was broken. They come back
+// as real pages get built (Day 8 ships Logs / Backups / Devices per
+// PROJECT_PLAN.md §7 Day 8).
 const mainNav: NavItem[] = [
   { label: "Dashboard", icon: "dashboard", href: "/" },
   { label: "AI Chat", icon: "ai", href: "/chat" },
+  { label: "Quick Actions", icon: "config", href: "/actions" },
   { label: "Preview", icon: "preview", href: "/preview" },
   { label: "WebUI Live", icon: "live", href: "/webui-live" },
-];
-
-const systemNav: NavItem[] = [
-  { label: "Devices", icon: "devices", href: "/devices" },
-  { label: "Configurations", icon: "config", href: "/config" },
-  { label: "Templates", icon: "templates", href: "/templates" },
-  { label: "Logs", icon: "logs", href: "/logs" },
-  { label: "Settings", icon: "settings", href: "/settings" },
 ];
 
 function NavSection({ label, items }: { label: string; items: NavItem[] }) {
@@ -164,7 +177,6 @@ export default function Sidebar() {
 
       <nav className="flex-1 overflow-y-auto">
         <NavSection label="Main" items={mainNav} />
-        <NavSection label="System" items={systemNav} />
       </nav>
 
       <div className="border-t border-rule px-4 py-3">

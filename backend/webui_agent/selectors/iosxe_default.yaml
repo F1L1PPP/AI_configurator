@@ -88,27 +88,57 @@ vlan_nav:
     - { css: "[routerlink*='vlan' i]" }
 
 vlan_form:
+  # The /webui/#/vlan page has 3 tabs: SVI (default) / VLAN / VLAN Group.
+  # We need to click the VLAN tab before the VLAN table + Add button appear.
+  vlan_tab:
+    - { role: "tab", name: "VLAN" }
+    - { css: "a:has-text('VLAN'):not(:has-text('Group')):not(:has-text('SVI'))" }
+    - { css: "li:has-text('VLAN'):not(:has-text('Group'))" }
   add_button:
     - { role: "button", name: "Add" }
+    - { css: "button:has-text('Add')" }
+    - { css: "button.k-button:has-text('Add')" }
     - { role: "button", name: "+" }
     - { role: "button", name: "New" }
-    - { css: "button:has-text('Add')" }
     - { css: ".add-btn" }
   vlan_id:
     - { label: "VLAN ID" }
+    # The form's required field is "VLAN ID*"; Playwright's get_by_label
+    # accepts the asterisk variant by default.
     - { css: "input[placeholder*='VLAN ID' i]" }
-    - { css: "input[placeholder*='vlan' i]" }
+    - { css: "input[placeholder*='4094' i]" }   # placeholder shows "2-4094"
+    - { css: "input[placeholder*='2-4094']" }
+    - { css: "input[type='number']" }
     - { css: "input[id*='vlan' i]" }
     - { css: "input[name*='vlan' i]" }
-    - { css: "input[type='number']" }
   vlan_name:
-    - { label: "VLAN Name" }
-    - { label: "Name" }
+    # Cisco IOS XE 17.6.3a doesn't use <label> elements — "Name" is loose
+    # text in a sibling div. Label-based selectors silently fail, so the
+    # VLAN ends up created with no name. Lead with CSS targeting the
+    # ng-model / id / placeholder, fall back to label, and as a last
+    # resort target the 2nd text input in the Create VLAN modal
+    # (1st is VLAN ID, 2nd is Name).
+    - { css: "input[data-ng-model*='name' i]" }
+    - { css: "input[ng-model*='name' i]" }
+    - { css: "input[id*='vlanName' i]" }
+    - { css: "input[id*='vlan-name' i]" }
+    - { css: "input[id*='name' i]:not([id*='switchName'])" }
+    - { css: "input[name*='vlanName' i]" }
+    - { css: "input[name*='vlan-name' i]" }
     - { css: "input[placeholder*='name' i]" }
-    - { css: "input[id*='name' i]" }
+    - { label: "Name" }
+    - { label: "VLAN Name" }
+    # Pragmatic positional fallback — Create VLAN modal has 2 text inputs
+    # in order: VLAN ID, Name.
+    - { css: ".k-window-content input[type='text']:not([readonly]):nth-of-type(2)" }
+    - { css: ".modal-content input[type='text']:not([readonly]):nth-of-type(2)" }
   save_button:
-    - { role: "button", name: "Save" }
+    # Cisco IOS XE 17.6.3a labels the save button "Apply to Device".
+    # Order strategies most-specific-first.
+    - { role: "button", name: "Apply to Device" }
+    - { css: "button:has-text('Apply to Device')" }
     - { role: "button", name: "Apply" }
+    - { role: "button", name: "Save" }
     - { role: "button", name: "OK" }
     - { css: "button[type='submit']" }
   cancel_button:

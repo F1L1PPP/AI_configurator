@@ -40,9 +40,7 @@ class EvidenceCollector:
         # Prefer the action_id as the session id so all evidence for one
         # approved action lives in one folder. Fall back to a timestamp.
         suffix = action_id or datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        self.session_dir = (
-            get_settings().artifacts_dir / "screenshots" / f"{flow_name}_{suffix}"
-        )
+        self.session_dir = get_settings().artifacts_dir / "screenshots" / f"{flow_name}_{suffix}"
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._n = 0
         log.info(

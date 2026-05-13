@@ -20,6 +20,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from netmiko.exceptions import (
+    NetMikoAuthenticationException,
+    NetMikoTimeoutException,
+)
 from pydantic import BaseModel, Field
 
 from backend.core.logging import get_logger
@@ -36,10 +40,10 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    final_text:        str
-    events:            list[dict[str, Any]]
-    history:           list[dict[str, Any]]
-    stop_reason:       str
+    final_text: str
+    events: list[dict[str, Any]]
+    history: list[dict[str, Any]]
+    stop_reason: str
     awaiting_approval: str | None = None
 
 
@@ -60,13 +64,37 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # run_planner does blocking I/O (Anthropic API + Netmiko SSH).
     # Offload to a threadpool so the FastAPI event loop stays free for
     # concurrent requests (BackendStatus + RecentActions poll every few s).
+    # Note: NotApproved is intentionally NOT caught here. The tool dispatcher
+    # in backend.orchestration.tool_registry.execute_tool() catches it and
+    # converts it to {"error": "not_approved"} in the tool result, so the
+    # planner returns normally and the front-end sees the not-approved state
+    # in the events trace. Catching it here would be dead code.
     try:
-        result = await run_in_threadpool(
-            run_planner, req.message, history=req.history
-        )
+        result = await run_in_threadpool(run_planner, req.message, history=req.history)
+    except NetMikoAuthenticationException as exc:
+        # Wrong SSH credentials — 401 Unauthorized so the operator can fix .env
+        log.error("chat_ssh_auth_failed", error=str(exc))
+        raise HTTPException(
+            status_code=401,
+            detail=f"SSH authentication to router failed: {exc}",
+        ) from exc
+    except (NetMikoTimeoutException, TimeoutError) as exc:
+        # Router unreachable or SSH read timed out — 503 Service Unavailable
+        log.error("chat_router_unreachable", error=str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail=f"Router unreachable / SSH timeout: {exc}",
+        ) from exc
+    except ValueError as exc:
+        # Input validation failure from write_tools (#2/#3) — 422 Unprocessable
+        log.warning("chat_validation_error", error=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        log.error("planner_failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"planner failed: {exc}") from exc
+        log.error("planner_failed", error=str(exc), exc_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail=f"planner failed ({type(exc).__name__}): {exc}",
+        ) from exc
 
     return ChatResponse(
         final_text=result.final_text,

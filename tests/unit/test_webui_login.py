@@ -22,9 +22,14 @@ from backend.webui_agent.login import (
 
 
 def _loc(count: int = 1) -> MagicMock:
+    """Mock locator. `first_match` walks via .nth(i) and checks .is_visible,
+    so the inner mock must report visible."""
     loc = MagicMock()
     loc.count.return_value = count
-    loc.first = MagicMock()
+    inner = MagicMock()
+    inner.is_visible = MagicMock(return_value=True)
+    loc.first = inner
+    loc.nth = MagicMock(return_value=inner)
     return loc
 
 
@@ -43,9 +48,9 @@ def _page_with_strategy_results(results_by_strategy: dict[str, int]) -> MagicMoc
     def fake_locator(selector: str):
         return _loc(results_by_strategy.get(f"locator:{selector}", 0))
 
-    page.get_by_role  = MagicMock(side_effect=fake_get_by_role)
+    page.get_by_role = MagicMock(side_effect=fake_get_by_role)
     page.get_by_label = MagicMock(side_effect=fake_get_by_label)
-    page.locator      = MagicMock(side_effect=fake_locator)
+    page.locator = MagicMock(side_effect=fake_locator)
     return page
 
 
@@ -137,7 +142,7 @@ def _mock_settings(monkeypatch: pytest.MonkeyPatch):
 
     fake = MagicMock()
     fake.router_webui_base_url = "https://10.0.0.1"
-    fake.router_webui_user     = "testuser"
+    fake.router_webui_user = "testuser"
     fake.router_webui_password = "testpass"
     monkeypatch.setattr(login_mod, "get_settings", lambda: fake)
 
@@ -154,11 +159,13 @@ def test_login_fails_when_username_field_missing(_mock_settings):
 
 
 def test_login_success_with_first_strategy_match(_mock_settings):
-    page = _page_with_strategy_results({
-        "label:Username":             1,
-        "label:Password":             1,
-        "role:button:Log In":         1,
-    })
+    page = _page_with_strategy_results(
+        {
+            "label:Username": 1,
+            "label:Password": 1,
+            "role:button:Log In": 1,
+        }
+    )
     page.goto = MagicMock()
     page.wait_for_load_state = MagicMock()
     page.keyboard = MagicMock()
@@ -169,11 +176,13 @@ def test_login_success_with_first_strategy_match(_mock_settings):
 
 
 def test_login_falls_back_to_enter_when_no_submit_button(_mock_settings):
-    page = _page_with_strategy_results({
-        "label:Username": 1,
-        "label:Password": 1,
-        # no submit strategy hits
-    })
+    page = _page_with_strategy_results(
+        {
+            "label:Username": 1,
+            "label:Password": 1,
+            # no submit strategy hits
+        }
+    )
     page.goto = MagicMock()
     page.wait_for_load_state = MagicMock()
     page.keyboard = MagicMock()

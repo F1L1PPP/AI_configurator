@@ -26,17 +26,40 @@ from backend.orchestration.confirmations import (
     is_approved,
     propose_action,
 )
+from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
+
+
+def _search_docs(**kwargs: Any) -> dict:
+    """Lazy wrapper around `knowledge_agent.retrieve.search_docs`.
+
+    Importing `retrieve` at module-load time would pull in `chromadb` and
+    `sentence_transformers` (and transitively `torch`) for every consumer
+    of the registry — including workers that never call search_docs. Defer
+    the import until the tool actually runs; Python caches the import in
+    `sys.modules` so only the first call pays the cost.
+    """
+    from backend.knowledge_agent import retrieve as kb_retrieve
+
+    return kb_retrieve.search_docs(**kwargs)
+
 
 log = get_logger(__name__)
 
 # Tools in this set require an APPROVED action_id before the dispatcher
 # will invoke them. Mirrors the gate inside each write tool.
-_REQUIRES_APPROVAL: frozenset[str] = frozenset({
-    "set_hostname",
-    "set_interface_ip",
-    "webui_set_hostname",
-})
+# Re-exported as the canonical "this tool writes to the router" set —
+# the planner imports it to decide when to emit `applied` events.
+WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "set_hostname",
+        "set_interface_ip",
+        "set_access_vlan",
+        "webui_set_hostname",
+        "webui_add_access_vlan",
+    }
+)
+_REQUIRES_APPROVAL = WRITE_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +101,31 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "search_docs",
+        "description": (
+            "Semantic search over the curated Cisco C1111 / IOS XE 17.x documentation "
+            "corpus. Returns up to top_k chunks, each with source filename, section "
+            "heading, and a relevance score. Call this BEFORE generating CLI commands "
+            "or WebUI steps for any topic you're not certain about — it grounds your "
+            "answer in real Cisco docs. Read-only."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language search query, e.g. 'how to change hostname on ISR 1100'.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Max number of chunks to return (default 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "propose_set_hostname",
         "description": (
             "Propose a hostname change. Does NOT touch the router — only "
@@ -107,7 +155,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "new_name":  {"type": "string"},
+                "new_name": {"type": "string"},
                 "action_id": {"type": "string"},
             },
             "required": ["new_name", "action_id"],
@@ -126,7 +174,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Full interface name, e.g. 'GigabitEthernet0/0/0'.",
                 },
-                "ip":   {"type": "string", "description": "IPv4 address."},
+                "ip": {"type": "string", "description": "IPv4 address."},
                 "mask": {"type": "string", "description": "Subnet mask (dotted)."},
             },
             "required": ["interface", "ip", "mask"],
@@ -135,15 +183,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "set_interface_ip",
         "description": (
-            "Execute a previously approved interface IP assignment. "
-            "Requires an APPROVED action_id."
+            "Execute a previously approved interface IP assignment. Requires an APPROVED action_id."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "interface": {"type": "string"},
-                "ip":        {"type": "string"},
-                "mask":      {"type": "string"},
+                "ip": {"type": "string"},
+                "mask": {"type": "string"},
                 "action_id": {"type": "string"},
             },
             "required": ["interface", "ip", "mask", "action_id"],
@@ -182,10 +229,97 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "new_name":  {"type": "string"},
+                "new_name": {"type": "string"},
                 "action_id": {"type": "string"},
             },
             "required": ["new_name", "action_id"],
+        },
+    },
+    {
+        "name": "propose_set_access_vlan",
+        "description": (
+            "Propose a CLI access-VLAN add. Does NOT touch the router — "
+            "registers the action and returns an action_id that must be "
+            "approved before set_access_vlan executes. Use this when the "
+            "user wants the fast CLI path (no browser); for visible "
+            "screenshot evidence, prefer propose_webui_add_access_vlan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {
+                    "type": "integer",
+                    "description": "VLAN number (1–4094).",
+                },
+                "vlan_name": {
+                    "type": "string",
+                    "description": "Human-readable VLAN name (1–32 chars, letters/digits/_/-).",
+                },
+            },
+            "required": ["vlan_id", "vlan_name"],
+        },
+    },
+    {
+        "name": "set_access_vlan",
+        "description": (
+            "Execute a previously approved CLI access-VLAN add. Runs "
+            "'vlan <id>' + 'name <name>' inside config mode via SSH, "
+            "takes pre/post snapshots, and returns the raw output. "
+            "Requires an APPROVED action_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {"type": "integer"},
+                "vlan_name": {"type": "string"},
+                "action_id": {"type": "string"},
+            },
+            "required": ["vlan_id", "vlan_name", "action_id"],
+        },
+    },
+    {
+        "name": "propose_webui_add_access_vlan",
+        "description": (
+            "Propose an access VLAN add executed via the Cisco WebUI "
+            "(Playwright drives Configuration → Layer 2 → VLAN → Add → "
+            "fill ID + Name → Save). Does NOT touch the router — returns "
+            "an action_id that must be approved before webui_add_access_vlan "
+            "runs. This is the preferred path for VLAN add: it produces "
+            "screenshot evidence the demo evaluator can verify directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {
+                    "type": "integer",
+                    "description": "VLAN number (1–4094).",
+                },
+                "vlan_name": {
+                    "type": "string",
+                    "description": "Human-readable VLAN name (e.g. 'OFFICE').",
+                },
+            },
+            "required": ["vlan_id", "vlan_name"],
+        },
+    },
+    {
+        "name": "webui_add_access_vlan",
+        "description": (
+            "Execute a previously approved WebUI access-VLAN add. Launches "
+            "headed Chromium, logs in, navigates Configuration → Layer 2 → "
+            "VLAN, clicks Add, fills VLAN ID + Name, clicks Save, "
+            "screenshots every step into artifacts/screenshots/, then "
+            "verifies via CLI 'show vlan brief' that the row is present. "
+            "Requires an APPROVED action_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {"type": "integer"},
+                "vlan_name": {"type": "string"},
+                "action_id": {"type": "string"},
+            },
+            "required": ["vlan_id", "vlan_name", "action_id"],
         },
     },
 ]
@@ -197,16 +331,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def _propose_set_hostname(new_name: str) -> dict:
-    action_id = propose_action("set_hostname", {"name": new_name})
+    # Store the param under the same key the write tool's signature expects
+    # (`set_hostname(new_name: str, action_id: str)`), so the new
+    # `/api/execute/{action_id}` endpoint can dispatch via {**params,
+    # action_id=...} without a name-translation step.
+    action_id = propose_action("set_hostname", {"new_name": new_name})
     return {
-        "status":         "awaiting_approval",
-        "action_id":      action_id,
-        "preview":        f"Will run: 'hostname {new_name}' on the C1111",
-        "execute_tool":   "set_hostname",
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": f"Will run: 'hostname {new_name}' on the C1111",
+        "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
-            f"Open /preview?action_id={action_id} and click APPROVE, "
-            "then ask me to execute."
+            "Use the APPROVE and EXECUTE NOW buttons below this message. "
+            "No need to open another screen."
         ),
     }
 
@@ -217,47 +355,98 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
         {"interface": interface, "ip": ip, "mask": mask},
     )
     return {
-        "status":         "awaiting_approval",
-        "action_id":      action_id,
-        "preview":        f"Will set {interface} -> {ip}/{mask}",
-        "execute_tool":   "set_interface_ip",
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": f"Will set {interface} -> {ip}/{mask}",
+        "execute_tool": "set_interface_ip",
         "execute_params": {
             "interface": interface,
-            "ip":        ip,
-            "mask":      mask,
+            "ip": ip,
+            "mask": mask,
             "action_id": action_id,
         },
-        "next_step": f"Open /preview?action_id={action_id} and click APPROVE.",
+        "next_step": ("Use the APPROVE and EXECUTE NOW buttons below this message."),
+    }
+
+
+def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
+    action_id = propose_action("set_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name})
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": (
+            f"Will run: 'vlan {vlan_id}' + ' name {vlan_name}' in config mode on the C1111"
+        ),
+        "execute_tool": "set_access_vlan",
+        "execute_params": {
+            "vlan_id": vlan_id,
+            "vlan_name": vlan_name,
+            "action_id": action_id,
+        },
+        "next_step": ("Use the APPROVE and EXECUTE NOW buttons below this message."),
     }
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
-    action_id = propose_action("webui_set_hostname", {"name": new_name})
+    # Store under `new_name` to match the flow function's kwarg name
+    # (change_hostname_via_webui(new_name, action_id)).
+    action_id = propose_action("webui_set_hostname", {"new_name": new_name})
     return {
-        "status":         "awaiting_approval",
-        "action_id":      action_id,
-        "preview":        f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
-        "execute_tool":   "webui_set_hostname",
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
+        "execute_tool": "webui_set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": (
-            f"Open /preview?action_id={action_id} and click APPROVE, "
-            "then return to chat and ask me to execute. Headed Chromium "
-            "will open so you can watch the clicks."
+            "Use the APPROVE and EXECUTE NOW buttons below this message. "
+            "Headed Chromium will open when you click EXECUTE NOW so you "
+            "can watch the clicks."
+        ),
+    }
+
+
+def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
+    action_id = propose_action(
+        "webui_add_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name}
+    )
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": (
+            f"Will drive WebUI: Configuration → Layer 2 → VLAN → Add → "
+            f"VLAN ID {vlan_id} / Name '{vlan_name}' → Save, then verify via "
+            f"CLI 'show vlan brief'."
+        ),
+        "execute_tool": "webui_add_access_vlan",
+        "execute_params": {
+            "vlan_id": vlan_id,
+            "vlan_name": vlan_name,
+            "action_id": action_id,
+        },
+        "next_step": (
+            "Use the APPROVE and EXECUTE NOW buttons below this message. "
+            "Headed Chromium will open when you click EXECUTE NOW so you "
+            "can watch the clicks."
         ),
     }
 
 
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
-    "show_version":              read_tools.show_version,
-    "show_ip_interface_brief":   read_tools.show_ip_interface_brief,
-    "show_running_config":       read_tools.show_running_config,
-    "show_vlan_brief":           read_tools.show_vlan_brief,
-    "propose_set_hostname":      _propose_set_hostname,
-    "set_hostname":              write_tools.set_hostname,
-    "propose_set_interface_ip":  _propose_set_interface_ip,
-    "set_interface_ip":          write_tools.set_interface_ip,
+    "show_version": read_tools.show_version,
+    "show_ip_interface_brief": read_tools.show_ip_interface_brief,
+    "show_running_config": read_tools.show_running_config,
+    "show_vlan_brief": read_tools.show_vlan_brief,
+    "search_docs": _search_docs,
+    "propose_set_hostname": _propose_set_hostname,
+    "set_hostname": write_tools.set_hostname,
+    "propose_set_interface_ip": _propose_set_interface_ip,
+    "set_interface_ip": write_tools.set_interface_ip,
+    "propose_set_access_vlan": _propose_set_access_vlan,
+    "set_access_vlan": write_tools.set_access_vlan,
     "propose_webui_set_hostname": _propose_webui_set_hostname,
-    "webui_set_hostname":         change_hostname_via_webui,
+    "webui_set_hostname": change_hostname_via_webui,
+    "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,
+    "webui_add_access_vlan": add_access_vlan_via_webui,
 }
 
 
@@ -278,7 +467,7 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
         if not action_id or not is_approved(action_id):
             log.info("dispatcher_not_approved", tool=name, action_id=action_id)
             return {
-                "error":   "not_approved",
+                "error": "not_approved",
                 "message": (
                     f"action_id {action_id!r} is not APPROVED; "
                     "call POST /api/approve/{action_id} first."
@@ -310,9 +499,9 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
             exc_info=True,
         )
         return {
-            "error":    "tool_failed",
+            "error": "tool_failed",
             "exc_type": type(exc).__name__,
-            "message":  msg,
+            "message": msg,
         }
 
     # Normalize to dict if a tool returns str/list

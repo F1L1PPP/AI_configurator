@@ -8,6 +8,10 @@ on:
 jobs:
   placeholder:
     name: Nightly backup placeholder
+    # Gated off until the real artifact upload is wired on Day 12 (audit #28).
+    # Without this gate we'd accumulate green runs that didn't do anything,
+    # which is noise and hides real failures when we finally wire it up.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Log

@@ -5,21 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
-from backend.orchestration.confirmations import _reset_for_testing
 from backend.orchestration.planner import (
     MAX_ITERATIONS,
     PlannerResult,
     run_planner,
 )
 
-
-@pytest.fixture(autouse=True)
-def _clean():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +78,7 @@ def test_history_contains_user_and_assistant_messages():
 def test_tool_use_executes_then_continues(monkeypatch):
     # First response: model wants to call show_version
     # Second response: model has the result and produces final text
-    first  = _response(
+    first = _response(
         _tool_use_block("show_version", {}, "tu_a"),
         stop_reason="tool_use",
     )
@@ -118,7 +110,7 @@ def test_tool_use_executes_then_continues(monkeypatch):
 
 
 def test_awaiting_approval_event_emitted_for_propose_tool():
-    first  = _response(
+    first = _response(
         _tool_use_block("propose_set_hostname", {"new_name": "LAB-R1"}, "tu_b"),
         stop_reason="tool_use",
     )

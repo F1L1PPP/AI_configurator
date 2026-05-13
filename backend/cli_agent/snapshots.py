@@ -23,8 +23,8 @@ log = get_logger(__name__)
 
 _COMMANDS = {
     "running-config": "show running-config",
-    "version":        "show version",
-    "ip-int-brief":   "show ip interface brief",
+    "version": "show version",
+    "ip-int-brief": "show ip interface brief",
 }
 
 

@@ -43,7 +43,7 @@ def test_session_dir_uses_action_id_when_provided(_isolated_artifacts: Path):
     assert ev.session_dir.exists()
     assert ev.session_dir.parent == _isolated_artifacts / "screenshots"
     assert "act_20260512_abc" in ev.session_dir.name
-    assert "change_hostname"  in ev.session_dir.name
+    assert "change_hostname" in ev.session_dir.name
 
 
 def test_session_dir_falls_back_to_timestamp_when_no_action_id(
@@ -78,9 +78,9 @@ def test_step_count_increments(_isolated_artifacts: Path):
 
     ev = EvidenceCollector("flow", action_id="act_y")
     page = _fake_page()
-    p1 = ev.step("first",  page)
+    p1 = ev.step("first", page)
     p2 = ev.step("second", page)
-    p3 = ev.step("third",  page)
+    p3 = ev.step("third", page)
     assert p1.name.startswith("01-")
     assert p2.name.startswith("02-")
     assert p3.name.startswith("03-")

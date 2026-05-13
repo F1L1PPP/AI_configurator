@@ -23,5 +23,9 @@ known-first-party = ["backend"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
-# markers = ["slow: marks tests as slow (deselect with -m 'not slow')"]
-# uncomment + extend the list above when we register our first custom marker
+markers = [
+    "slow:        slow tests; deselect with -m 'not slow'",
+    "integration: tests that talk to a real router or external service",
+    "webui:       tests that launch a real Chromium browser via Playwright",
+    "smoke:       end-to-end scenarios for the 6 PROJECT_PLAN.md §2 cases",
+]

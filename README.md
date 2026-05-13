@@ -62,3 +62,15 @@ See `PROJECT_PLAN.md §5` for the full annotated layout.
 
 All settings are loaded from `.env` via Pydantic Settings (`backend/core/settings.py`).
 See `.env.example` for every required key.
+
+### Validate your `.env`
+
+After editing `.env`, sanity-check it by loading the settings model. Any
+missing required key or wrong type surfaces here as a clear error:
+
+```powershell
+python -c "from backend.core.settings import get_settings; s = get_settings(); print('OK — router_host=', s.router_host, '| log_level=', s.log_level)"
+```
+
+If you see `pydantic_core._pydantic_core.ValidationError`, fix the field
+the error names and re-run.

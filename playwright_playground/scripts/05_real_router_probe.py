@@ -178,7 +178,9 @@ def main() -> int:
                     step("05-configuration-timeout", page)
             else:
                 print("\n5. SKIP — Configuration menu not visible; capturing DOM for analysis")
-                (session / "05-dom-no-config-menu.html").write_text(page.content(), encoding="utf-8")
+                (session / "05-dom-no-config-menu.html").write_text(
+                    page.content(), encoding="utf-8"
+                )
 
             print("\nDone.")
             print(f"\nArtifacts: {session}")

@@ -36,10 +36,19 @@ KEEPALIVE_INTERVAL_S = 240  # 4 minutes; WebUI idle timeout is 5 minutes
 
 
 def first_match(page: Page, strategies: list[dict[str, Any]]) -> Locator | None:
-    """Return a locator for the first strategy that resolves to ≥ 1 element.
+    """Return a locator for the first VISIBLE element that any strategy matches.
 
     Strategy keys understood: role (+ name), label, text, css.
     Order in the list is significance order — most stable first.
+
+    Visibility matters: the Cisco IOS XE WebUI renders duplicate elements
+    (the same nav text appears in a collapsed hidden menu AND in the
+    visible sidebar). `.first` alone could pick the hidden mirror, which
+    then causes `.click()` / `.fill()` to time out waiting for it to
+    become actionable. Filtering to visible up front sidesteps that.
+
+    If a strategy matches but no match is visible, we move to the next
+    strategy (don't fall back to a hidden element).
     """
     for strat in strategies:
         try:
@@ -50,11 +59,24 @@ def first_match(page: Page, strategies: list[dict[str, Any]]) -> Locator | None:
         if loc is None:
             continue
         try:
-            if loc.count() > 0:
-                return loc.first
+            n = loc.count()
         except Exception as exc:
             log.debug("strategy_count_failed", strat=strat, error=str(exc))
             continue
+        if n == 0:
+            continue
+
+        # Pick the first visible match. Walk all matches in case the first
+        # is the hidden mirror element.
+        for i in range(n):
+            el = loc.nth(i)
+            try:
+                if el.is_visible():
+                    return el
+            except Exception:
+                continue
+        # None of the matches are visible — try next strategy
+        log.debug("strategy_no_visible_match", strat=strat, total_matches=n)
     return None
 
 
@@ -62,7 +84,9 @@ def _build(page: Page, strat: dict[str, Any]) -> Locator | None:
     """Convert one strategy dict into a Playwright Locator (no .count() yet)."""
     if "role" in strat:
         name = strat.get("name")
-        return page.get_by_role(strat["role"], name=name) if name else page.get_by_role(strat["role"])
+        return (
+            page.get_by_role(strat["role"], name=name) if name else page.get_by_role(strat["role"])
+        )
     if "label" in strat:
         return page.get_by_label(strat["label"], exact=False)
     if "text" in strat:
@@ -156,10 +180,26 @@ def start_keepalive(page: Page, interval_s: int = KEEPALIVE_INTERVAL_S) -> threa
 
     Returns a stop-event; call `.set()` to halt the keepalive.
 
-    Note: this uses page.evaluate which is not thread-safe in Playwright sync
-    mode. Only use when no other thread is driving the same page. For flows
-    that interact with the page continuously, the keepalive is unnecessary —
-    the user activity already resets the timer.
+    WARNING — THREAD SAFETY (audit #9):
+        Playwright's sync API is NOT thread-safe: you cannot call methods
+        on the same Page object from two threads simultaneously. This
+        keepalive runs in a background thread that calls `page.evaluate`,
+        which conflicts with any foreground thread that's currently
+        clicking/filling the page.
+
+        Use rules:
+        - For active flows (HostnamePage.goto / set_hostname / apply):
+          DO NOT start keepalive. The user-driven actions already reset
+          the idle timer on every click.
+        - For long-idle scenarios (multi-step forms that pause for human
+          input between steps): consider keepalive, but only between
+          steps — call stop_keepalive() before the next page interaction.
+        - Better long-term: migrate to Playwright's async API and run
+          the keepalive coroutine on the same event loop. Deferred until
+          Day 11 polish.
+
+        Today, no production flow uses this keepalive. The function is
+        kept available for future flows where it makes sense.
     """
     stop = threading.Event()
 

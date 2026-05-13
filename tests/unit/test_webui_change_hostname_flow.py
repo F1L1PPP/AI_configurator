@@ -10,17 +10,11 @@ import pytest
 import backend.webui_agent.flows.change_hostname as flow_mod
 from backend.orchestration.confirmations import (
     NotApproved,
-    _reset_for_testing,
     approve_action,
     propose_action,
 )
 
-
-@pytest.fixture(autouse=True)
-def _clean_actions():
-    _reset_for_testing()
-    yield
-    _reset_for_testing()
+# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 @pytest.fixture()
@@ -104,7 +98,9 @@ def _stub_hostname_page(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refuses_without_approval(_isolated_artifacts, _stub_browser, _stub_login, _stub_hostname_page):
+def test_refuses_without_approval(
+    _isolated_artifacts, _stub_browser, _stub_login, _stub_hostname_page
+):
     action_id = propose_action("webui_set_hostname", {"name": "LAB-R1"})
     # NOT approved
     with pytest.raises(NotApproved):
@@ -208,6 +204,7 @@ def test_verification_failure_raises_and_marks_failed(
 
     # action_id must be marked FAILED
     from backend.orchestration.confirmations import ActionState
+
     assert get_action(action_id)["state"] == ActionState.FAILED
 
 
