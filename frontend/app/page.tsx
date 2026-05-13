@@ -1,4 +1,5 @@
 import MeshSphere from "@/components/mesh/MeshSphere";
+import ScenarioCard from "@/components/actions/ScenarioCard";
 import RecentActions from "@/components/dashboard/RecentActions";
 import BackendStatus from "@/components/status/BackendStatus";
 
@@ -42,20 +43,43 @@ export default function DashboardPage() {
           <RecentActions limit={4} />
         </Panel>
 
-        <Panel title="Quick Actions">
-          <div className="flex flex-col gap-2">
-            <button className="mono border border-ink px-3 py-1.5 text-left text-[8px] tracking-wider hover:bg-ink hover:text-surface">
-              + NEW AI SESSION
-            </button>
-            <button className="mono border border-rule px-3 py-1.5 text-left text-[8px] tracking-wider text-ink-muted hover:border-ink hover:text-ink">
-              CONNECT DEVICE
-            </button>
-            <button className="mono border border-rule px-3 py-1.5 text-left text-[8px] tracking-wider text-ink-muted hover:border-ink hover:text-ink">
-              VIEW LOGS
-            </button>
-            <button className="mono border border-rule px-3 py-1.5 text-left text-[8px] tracking-wider text-ink-muted hover:border-ink hover:text-ink">
-              BACKUP CONFIG
-            </button>
+        <Panel
+          title="Quick Actions"
+          right={
+            <span className="mono text-[8px] tracking-wider text-ink-faint">
+              6 SCENARIOS
+            </span>
+          }
+        >
+          <div className="flex flex-col gap-1.5">
+            <ScenarioCard
+              title="Change hostname"
+              description="Rename the router (LAB-R1 → LAB-R5). CLI fast path."
+              href="/actions/change-hostname"
+              status="shipped"
+              badge="CLI"
+            />
+            <ScenarioCard
+              title="Set interface IP"
+              description="Assign an IP + mask to a GigabitEthernet interface."
+              href="/actions/set-interface-ip"
+              status="shipped"
+              badge="CLI"
+            />
+            <ScenarioCard
+              title="Add access VLAN"
+              description="Add a VLAN via the WebUI with screenshot evidence."
+              href="/actions/add-vlan"
+              status="shipped"
+              badge="WebUI"
+            />
+            <ScenarioCard
+              title="Ask a question"
+              description="Open the chat with RAG-grounded answers + Sources."
+              href="/chat"
+              status="shipped"
+              badge="Chat"
+            />
           </div>
         </Panel>
       </div>

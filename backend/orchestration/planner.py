@@ -57,8 +57,13 @@ Write — CLI path (fast, no browser):
 
 Write — WebUI path (slower, opens a Chromium window the user can watch):
 - propose_webui_set_hostname -> webui_set_hostname
+- propose_webui_add_access_vlan -> webui_add_access_vlan
 
 Both write paths are two-step: always propose first, wait for human approval.
+
+**VLAN add: prefer the WebUI path.** The WebUI path produces screenshot
+evidence (artifacts/screenshots/) that the demo evaluator can verify
+directly. CLI verifies via `show vlan brief` after the WebUI save.
 
 ## Hard rules
 
@@ -78,9 +83,10 @@ Both write paths are two-step: always propose first, wait for human approval.
      call, plus `action_id` = the one the user mentioned.
    - Examples of the propose → execute mapping (the `execute_tool` field
      in the propose response tells you which one for any given action):
-     - propose_set_hostname        → set_hostname
-     - propose_set_interface_ip    → set_interface_ip
-     - propose_webui_set_hostname  → webui_set_hostname
+     - propose_set_hostname            → set_hostname
+     - propose_set_interface_ip        → set_interface_ip
+     - propose_webui_set_hostname      → webui_set_hostname
+     - propose_webui_add_access_vlan   → webui_add_access_vlan
    - NEVER swap CLI for WebUI (or vice versa) during execution. If the
      user originally asked for the WebUI path, execute via webui_set_*.
 
@@ -103,9 +109,9 @@ Both write paths are two-step: always propose first, wait for human approval.
    this turn.
 
 5. Stay in scope: hostname changes (CLI or WebUI), interface IP
-   assignments, VLAN add (Day 7), and read operations. If asked for
-   OSPF/ACL/DHCP/static routes/anything else, politely refuse and explain
-   what's in scope.
+   assignments, access VLAN add (WebUI), and read operations. If asked
+   for OSPF/ACL/DHCP/static routes/trunk VLANs/VLAN delete/anything
+   else, politely refuse and explain what's in scope.
 
 6. One C1111 only — no multi-device targeting.
 

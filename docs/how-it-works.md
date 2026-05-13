@@ -334,8 +334,8 @@ All six §2 demo scenarios from `PROJECT_PLAN.md`:
 | 3 | CLI: change hostname | `set_hostname` | ✓ proven (1.29 s end-to-end) |
 | 4 | CLI: change interface IP | `set_interface_ip` | built + unit-tested (live smoke deferred to avoid breaking `Gi0/1/0` management) |
 | 5 | **WebUI: change hostname** | `webui_set_hostname` | ✓ **proven on real router today, 23 s end-to-end** |
-| 6 | WebUI: add VLAN | (Day 7) | not built yet |
-| 7 | **RAG: query Cisco docs with citations** | `search_docs` | ✓ shipped Day 6; 692 chunks; chat shows Sources badges |
+| 6 | **WebUI: add VLAN** | `webui_add_access_vlan` | ✓ shipped Day 7; POM + flow + 26 unit tests; smoke harness runnable |
+| 7 | **RAG: query Cisco docs with citations** | `search_docs` | ✓ shipped Day 6; 772 chunks (2 of 7 PDFs); chat shows Sources badges |
 
 **Plus everything around it:**
 
@@ -349,8 +349,10 @@ All six §2 demo scenarios from `PROJECT_PLAN.md`:
   stream from `/ws/agent` for the planner's tool_call / applied /
   awaiting_approval activity)
 
-**Test coverage:** 156 tests passing (130 + 26 from Day 6: chunker,
-retrieve, eventbus pub/sub, /ws/agent integration), ruff clean.
+**Test coverage:** 183 tests passing (157 baseline + 26 from Day 7:
+VlanPage POM, add_access_vlan flow, VLAN tool registry), ruff clean.
+Plus a smoke harness at `scripts/run_smoke_tests.py` that runs the
+6 §2 scenarios with explicit `SMOKE_ALLOW_WRITES` gate.
 
 ---
 

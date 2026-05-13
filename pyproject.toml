@@ -27,4 +27,5 @@ markers = [
     "slow:        slow tests; deselect with -m 'not slow'",
     "integration: tests that talk to a real router or external service",
     "webui:       tests that launch a real Chromium browser via Playwright",
+    "smoke:       end-to-end scenarios for the 6 PROJECT_PLAN.md §2 cases",
 ]

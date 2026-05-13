@@ -26,6 +26,7 @@ from backend.orchestration.confirmations import (
     is_approved,
     propose_action,
 )
+from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 
 
@@ -54,6 +55,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "set_hostname",
         "set_interface_ip",
         "webui_set_hostname",
+        "webui_add_access_vlan",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -232,6 +234,51 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["new_name", "action_id"],
         },
     },
+    {
+        "name": "propose_webui_add_access_vlan",
+        "description": (
+            "Propose an access VLAN add executed via the Cisco WebUI "
+            "(Playwright drives Configuration → Layer 2 → VLAN → Add → "
+            "fill ID + Name → Save). Does NOT touch the router — returns "
+            "an action_id that must be approved before webui_add_access_vlan "
+            "runs. This is the preferred path for VLAN add: it produces "
+            "screenshot evidence the demo evaluator can verify directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {
+                    "type": "integer",
+                    "description": "VLAN number (1–4094).",
+                },
+                "vlan_name": {
+                    "type": "string",
+                    "description": "Human-readable VLAN name (e.g. 'OFFICE').",
+                },
+            },
+            "required": ["vlan_id", "vlan_name"],
+        },
+    },
+    {
+        "name": "webui_add_access_vlan",
+        "description": (
+            "Execute a previously approved WebUI access-VLAN add. Launches "
+            "headed Chromium, logs in, navigates Configuration → Layer 2 → "
+            "VLAN, clicks Add, fills VLAN ID + Name, clicks Save, "
+            "screenshots every step into artifacts/screenshots/, then "
+            "verifies via CLI 'show vlan brief' that the row is present. "
+            "Requires an APPROVED action_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vlan_id": {"type": "integer"},
+                "vlan_name": {"type": "string"},
+                "action_id": {"type": "string"},
+            },
+            "required": ["vlan_id", "vlan_name", "action_id"],
+        },
+    },
 ]
 
 
@@ -290,6 +337,32 @@ def _propose_webui_set_hostname(new_name: str) -> dict:
     }
 
 
+def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
+    action_id = propose_action(
+        "webui_add_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name}
+    )
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "preview": (
+            f"Will drive WebUI: Configuration → Layer 2 → VLAN → Add → "
+            f"VLAN ID {vlan_id} / Name '{vlan_name}' → Save, then verify via "
+            f"CLI 'show vlan brief'."
+        ),
+        "execute_tool": "webui_add_access_vlan",
+        "execute_params": {
+            "vlan_id": vlan_id,
+            "vlan_name": vlan_name,
+            "action_id": action_id,
+        },
+        "next_step": (
+            f"Open /preview?action_id={action_id} and click APPROVE, "
+            "then return to chat and ask me to execute. Headed Chromium "
+            "will open so you can watch the clicks."
+        ),
+    }
+
+
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "show_version": read_tools.show_version,
     "show_ip_interface_brief": read_tools.show_ip_interface_brief,
@@ -302,6 +375,8 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "set_interface_ip": write_tools.set_interface_ip,
     "propose_webui_set_hostname": _propose_webui_set_hostname,
     "webui_set_hostname": change_hostname_via_webui,
+    "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,
+    "webui_add_access_vlan": add_access_vlan_via_webui,
 }
 
 
