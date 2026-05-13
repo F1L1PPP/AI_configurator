@@ -86,8 +86,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
             detail=f"Router unreachable / SSH timeout: {exc}",
         ) from exc
     except ValueError as exc:
-        # Input validation failure from write_tools (#2/#3) — 422 Unprocessable
-        log.warning("chat_validation_error", error=str(exc))
+        # Input validation failure from write_tools (#2/#3) — 422 Unprocessable.
+        # Log with exc_info so the Netmiko/SSH frame is preserved on disk —
+        # the HTTP body shows only the validator message (user-friendly),
+        # but the stack trace is still available in logs/actions.log for
+        # debugging when the chain was: SSH error → wrapped as ValueError.
+        log.warning("chat_validation_error", error=str(exc), exc_info=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         log.error("planner_failed", error=str(exc), exc_type=type(exc).__name__)

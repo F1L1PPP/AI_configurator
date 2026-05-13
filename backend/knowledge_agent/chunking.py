@@ -39,7 +39,11 @@ def _clean_heading(line: str) -> str:
 
 
 def _chunk_id(source: str, start: int) -> str:
-    return hashlib.sha1(f"{source}:{start}".encode()).hexdigest()[:16]
+    # blake2b with 8-byte digest is the right primitive here: non-cryptographic
+    # use (deterministic chunk ID for Chroma upsert), avoids the lint noise
+    # of truncated-SHA1, and the 64-bit space is fine for one corpus
+    # (birthday collision at ~4B chunks; our corpus is ~50k).
+    return hashlib.blake2b(f"{source}:{start}".encode(), digest_size=8).hexdigest()
 
 
 def chunk_text(

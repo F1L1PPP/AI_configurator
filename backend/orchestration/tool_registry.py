@@ -20,6 +20,13 @@ from collections.abc import Callable
 from typing import Any
 
 from backend.cli_agent import read_tools, write_tools
+from backend.cli_agent.write_tools import (
+    _validate_hostname,
+    _validate_interface,
+    _validate_interface_ip_and_mask,
+    _validate_vlan_id,
+    _validate_vlan_name,
+)
 from backend.core.logging import get_logger
 from backend.orchestration.confirmations import (
     NotApproved,
@@ -28,6 +35,21 @@ from backend.orchestration.confirmations import (
 )
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
+
+# Maximum length of a search_docs query. Caps the embedding cost — a 10 MB
+# query embedded through MiniLM is several seconds of CPU per call, easy
+# DoS surface if the planner ever produces (or is tricked into producing)
+# a runaway string.
+_SEARCH_DOCS_MAX_QUERY_CHARS = 1000
+_SEARCH_DOCS_MAX_TOP_K = 50
+
+# Repeated next_step copy for every propose_* helper. One source of truth
+# so a UX wording change doesn't require five edits.
+_NEXT_STEP_INLINE = "Use the APPROVE and EXECUTE NOW buttons below this message."
+_NEXT_STEP_WEBUI = (
+    _NEXT_STEP_INLINE + " Headed Chromium will open when you click EXECUTE NOW so you "
+    "can watch the clicks."
+)
 
 
 def _search_docs(**kwargs: Any) -> dict:
@@ -38,10 +60,31 @@ def _search_docs(**kwargs: Any) -> dict:
     of the registry — including workers that never call search_docs. Defer
     the import until the tool actually runs; Python caches the import in
     `sys.modules` so only the first call pays the cost.
+
+    Pluck named params explicitly rather than `**kwargs` → `**kwargs` so
+    an extra key from the planner doesn't TypeError on the inner call and
+    so query/top_k get hard-validated here (length cap, type check).
     """
+    query = kwargs.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return {"error": "bad_parameters", "message": "query must be a non-empty string"}
+    if len(query) > _SEARCH_DOCS_MAX_QUERY_CHARS:
+        return {
+            "error": "bad_parameters",
+            "message": (f"query too long ({len(query)} chars; max {_SEARCH_DOCS_MAX_QUERY_CHARS})"),
+        }
+    top_k = kwargs.get("top_k", 5)
+    if not isinstance(top_k, int) or isinstance(top_k, bool):
+        return {"error": "bad_parameters", "message": "top_k must be an integer"}
+    if not (1 <= top_k <= _SEARCH_DOCS_MAX_TOP_K):
+        return {
+            "error": "bad_parameters",
+            "message": f"top_k must be between 1 and {_SEARCH_DOCS_MAX_TOP_K}",
+        }
+
     from backend.knowledge_agent import retrieve as kb_retrieve
 
-    return kb_retrieve.search_docs(**kwargs)
+    return kb_retrieve.search_docs(query=query, top_k=top_k)
 
 
 log = get_logger(__name__)
@@ -331,6 +374,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def _propose_set_hostname(new_name: str) -> dict:
+    # Validate at propose-time so the chat reply fails fast (HTTP 422 via
+    # the planner) instead of creating an action_id that can only error
+    # out later at execute time. Same validators the write tool will
+    # re-run server-side — defense-in-depth, but the user-facing failure
+    # mode is the cheap one.
+    _validate_hostname(new_name)
     # Store the param under the same key the write tool's signature expects
     # (`set_hostname(new_name: str, action_id: str)`), so the new
     # `/api/execute/{action_id}` endpoint can dispatch via {**params,
@@ -342,14 +391,13 @@ def _propose_set_hostname(new_name: str) -> dict:
         "preview": f"Will run: 'hostname {new_name}' on the C1111",
         "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
-        "next_step": (
-            "Use the APPROVE and EXECUTE NOW buttons below this message. "
-            "No need to open another screen."
-        ),
+        "next_step": _NEXT_STEP_INLINE + " No need to open another screen.",
     }
 
 
 def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
+    _validate_interface(interface)
+    _validate_interface_ip_and_mask(ip, mask)
     action_id = propose_action(
         "set_interface_ip",
         {"interface": interface, "ip": ip, "mask": mask},
@@ -365,11 +413,13 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
             "mask": mask,
             "action_id": action_id,
         },
-        "next_step": ("Use the APPROVE and EXECUTE NOW buttons below this message."),
+        "next_step": _NEXT_STEP_INLINE,
     }
 
 
 def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
+    _validate_vlan_id(vlan_id)
+    _validate_vlan_name(vlan_name)
     action_id = propose_action("set_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name})
     return {
         "status": "awaiting_approval",
@@ -383,11 +433,12 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "vlan_name": vlan_name,
             "action_id": action_id,
         },
-        "next_step": ("Use the APPROVE and EXECUTE NOW buttons below this message."),
+        "next_step": _NEXT_STEP_INLINE,
     }
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
+    _validate_hostname(new_name)
     # Store under `new_name` to match the flow function's kwarg name
     # (change_hostname_via_webui(new_name, action_id)).
     action_id = propose_action("webui_set_hostname", {"new_name": new_name})
@@ -397,15 +448,13 @@ def _propose_webui_set_hostname(new_name: str) -> dict:
         "preview": f"Will drive WebUI: Administration → Device Properties → set hostname '{new_name}' → Apply",
         "execute_tool": "webui_set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
-        "next_step": (
-            "Use the APPROVE and EXECUTE NOW buttons below this message. "
-            "Headed Chromium will open when you click EXECUTE NOW so you "
-            "can watch the clicks."
-        ),
+        "next_step": _NEXT_STEP_WEBUI,
     }
 
 
 def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
+    _validate_vlan_id(vlan_id)
+    _validate_vlan_name(vlan_name)
     action_id = propose_action(
         "webui_add_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name}
     )
@@ -423,11 +472,7 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "vlan_name": vlan_name,
             "action_id": action_id,
         },
-        "next_step": (
-            "Use the APPROVE and EXECUTE NOW buttons below this message. "
-            "Headed Chromium will open when you click EXECUTE NOW so you "
-            "can watch the clicks."
-        ),
+        "next_step": _NEXT_STEP_WEBUI,
     }
 
 
@@ -483,9 +528,18 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
         # to _TOOL_FUNCS but forgotten in _REQUIRES_APPROVAL.
         log.info("tool_not_approved", tool=name, error=str(exc))
         return {"error": "not_approved", "message": str(exc)}
-    except TypeError as exc:
-        # Wrong arguments — surface but don't crash
-        log.warning("tool_bad_params", tool=name, params=params, error=str(exc))
+    except (TypeError, ValueError) as exc:
+        # Wrong arguments or failed input validation (from propose-time
+        # validators on hostname / interface / IP / mask / VLAN). Both
+        # are "the input is wrong" — surface as bad_parameters so the
+        # chat shows a useful message instead of a generic tool_failed.
+        log.warning(
+            "tool_bad_params",
+            tool=name,
+            params=params,
+            error=str(exc),
+            exc_type=type(exc).__name__,
+        )
         return {"error": "bad_parameters", "message": str(exc)}
     except Exception as exc:
         # Some exceptions stringify to empty (bare Exception()). Always include

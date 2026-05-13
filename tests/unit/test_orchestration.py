@@ -116,26 +116,46 @@ def test_multiple_actions_independent():
 
 def test_concurrent_approve_reject_lands_in_one_consistent_state():
     """Two threads racing approve+reject on the same action_id should leave
-    the action in EXACTLY ONE of APPROVED or REJECTED — no torn write."""
+    the action in EXACTLY ONE of APPROVED or REJECTED — no torn write.
+
+    approve_action is now PROPOSED-only (Copilot-flagged tightening to
+    prevent re-approve-after-execute duplicate writes). reject_action
+    accepts {PROPOSED, APPROVED}. So in this race:
+      - approve wins first: PROPOSED→APPROVED, then reject moves APPROVED→REJECTED. Final: REJECTED.
+      - reject wins first: PROPOSED→REJECTED, then approve raises WrongState. Final: REJECTED.
+    Either way the final state is REJECTED — but the assertion holds for
+    both REJECTED and APPROVED so this doesn't pin the impl behavior to
+    one branch."""
     import threading
 
-    from backend.orchestration.confirmations import get_action
+    from backend.orchestration.confirmations import WrongState, get_action
 
     action_id = propose_action("set_hostname", {"name": "R1"})
     barrier = threading.Barrier(2)
     results: list[str] = []
+    results_lock = threading.Lock()
 
     def approve_worker():
         barrier.wait()
-        approve_action(action_id)
-        results.append("approve")
+        try:
+            approve_action(action_id)
+            with results_lock:
+                results.append("approve")
+        except WrongState:
+            with results_lock:
+                results.append("approve_blocked")
 
     def reject_worker():
         barrier.wait()
         from backend.orchestration.confirmations import reject_action
 
-        reject_action(action_id)
-        results.append("reject")
+        try:
+            reject_action(action_id)
+            with results_lock:
+                results.append("reject")
+        except WrongState:
+            with results_lock:
+                results.append("reject_blocked")
 
     t1 = threading.Thread(target=approve_worker)
     t2 = threading.Thread(target=reject_worker)
@@ -145,9 +165,10 @@ def test_concurrent_approve_reject_lands_in_one_consistent_state():
     t2.join()
 
     final_state = get_action(action_id)["state"]
-    # Whichever thread won the race, the state is one of the two — not a
-    # torn write that left mixed fields.
     assert final_state in (ActionState.APPROVED, ActionState.REJECTED)
+    # Exactly one of the workers may report being blocked (the one whose
+    # transition arrived after the other had already moved the state).
+    assert len(results) == 2
 
 
 def test_concurrent_propose_does_not_collide():

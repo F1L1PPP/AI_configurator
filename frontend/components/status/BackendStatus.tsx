@@ -43,18 +43,30 @@ export default function BackendStatus({
 
   const cfg = STATUS_CONFIG[status];
 
+  // Split the visible indicator from the screen-reader announcement so a
+  // poll that returns the same status doesn't re-announce. The visible
+  // element is `role="img"` with a static aria-label (one announcement
+  // when first rendered); the SR-only live region uses `key={status}` to
+  // force a remount on transitions, which is what triggers the actual
+  // announcement. Without this split, NVDA and friends re-read the
+  // status every 5s (audit #17).
   return (
-    <span
-      className="mono inline-flex items-center gap-1.5 text-[8px] tracking-wider text-ink-muted"
-      role="status"
-      aria-live="polite"
-    >
+    <>
       <span
-        className={`inline-block h-1.5 w-1.5 rounded-full ${cfg.dot}`}
-        aria-hidden="true"
-      />
-      <span aria-hidden="true">{cfg.glyph}</span>
-      <span>{cfg.label}</span>
-    </span>
+        className="mono inline-flex items-center gap-1.5 text-[8px] tracking-wider text-ink-muted"
+        role="img"
+        aria-label={`Backend ${cfg.label}`}
+      >
+        <span
+          className={`inline-block h-1.5 w-1.5 rounded-full ${cfg.dot}`}
+          aria-hidden="true"
+        />
+        <span aria-hidden="true">{cfg.glyph}</span>
+        <span aria-hidden="true">{cfg.label}</span>
+      </span>
+      <span key={status} className="sr-only" role="status">
+        Backend {cfg.label}
+      </span>
+    </>
   );
 }

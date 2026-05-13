@@ -33,18 +33,22 @@ def test_execute_404_for_unknown_action(client: TestClient) -> None:
     assert "not found" in r.json()["detail"].lower()
 
 
-def test_execute_403_for_proposed_but_not_approved(client: TestClient) -> None:
+def test_execute_409_for_proposed_but_not_approved(client: TestClient) -> None:
+    # Audit B1 fix: the route now uses an atomic CAS (try_begin_execution)
+    # that maps WrongState → 409 Conflict. 409 is the right code: the
+    # resource exists but is in the wrong state for this operation — not
+    # 403 (which means "you lack permission").
     aid = propose_action("webui_add_access_vlan", {"vlan_id": 30, "vlan_name": "OFFICE"})
     r = client.post(f"/api/execute/{aid}")
-    assert r.status_code == 403
+    assert r.status_code == 409
     assert "PROPOSED" in r.json()["detail"]
 
 
-def test_execute_403_for_rejected(client: TestClient) -> None:
+def test_execute_409_for_rejected(client: TestClient) -> None:
     aid = propose_action("webui_add_access_vlan", {"vlan_id": 30, "vlan_name": "OFFICE"})
     reject_action(aid)
     r = client.post(f"/api/execute/{aid}")
-    assert r.status_code == 403
+    assert r.status_code == 409
     assert "REJECTED" in r.json()["detail"]
 
 

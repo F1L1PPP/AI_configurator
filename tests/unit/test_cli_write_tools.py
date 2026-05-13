@@ -199,7 +199,9 @@ def test_set_interface_ip_rejects_bad_ip(_mock_pool, _mock_snapshot):
 
 
 def test_set_interface_ip_rejects_bad_mask(_mock_pool, _mock_snapshot):
-    with pytest.raises(ValueError, match="invalid IPv4 mask"):
+    # Bad mask now goes through _validate_subnet_mask, which uses a
+    # different error prefix than the legacy _validate_ipv4 message.
+    with pytest.raises(ValueError, match="invalid subnet mask"):
         wt.set_interface_ip("Gi0/0/0", "10.0.0.1", "not-a-mask", action_id="anything")
 
 

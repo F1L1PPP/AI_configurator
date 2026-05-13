@@ -108,6 +108,11 @@ function keyFor(entry: LogEntry, fallbackIndex: number): string {
   const what = (entry as { tool?: string; event?: string }).tool
     ?? (entry as { tool?: string; event?: string }).event
     ?? "log";
-  if (ts) return `${ts}|${what}`;
+  // ts+tool collides when two log lines share a second-precision timestamp
+  // and the same tool/event (realistic during bursts — structlog emits at
+  // second resolution in actions.log). Append the in-batch index as a
+  // tiebreaker so React keys stay unique even when the natural composite
+  // doesn't.
+  if (ts) return `${ts}|${what}|${fallbackIndex}`;
   return `idx-${fallbackIndex}`;
 }

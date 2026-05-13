@@ -51,14 +51,16 @@ def change_hostname_via_webui(
     new_name: str,
     action_id: str,
     *,
-    headless: bool = False,
+    headless: bool | None = None,
 ) -> dict:
     """Drive the WebUI to rename the router. Returns a structured result.
 
     Args:
         new_name:  New hostname to set (e.g. "LAB-R1").
         action_id: Must be in state APPROVED.
-        headless:  False (default) for dev / demo. True for CI smoke runs.
+        headless:  Defaults to None → `webui_browser._resolve_headless`
+                   reads PLAYWRIGHT_HEADLESS / CI env vars, falling back
+                   to False (dev / watch-it-click).
 
     Returns:
         dict with keys: tool, old_hostname, new_hostname, snapshot_pre,

@@ -76,13 +76,66 @@ def _validate_interface(interface: str) -> None:
 
 
 def _validate_ipv4(value: str, kind: str) -> None:
-    """Validate an IPv4 dotted-quad. `kind` is 'address' or 'mask' for the
-    error message — both use the same ipaddress.IPv4Address check; the mask
-    can be any valid IPv4 (Cisco supports non-contiguous masks for ACLs)."""
+    """Validate an IPv4 dotted-quad (any valid 32-bit address).
+
+    Stricter rules for the specific role (interface host vs. subnet mask)
+    live in `_validate_interface_ip_and_mask` below — keeping this one
+    permissive matches the way Cisco ACL grammar lets any 32-bit value
+    appear (e.g. wildcard masks)."""
     try:
         ipaddress.IPv4Address(value)
     except (ipaddress.AddressValueError, ValueError) as exc:
         raise ValueError(f"invalid IPv4 {kind} {value!r}: {exc}") from exc
+
+
+def _validate_subnet_mask(mask: str) -> None:
+    """Stricter than _validate_ipv4 — must be a contiguous IPv4 subnet
+    mask suitable for an interface assignment (not 0.0.0.0, not a non-
+    contiguous wildcard). IOS will reject these at apply time; failing
+    fast in chat avoids leaving a snapshot+failed-action behind.
+
+    A contiguous mask is N leading ones followed by (32-N) trailing
+    zeros. After bitwise inversion, that's (32-N) leading zeros then N
+    trailing ones — which is one-less-than-a-power-of-two (the
+    `(x & (x+1)) == 0` test). The all-zeros mask is rejected explicitly.
+    """
+    try:
+        m = int(ipaddress.IPv4Address(mask))
+    except (ipaddress.AddressValueError, ValueError) as exc:
+        raise ValueError(f"invalid subnet mask {mask!r}: {exc}") from exc
+    if m == 0:
+        raise ValueError(f"invalid subnet mask {mask!r}: 0.0.0.0 is not a valid interface mask")
+    inverted = (~m) & 0xFFFFFFFF
+    if inverted != 0 and (inverted & (inverted + 1)) != 0:
+        raise ValueError(
+            f"invalid subnet mask {mask!r}: not contiguous "
+            "(use a standard dotted-decimal mask like 255.255.255.0)"
+        )
+
+
+def _validate_interface_ip_and_mask(ip: str, mask: str) -> None:
+    """Combined check used by set_interface_ip — IP is a real host
+    address, mask is a real contiguous subnet mask, and the IP isn't
+    sitting on the network/broadcast of its own subnet."""
+    _validate_ipv4(ip, "address")
+    _validate_subnet_mask(mask)
+    if ip in ("0.0.0.0", "255.255.255.255"):
+        raise ValueError(
+            f"invalid interface IP {ip!r}: cannot use the wildcard or limited-broadcast address"
+        )
+    try:
+        net = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError) as exc:
+        raise ValueError(f"invalid IP/mask combo {ip}/{mask}: {exc}") from exc
+    host = ipaddress.IPv4Address(ip)
+    # /31 and /32 don't have network/broadcast in the usual sense — Cisco
+    # allows host addresses there (point-to-point links, loopbacks).
+    if net.prefixlen <= 30 and host in (net.network_address, net.broadcast_address):
+        raise ValueError(
+            f"invalid interface IP {ip}/{mask}: that's the "
+            f"{'network' if host == net.network_address else 'broadcast'} "
+            "address of the subnet, not a host address"
+        )
 
 
 def _validate_vlan_id(vlan_id: int) -> None:
@@ -202,8 +255,7 @@ def set_interface_ip(
     command is a no-op — safe to send unconditionally.
     """
     _validate_interface(interface)
-    _validate_ipv4(ip, "address")
-    _validate_ipv4(mask, "mask")
+    _validate_interface_ip_and_mask(ip, mask)
     _guard(action_id)
 
     t0 = time.monotonic()
@@ -261,6 +313,13 @@ def set_access_vlan(vlan_id: int, vlan_name: str, action_id: str) -> dict:
     Mirrors `set_hostname` / `set_interface_ip` shape exactly. Validates
     BOTH inputs before the approval check so a bad VLAN id never reaches
     Netmiko. Takes pre/post snapshots around the change.
+
+    Persistence: this writes to the VLAN database in running-config only.
+    No `write memory` / `copy running-config startup-config` is issued —
+    on reload the VLAN disappears. An opt-in "persist to startup-config"
+    step is on the Day-12 backlog; until then operators have to save
+    explicitly (via WebUI Administration → Save Configuration, or CLI
+    `wr mem`) if they want the change to survive a reboot.
 
     Note: this only CREATES the VLAN in the VLAN database. Assigning it
     to a switchport (`switchport access vlan <id>` on an interface) is a
