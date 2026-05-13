@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     artifacts_dir: Path = Field(default=Path("artifacts"), alias="ARTIFACTS_DIR")
     logs_dir: Path = Field(default=Path("logs"), alias="LOGS_DIR")
 
+    # CORS + WebSocket origin allowlist. WebSockets bypass the browser CORS
+    # policy, so /ws/agent has to enforce the same origin check itself —
+    # share the same list to avoid drift.
+    allowed_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:3001"],
+        alias="ALLOWED_ORIGINS",
+    )
+
     # Day 6 — RAG (knowledge_agent)
     # Chunk sizes are tuned to fit the MiniLM-L6 model's 256-token input window.
     knowledge_base_dir: Path = Field(default=Path("knowledge_base"), alias="KNOWLEDGE_BASE_DIR")

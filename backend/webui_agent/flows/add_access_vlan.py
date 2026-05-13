@@ -54,7 +54,7 @@ def add_access_vlan_via_webui(
     vlan_name: str,
     action_id: str,
     *,
-    headless: bool = False,
+    headless: bool | None = None,
 ) -> dict:
     """Drive the WebUI to add an access VLAN. Returns a structured result.
 
@@ -62,7 +62,10 @@ def add_access_vlan_via_webui(
         vlan_id:   VLAN number (1..4094). Router validates the range.
         vlan_name: Human-readable name (e.g. "OFFICE").
         action_id: Must be in state APPROVED.
-        headless:  False (default) for dev/demo; True for CI smoke runs.
+        headless:  Defaults to None → `webui_browser._resolve_headless`
+                   reads PLAYWRIGHT_HEADLESS or CI env vars, falling back
+                   to False (dev / watch-it-click). Pass True/False
+                   explicitly to override.
 
     Returns:
         dict with keys: tool, vlan_id, vlan_name, snapshot_pre,

@@ -7,13 +7,22 @@ export const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 // Pre-built endpoint URLs — components import these instead of string-
 // templating in their JSX (audit #21). One place to update if routes move.
+//
+// All caller-supplied values are passed through encodeURIComponent /
+// URLSearchParams so a future caller passing a non-numeric or otherwise
+// unsanitised value can't slip URL metacharacters into the path/query.
 export const endpoints = {
   health: () => `${API_BASE}/healthz`,
-  logs: (limit: number) => `${API_BASE}/api/logs/recent?limit=${limit}`,
-  approve: (actionId: string) => `${API_BASE}/api/approve/${actionId}`,
-  reject: (actionId: string) => `${API_BASE}/api/reject/${actionId}`,
-  execute: (actionId: string) => `${API_BASE}/api/execute/${actionId}`,
-  action: (actionId: string) => `${API_BASE}/api/actions/${actionId}`,
+  logs: (limit: number) =>
+    `${API_BASE}/api/logs/recent?${new URLSearchParams({ limit: String(limit) }).toString()}`,
+  approve: (actionId: string) =>
+    `${API_BASE}/api/approve/${encodeURIComponent(actionId)}`,
+  reject: (actionId: string) =>
+    `${API_BASE}/api/reject/${encodeURIComponent(actionId)}`,
+  execute: (actionId: string) =>
+    `${API_BASE}/api/execute/${encodeURIComponent(actionId)}`,
+  action: (actionId: string) =>
+    `${API_BASE}/api/actions/${encodeURIComponent(actionId)}`,
   chat: () => `${API_BASE}/api/chat`,
 };
 

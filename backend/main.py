@@ -20,7 +20,7 @@ app = FastAPI(title="Cisco AI Config Agent", version="0.0.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=get_settings().allowed_origins,
     allow_credentials=True,
     # Wildcards combined with allow_credentials=True defeat CORS — pin to
     # exactly what the frontend uses. Audit #4.
