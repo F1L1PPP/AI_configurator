@@ -21,13 +21,27 @@ from typing import Any
 
 from backend.cli_agent import read_tools, write_tools
 from backend.core.logging import get_logger
-from backend.knowledge_agent import retrieve as kb_retrieve
 from backend.orchestration.confirmations import (
     NotApproved,
     is_approved,
     propose_action,
 )
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
+
+
+def _search_docs(**kwargs: Any) -> dict:
+    """Lazy wrapper around `knowledge_agent.retrieve.search_docs`.
+
+    Importing `retrieve` at module-load time would pull in `chromadb` and
+    `sentence_transformers` (and transitively `torch`) for every consumer
+    of the registry — including workers that never call search_docs. Defer
+    the import until the tool actually runs; Python caches the import in
+    `sys.modules` so only the first call pays the cost.
+    """
+    from backend.knowledge_agent import retrieve as kb_retrieve
+
+    return kb_retrieve.search_docs(**kwargs)
+
 
 log = get_logger(__name__)
 
@@ -281,7 +295,7 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "show_ip_interface_brief": read_tools.show_ip_interface_brief,
     "show_running_config": read_tools.show_running_config,
     "show_vlan_brief": read_tools.show_vlan_brief,
-    "search_docs": kb_retrieve.search_docs,
+    "search_docs": _search_docs,
     "propose_set_hostname": _propose_set_hostname,
     "set_hostname": write_tools.set_hostname,
     "propose_set_interface_ip": _propose_set_interface_ip,

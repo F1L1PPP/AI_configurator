@@ -137,12 +137,13 @@ class HostnamePage:
         # Playwright `get_by_label` probe — semantically different from the
         # CSS `label:has-text(...)` above. Looks for inputs associated with
         # a label via for=, aria-labelledby, or wrapping <label>.
-        for label in ("Host Name", "Hostname"):
+        # `lbl` not `label` to avoid shadowing the method parameter.
+        for lbl in ("Host Name", "Hostname"):
             try:
-                cnt = self.page.get_by_label(label, exact=False).count()
+                cnt = self.page.get_by_label(lbl, exact=False).count()
             except Exception as exc:
                 cnt = f"ERR:{exc}"
-            log.warning("probe_get_by_label", label=label, count=cnt)
+            log.warning("probe_get_by_label", label=lbl, count=cnt)
 
         # Full input inventory — name/id/ng-model/placeholder/type/visible
         try:

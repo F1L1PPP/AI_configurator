@@ -3,26 +3,35 @@
 Public API: search_docs(query, top_k=5) -> dict.
 
 The embedding model + Chroma client + collection are loaded lazily on first
-call to keep import cost low (especially for processes that don't use RAG).
+call to keep import cost low. The heavy deps (`chromadb`, `sentence_transformers`,
+and transitively `torch`) are also imported lazily inside `_ensure_loaded()`,
+so just importing this module does NOT pull torch into the process — only
+the first `search_docs(...)` call does. Critical for FastAPI startup time
+and for any worker that doesn't use RAG.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import chromadb
 import structlog
-from sentence_transformers import SentenceTransformer
 
 from backend.core.settings import get_settings
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 log = structlog.get_logger(__name__)
 
 _model: SentenceTransformer | None = None
 _collection: Any | None = None
 _load_lock = threading.Lock()
+
+
+class RagNotInitialized(RuntimeError):
+    """Raised if search_docs is called before _ensure_loaded() succeeded."""
 
 
 def _ensure_loaded() -> None:
@@ -37,6 +46,12 @@ def _ensure_loaded() -> None:
     with _load_lock:
         if _model is not None and _collection is not None:
             return
+        # Imports stay inside the function so module import doesn't pull
+        # torch/chromadb into every process (FastAPI startup, CLI helpers,
+        # tests that monkeypatch _model directly).
+        import chromadb
+        from sentence_transformers import SentenceTransformer
+
         settings = get_settings()
         if _model is None:
             _model = SentenceTransformer(settings.embedding_model)
@@ -64,7 +79,13 @@ def search_docs(query: str, top_k: int = 5) -> dict[str, Any]:
     """
     t0 = time.perf_counter()
     _ensure_loaded()
-    assert _model is not None and _collection is not None
+    # Explicit runtime check rather than `assert` — assertions are stripped
+    # under `python -O`, which would turn a loading failure into a confusing
+    # AttributeError later instead of a clear error here.
+    if _model is None or _collection is None:
+        raise RagNotInitialized(
+            "search_docs called but _ensure_loaded() left _model or _collection unset"
+        )
 
     encoded = _model.encode([query], show_progress_bar=False, convert_to_numpy=True)
     first = encoded[0]

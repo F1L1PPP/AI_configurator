@@ -27,7 +27,6 @@ from netmiko.exceptions import (
 from pydantic import BaseModel, Field
 
 from backend.core.logging import get_logger
-from backend.orchestration.confirmations import NotApproved
 from backend.orchestration.planner import PlannerEvent, run_planner
 
 log = get_logger(__name__)
@@ -65,12 +64,13 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # run_planner does blocking I/O (Anthropic API + Netmiko SSH).
     # Offload to a threadpool so the FastAPI event loop stays free for
     # concurrent requests (BackendStatus + RecentActions poll every few s).
+    # Note: NotApproved is intentionally NOT caught here. The tool dispatcher
+    # in backend.orchestration.tool_registry.execute_tool() catches it and
+    # converts it to {"error": "not_approved"} in the tool result, so the
+    # planner returns normally and the front-end sees the not-approved state
+    # in the events trace. Catching it here would be dead code.
     try:
         result = await run_in_threadpool(run_planner, req.message, history=req.history)
-    except NotApproved as exc:
-        # Write attempted without approval — semantically 403 Forbidden, not 500
-        log.info("chat_not_approved", error=str(exc))
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NetMikoAuthenticationException as exc:
         # Wrong SSH credentials — 401 Unauthorized so the operator can fix .env
         log.error("chat_ssh_auth_failed", error=str(exc))

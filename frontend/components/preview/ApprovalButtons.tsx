@@ -33,9 +33,12 @@ export default function ApprovalButtons({
 
   const post = async (endpoint: "approve" | "reject") => {
     if (!actionId) return;
-    // Double-click guard — return early if a request is already in the air,
-    // even if state hasn't updated yet (React batches setState).
-    if (inFlight.current || state !== "idle") return;
+    // Don't fire if a previous request is still in flight or the action
+    // already resolved (approved/rejected). `state === "error"` is allowed
+    // through so the user can retry after a timeout/network failure.
+    if (inFlight.current || state === "loading" || state === "approved" || state === "rejected") {
+      return;
+    }
     inFlight.current = true;
     setState("loading");
     setErrorMsg(null);
