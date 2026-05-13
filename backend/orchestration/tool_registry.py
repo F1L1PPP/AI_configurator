@@ -288,7 +288,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def _propose_set_hostname(new_name: str) -> dict:
-    action_id = propose_action("set_hostname", {"name": new_name})
+    # Store the param under the same key the write tool's signature expects
+    # (`set_hostname(new_name: str, action_id: str)`), so the new
+    # `/api/execute/{action_id}` endpoint can dispatch via {**params,
+    # action_id=...} without a name-translation step.
+    action_id = propose_action("set_hostname", {"new_name": new_name})
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
@@ -322,7 +326,9 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
-    action_id = propose_action("webui_set_hostname", {"name": new_name})
+    # Store under `new_name` to match the flow function's kwarg name
+    # (change_hostname_via_webui(new_name, action_id)).
+    action_id = propose_action("webui_set_hostname", {"new_name": new_name})
     return {
         "status": "awaiting_approval",
         "action_id": action_id,

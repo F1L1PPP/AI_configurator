@@ -9,7 +9,6 @@ import pytest
 import backend.webui_agent.pages.vlan_page as vp_mod
 from backend.webui_agent.pages.vlan_page import (
     VlanFieldNotFound,
-    VlanNavigationError,
     VlanPage,
 )
 
@@ -111,17 +110,38 @@ def test_save_clicks_when_present(
     btn.click.assert_called_once()
 
 
-def test_goto_raises_when_configuration_menu_missing(
+def test_goto_uses_direct_hash_route(
     page: MagicMock, stub_networkidle, monkeypatch: pytest.MonkeyPatch
 ):
-    """If the Configuration menu can't even be found, goto() must raise
-    VlanNavigationError (don't try fallback paths from a broken state)."""
+    """goto() must navigate via /webui/#/vlan, bypassing the sidebar.
+
+    The Cisco IOS XE 17.6.3a sidebar renders unreliably under Playwright
+    (Day 5 hostname fix). VLAN flow uses the same direct-hash-route
+    pattern.
+    """
+    page.url = "https://192.168.10.1/webui/#/dashboard"
+    # first_match returns the VLAN tab locator (None would also be OK —
+    # _select_vlan_tab logs + continues without raising).
+    monkeypatch.setattr(vp_mod, "first_match", MagicMock(return_value=MagicMock()))
+    vp = VlanPage(page)
+    vp.goto()
+    # Assert page.goto was called with the hash-route URL, not by clicking
+    # the sidebar.
+    page.goto.assert_called_once()
+    called_url = page.goto.call_args.args[0]
+    assert called_url == "https://192.168.10.1/webui/#/vlan"
+
+
+def test_goto_continues_when_vlan_tab_not_found(
+    page: MagicMock, stub_networkidle, monkeypatch: pytest.MonkeyPatch
+):
+    """If the VLAN tab can't be located, goto() must NOT raise — some IOS
+    XE builds may render the VLAN table without a tab strip. click_add()
+    will surface a clearer error if the page state is actually wrong."""
+    page.url = "https://192.168.10.1/webui/#/dashboard"
     monkeypatch.setattr(vp_mod, "first_match", MagicMock(return_value=None))
     vp = VlanPage(page)
-    # Make all sub-locators return count=0 so paths B and C also fail cleanly
-    page.locator.return_value.count.return_value = 0
-    with pytest.raises(VlanNavigationError):
-        vp.goto()
+    vp.goto()  # should not raise
 
 
 def test_dump_diagnostics_does_not_shadow_method_signature(

@@ -1,14 +1,21 @@
-"""Page Object Model for Configuration → Layer 2 → VLAN.
+"""Page Object Model for the VLAN form (Configuration → Layer 2 → VLAN).
 
 Pure presentation-layer wrapper around the Playwright Page. Knows the
-navigation path (with 3-path fallback proven by `playwright_playground/
-scripts/06_real_router_vlan_add.py`), the form fields, and the save
-button — but nothing about approvals, snapshots, or higher-level flow.
-Composed by `flows/add_access_vlan.py`.
+direct hash route to the VLAN page, the tab structure (SVI / VLAN /
+VLAN Group), the form fields, and the save button — but nothing about
+approvals, snapshots, or higher-level flow. Composed by
+`flows/add_access_vlan.py`.
 
-Selectors come from `selectors/iosxe_default.yaml` (`vlan_nav` +
-`vlan_form` chains). The POM hardcodes no locator; if the yaml changes,
-the POM keeps working.
+**Navigation strategy: direct hash route, NOT the sidebar.** Day 5
+proved that the Cisco IOS XE 17.6.3a sidebar renders unreliably under
+Playwright — sometimes the Configuration menu just isn't there even
+for priv-15 users. `HostnamePage.goto()` bypasses this by navigating
+directly to `/webui/#/general`; we do the same here with
+`/webui/#/vlan`.
+
+Selectors come from `selectors/iosxe_default.yaml` (`vlan_form`
+chains). The POM hardcodes no locator; if the yaml changes, the POM
+keeps working.
 """
 
 from __future__ import annotations
@@ -25,6 +32,10 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# Direct hash route to the VLAN page on IOS XE 17.6.3a — captured by
+# manual navigation per Filip's screenshots. Lands on the SVI tab by
+# default; goto() then clicks the VLAN tab to reveal the VLAN table.
+VLAN_ROUTE = "/webui/#/vlan"
 FORM_SETTLE_MS = 3_000
 NAV_TIMEOUT_MS = 10_000
 
@@ -59,93 +70,57 @@ class VlanPage:
     # ---------------------------------------------------------------------
 
     def goto(self) -> None:
-        """Navigate to the VLAN list page via Configuration → Layer 2 → VLAN.
+        """Navigate directly to the VLAN form via hash route.
 
-        Falls back to Path B (Configuration → LAN → VLAN) and Path C
-        (any visible link containing "VLAN") if the primary path fails.
-        Path discipline proven by playwright_playground/scripts/06.
+        Skips the sidebar (Configuration → Layer 2 → VLAN) and goes
+        straight to `/webui/#/vlan`. The sidebar renders unreliably
+        under Playwright; the hash route works regardless. Same fix
+        Day 5 made for the hostname form.
+
+        Lands on the **SVI** tab (default of 3). This method then
+        clicks the **VLAN** tab so the VLAN table + Add button are
+        visible — without that, click_add() can't find anything to
+        click.
         """
         log.info("vlan_page_goto_start", url=self.page.url)
 
-        # Open Configuration menu
-        cfg = first_match(self.page, self._sel["nav"]["configuration"])
-        if cfg is None:
-            self._dump_diagnostics("nav-no-configuration")
-            raise VlanNavigationError(
-                "Configuration menu not visible — sidebar may not have rendered "
-                "or user lacks priv-15."
-            )
-        cfg.click()
+        # Reconstruct the base URL from whatever route we're currently on
+        parts = self.page.url.split("/webui/")
+        base = parts[0] if parts else self.page.url.rstrip("/")
+        target_url = f"{base}{VLAN_ROUTE}"
+        log.info("vlan_page_direct_nav", target=target_url)
+
+        self.page.goto(target_url, wait_until="domcontentloaded", timeout=20_000)
         wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-        self.page.wait_for_timeout(500)
-
-        # Path A: Layer 2 → VLAN
-        if self._try_path_a():
-            log.info("vlan_page_path_a_succeeded", url=self.page.url)
-        elif self._try_path_b():
-            log.info("vlan_page_path_b_succeeded", url=self.page.url)
-        elif self._try_path_c():
-            log.info("vlan_page_path_c_succeeded", url=self.page.url)
-        else:
-            self._dump_diagnostics("nav-all-paths-failed")
-            raise VlanNavigationError(
-                "All three navigation paths (Layer 2 → VLAN, LAN → VLAN, "
-                "any-link-containing-VLAN) failed. See structlog probe entries "
-                "above and the DOM dump in artifacts/."
-            )
-
-        # AngularJS table render + form settle
+        # AngularJS / Kendo finish rendering tabs + table
         self.page.wait_for_timeout(FORM_SETTLE_MS)
+
+        # Click the VLAN tab (default is SVI; we want VLAN). Two attempts:
+        # the loaded yaml chain, then a permissive fallback.
+        self._select_vlan_tab()
+
         log.info("vlan_page_goto_complete", url=self.page.url)
 
-    def _try_path_a(self) -> bool:
-        """Layer 2 submenu → VLAN sub-item."""
-        l2 = first_match(self.page, self._sel["vlan_nav"]["layer2"])
-        if l2 is None:
-            return False
-        l2.click()
-        wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-        self.page.wait_for_timeout(500)
-        vlan = first_match(self.page, self._sel["vlan_nav"]["vlan"])
-        if vlan is None:
-            return False
-        vlan.click()
-        wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-        return True
+    def _select_vlan_tab(self) -> None:
+        """Click the VLAN tab to switch from SVI to the VLAN table.
 
-    def _try_path_b(self) -> bool:
-        """LAN submenu → VLAN sub-item (some IOS XE builds use LAN, not Layer 2)."""
-        # Re-open Configuration since submenus may have collapsed
-        cfg = first_match(self.page, self._sel["nav"]["configuration"])
-        if cfg is not None:
-            cfg.click()
-            wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-            self.page.wait_for_timeout(500)
+        The /webui/#/vlan page has three tabs (SVI / VLAN / VLAN Group)
+        and the user lands on SVI by default. Clicking VLAN reveals
+        the table where the Add button lives.
 
-        lan = self.page.locator("a:has-text('LAN'), span:has-text('LAN')").first
-        if lan.count() == 0:
-            return False
-        lan.click()
+        If the tab can't be found, we log + continue rather than raise —
+        some IOS XE builds may show the VLAN table on first load
+        without tabs at all. click_add() will produce a clearer error
+        if the page state is wrong.
+        """
+        tab = first_match(self.page, self._sel["vlan_form"]["vlan_tab"])
+        if tab is None:
+            log.warning("vlan_page_tab_not_found_continuing")
+            return
+        tab.click()
         wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-        self.page.wait_for_timeout(500)
-
-        vlan = first_match(self.page, self._sel["vlan_nav"]["vlan"])
-        if vlan is None:
-            return False
-        vlan.click()
-        wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-        return True
-
-    def _try_path_c(self) -> bool:
-        """Last resort: any visible nav link / button containing 'VLAN'."""
-        any_vlan = self.page.locator(
-            "a:has-text('VLAN'), button:has-text('VLAN'), span:has-text('VLAN')"
-        )
-        if any_vlan.count() == 0:
-            return False
-        any_vlan.first.click()
-        wait_for_networkidle(self.page, NAV_TIMEOUT_MS)
-        return True
+        self.page.wait_for_timeout(800)
+        log.info("vlan_page_tab_selected")
 
     # ---------------------------------------------------------------------
     # Form interactions
