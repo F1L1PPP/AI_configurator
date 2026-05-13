@@ -12,6 +12,7 @@ export const endpoints = {
   logs: (limit: number) => `${API_BASE}/api/logs/recent?limit=${limit}`,
   approve: (actionId: string) => `${API_BASE}/api/approve/${actionId}`,
   reject: (actionId: string) => `${API_BASE}/api/reject/${actionId}`,
+  execute: (actionId: string) => `${API_BASE}/api/execute/${actionId}`,
   action: (actionId: string) => `${API_BASE}/api/actions/${actionId}`,
   chat: () => `${API_BASE}/api/chat`,
 };
