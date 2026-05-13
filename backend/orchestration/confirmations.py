@@ -127,10 +127,35 @@ def _transition_if(
 
 
 def approve_action(action_id: str) -> dict:
-    """Mark an action APPROVED. Lenient — accepts from any current state
-    so a UI double-click doesn't error. The real safety gate is
-    `try_begin_execution`, not this function."""
-    return _transition(action_id, ActionState.APPROVED)
+    """Mark an action APPROVED — only allowed from PROPOSED.
+
+    Tightened to refuse re-approval after EXECUTED / FAILED / VERIFIED
+    / EXECUTING: a lenient approve_action would let a finished action be
+    re-armed, and /api/execute would happily run it again (duplicate
+    write to the router). The UI's inFlight ref already prevents
+    double-click submits on the same action; this is the server-side
+    backstop.
+
+    Raises:
+        KeyError:   action_id unknown
+        WrongState: action is not in PROPOSED state
+    """
+    return _transition_if(
+        action_id,
+        expected={ActionState.PROPOSED},
+        new_state=ActionState.APPROVED,
+    )
+
+
+def get_state(action_id: str) -> ActionState | None:
+    """Return the current state of an action, or None if unknown.
+
+    Cheaper than `get_action` for the common "did the write tool already
+    transition the state?" check that the /api/execute route does after
+    a structured-error result."""
+    with _lock:
+        action = _actions.get(action_id)
+        return action["state"] if action is not None else None
 
 
 def reject_action(action_id: str) -> dict:

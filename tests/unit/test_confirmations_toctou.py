@@ -123,6 +123,56 @@ def test_reject_refuses_failed():
 
 
 # ---------------------------------------------------------------------------
+# approve_action — Copilot follow-up: tightened to PROPOSED-only so a
+# post-execution re-approve can't resurrect a finished action and re-arm
+# /api/execute (duplicate write).
+# ---------------------------------------------------------------------------
+
+
+def test_approve_refuses_from_executing():
+    action_id = propose_action("set_hostname", {"new_name": "R1"})
+    approve_action(action_id)
+    try_begin_execution(action_id)
+    with pytest.raises(WrongState):
+        approve_action(action_id)
+
+
+def test_approve_refuses_from_executed():
+    """The critical case — without this guard, an EXECUTED action could
+    be re-approved and re-executed (duplicate write to the router)."""
+    action_id = propose_action("set_hostname", {"new_name": "R1"})
+    approve_action(action_id)
+    mark_executed(action_id)
+    with pytest.raises(WrongState):
+        approve_action(action_id)
+
+
+def test_approve_refuses_from_failed():
+    action_id = propose_action("set_hostname", {"new_name": "R1"})
+    mark_failed(action_id)
+    with pytest.raises(WrongState):
+        approve_action(action_id)
+
+
+def test_approve_refuses_from_rejected():
+    """Once rejected, the operator should propose a fresh action_id
+    rather than un-rejecting. Clean state machine."""
+    action_id = propose_action("set_hostname", {"new_name": "R1"})
+    reject_action(action_id)
+    with pytest.raises(WrongState):
+        approve_action(action_id)
+
+
+def test_approve_idempotency_double_click_now_409s():
+    """UI inFlight ref already prevents double-clicks but the server-side
+    rule means a second approve will 409 instead of being a silent no-op."""
+    action_id = propose_action("set_hostname", {"new_name": "R1"})
+    approve_action(action_id)
+    with pytest.raises(WrongState):
+        approve_action(action_id)
+
+
+# ---------------------------------------------------------------------------
 # is_approved — accepts both APPROVED and EXECUTING so write tools' _guard
 # stays green while a /api/execute-driven flow is in progress.
 # ---------------------------------------------------------------------------

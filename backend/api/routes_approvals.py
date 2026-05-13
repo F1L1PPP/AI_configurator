@@ -24,6 +24,7 @@ from backend.orchestration.confirmations import (
     WrongState,
     approve_action,
     get_action,
+    get_state,
     mark_failed,
     reject_action,
     try_begin_execution,
@@ -33,6 +34,28 @@ from backend.orchestration.tool_registry import execute_tool
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/api", tags=["approvals"])
+
+# Map error keys returned by execute_tool's structured-error path to HTTP
+# status codes. The dispatcher converts internal exceptions into these
+# error keys instead of raising, so the route has to translate them back
+# into client-meaningful statuses.
+_ERROR_TO_STATUS: dict[str, int] = {
+    # action_id missing or revoked between try_begin_execution and the
+    # dispatcher gate — shouldn't happen in practice now (we hold the
+    # state in EXECUTING) but the dispatcher's layer-2 check still fires
+    # for any unforeseen race. 409 because the resource is in the wrong
+    # state, not 403 (permission).
+    "not_approved": 409,
+    # Tool-name typo or schema drift — the propose path enforces the
+    # schema, so reaching this from /api/execute means a stale/tampered
+    # action_id. 404 communicates "the named tool isn't in the registry".
+    "unknown tool": 404,
+    # Validators rejected the params — same category as a malformed
+    # request body. 422 Unprocessable Entity matches FastAPI's convention.
+    "bad_parameters": 422,
+    # Tool raised an unhandled exception. 500.
+    "tool_failed": 500,
+}
 
 
 def _key_error_to_404(action_id: str, exc: KeyError) -> HTTPException:
@@ -62,6 +85,18 @@ async def approve(action_id: str) -> dict:
         return approve_action(action_id)
     except KeyError as exc:
         raise _key_error_to_404(action_id, exc) from exc
+    except WrongState as exc:
+        # approve_action is now PROPOSED-only. A late approve (after
+        # reject/execute/etc.) returns 409 so the UI can show "this
+        # action can't be approved in its current state" instead of a
+        # silent success that re-enables /api/execute on a finished
+        # action.
+        log.info(
+            "approve_wrong_state",
+            action_id=action_id,
+            current=exc.current.value,
+        )
+        raise _wrong_state_to_409(exc) from exc
 
 
 @router.post("/reject/{action_id}")
@@ -72,7 +107,7 @@ async def reject(action_id: str) -> dict:
         raise _key_error_to_404(action_id, exc) from exc
     except WrongState as exc:
         # Tried to reject something that's already executing/executed/failed.
-        log.info("reject_wrong_state", action_id=action_id, current=str(exc.current))
+        log.info("reject_wrong_state", action_id=action_id, current=exc.current.value)
         raise _wrong_state_to_409(exc) from exc
 
 
@@ -84,14 +119,22 @@ async def get_action_status(action_id: str) -> dict:
         raise _key_error_to_404(action_id, exc) from exc
 
 
+def _result_is_error(result: object) -> str | None:
+    """If the tool dispatcher returned a structured error dict, return
+    the error key; otherwise None. The dispatcher's convention is
+    `{"error": "<key>", "message": "..."}`."""
+    if isinstance(result, dict) and "error" in result:
+        err = result["error"]
+        return err if isinstance(err, str) else "tool_failed"
+    return None
+
+
 @router.post("/execute/{action_id}")
 async def execute(action_id: str) -> dict:
     """Run the approved tool directly — no LLM round-trip.
 
     Lets the operator complete an action from /preview alone (Approve →
     Execute Now) without going back to /chat and saying "execute it".
-    Fixes the UX trap where the LLM lost the original tool_use context
-    after page navigation and couldn't resolve action_id references.
 
     Flow:
       1. Atomically transition APPROVED → EXECUTING (`try_begin_execution`).
@@ -104,8 +147,16 @@ async def execute(action_id: str) -> dict:
          the same way it accepts APPROVED, so the write tool runs.
       3. Block until the flow returns (run_in_threadpool, since WebUI
          flows can take 20-30s while Playwright drives the browser).
-      4. Return the structured tool result. On exception, the action is
-         marked FAILED so the in-memory store reflects reality.
+      4. Translate the outcome:
+         - tool returned a normal result → 200, state should be EXECUTED
+           (write tools call mark_executed themselves on success).
+         - tool returned a structured error dict → translate to a
+           4xx/5xx by `_ERROR_TO_STATUS` and mark FAILED, because
+           execute_tool's error path doesn't always fire the write
+           tool's own except-block. Without this, the action would be
+           stuck in EXECUTING forever (and reject_action would refuse
+           to clear it).
+         - tool raised → 500 + mark FAILED.
     """
     try:
         action = try_begin_execution(action_id)
@@ -115,7 +166,7 @@ async def execute(action_id: str) -> dict:
         log.info(
             "execute_wrong_state",
             action_id=action_id,
-            current=str(exc.current),
+            current=exc.current.value,
         )
         raise _wrong_state_to_409(exc) from exc
 
@@ -126,14 +177,13 @@ async def execute(action_id: str) -> dict:
     try:
         result = await run_in_threadpool(execute_tool, tool, params)
     except Exception as exc:
-        # The write tool's mark_failed runs inside the tool's own except
-        # block, but if execute_tool itself raised before reaching the
-        # tool (or the tool's mark_failed didn't fire) we still need the
-        # store to leave EXECUTING. Idempotent — mark_failed is lenient.
+        # execute_tool catches most exceptions itself and returns an
+        # error dict (handled below). Anything that escapes here is a
+        # real programming bug — log loudly, mark FAILED, return 500.
         with contextlib.suppress(KeyError):
             mark_failed(action_id)
         log.error(
-            "execute_failed",
+            "execute_unhandled_exception",
             action_id=action_id,
             tool=tool,
             error=str(exc),
@@ -144,5 +194,32 @@ async def execute(action_id: str) -> dict:
             status_code=500,
             detail=f"execute_tool({tool}) raised: {type(exc).__name__}: {exc}",
         ) from exc
+
+    # Structured-error path: dispatcher returned {"error": "<key>", ...}.
+    # The write tool's own except-block already calls mark_failed for
+    # the cases it owns, but for failures upstream of the tool (unknown
+    # tool, dispatcher's layer-1 not_approved, propose-time validators)
+    # nothing transitions the state. Do it here so the store can't be
+    # stuck in EXECUTING with no way out.
+    err_key = _result_is_error(result)
+    if err_key is not None:
+        # Only flip to FAILED if we're still in EXECUTING. The write
+        # tool's mark_failed may have already moved us — be idempotent.
+        if get_state(action_id) is not None and get_state(action_id).value == "EXECUTING":
+            with contextlib.suppress(KeyError):
+                mark_failed(action_id)
+        status = _ERROR_TO_STATUS.get(err_key, 500)
+        message = result.get("message") if isinstance(result, dict) else None
+        log.warning(
+            "execute_tool_error",
+            action_id=action_id,
+            tool=tool,
+            error_key=err_key,
+            status=status,
+        )
+        raise HTTPException(
+            status_code=status,
+            detail=f"execute_tool({tool}) -> {err_key}: {message or 'no message'}",
+        )
 
     return {"action_id": action_id, "tool": tool, "result": result}

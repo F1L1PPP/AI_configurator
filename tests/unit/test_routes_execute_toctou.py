@@ -119,6 +119,75 @@ def test_execute_second_call_returns_409(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Structured-error path (Copilot follow-up): execute_tool's error dict
+# must (a) transition the action out of EXECUTING and (b) map to a
+# meaningful HTTP status — not silently 200 + stuck-state.
+# ---------------------------------------------------------------------------
+
+
+def test_execute_returns_500_and_marks_failed_on_tool_failed_dict(client, monkeypatch):
+    """A returned {"error": "tool_failed"} dict (dispatcher's wrapper for
+    unhandled exceptions) → 500 + state=FAILED. Without the route's new
+    error-dict branch, the action stayed in EXECUTING and reject_action
+    couldn't clear it."""
+    action_id = propose_action("set_hostname", {"new_name": "LAB-R1"})
+    approve_action(action_id)
+
+    monkeypatch.setitem(
+        tr._TOOL_FUNCS,
+        "set_hostname",
+        lambda **kw: {"error": "tool_failed", "message": "netmiko boom"},
+    )
+
+    resp = client.post(f"/api/execute/{action_id}")
+    assert resp.status_code == 500
+    assert "tool_failed" in resp.json()["detail"]
+    assert get_action(action_id)["state"] == ActionState.FAILED
+
+
+def test_execute_returns_422_on_bad_parameters_dict(client, monkeypatch):
+    """A returned {"error": "bad_parameters"} → 422 (matches FastAPI's
+    convention for validation errors) + state=FAILED."""
+    action_id = propose_action("set_hostname", {"new_name": "LAB-R1"})
+    approve_action(action_id)
+
+    monkeypatch.setitem(
+        tr._TOOL_FUNCS,
+        "set_hostname",
+        lambda **kw: {"error": "bad_parameters", "message": "name too long"},
+    )
+
+    resp = client.post(f"/api/execute/{action_id}")
+    assert resp.status_code == 422
+    assert "bad_parameters" in resp.json()["detail"]
+    assert get_action(action_id)["state"] == ActionState.FAILED
+
+
+def test_execute_recovery_after_failure_via_propose_again(client, monkeypatch):
+    """After a tool fails, the action is FAILED — the operator can't
+    re-execute the same action_id (state isn't APPROVED) and can't
+    approve it again (approve_action is PROPOSED-only). The right path
+    is to propose a fresh action_id."""
+    action_id = propose_action("set_hostname", {"new_name": "LAB-R1"})
+    approve_action(action_id)
+
+    monkeypatch.setitem(
+        tr._TOOL_FUNCS,
+        "set_hostname",
+        lambda **kw: {"error": "tool_failed", "message": "boom"},
+    )
+    client.post(f"/api/execute/{action_id}")  # → 500, FAILED
+
+    # Re-approve refused (now PROPOSED-only).
+    resp = client.post(f"/api/approve/{action_id}")
+    assert resp.status_code == 409
+
+    # Second execute also refused.
+    resp = client.post(f"/api/execute/{action_id}")
+    assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
 # The TOCTOU race itself: concurrent execute + reject must not both win
 # ---------------------------------------------------------------------------
 

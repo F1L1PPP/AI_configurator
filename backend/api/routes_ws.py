@@ -37,14 +37,30 @@ _CLOSE_TRY_AGAIN_LATER = 1013  # subscriber cap reached
 @router.websocket("/ws/agent")
 async def ws_agent(ws: WebSocket) -> None:
     # Enforce the same allowlist CORS uses for HTTP. WebSocket upgrades
-    # carry an Origin header in the handshake; treat a missing/foreign
-    # Origin the same as a foreign-CORS browser request.
+    # carry an Origin header in the handshake when initiated by a
+    # browser; non-browser clients (curl, TestClient, custom scripts)
+    # generally omit it.
+    #
+    # Policy:
+    #  - Origin missing  → allowed (covers TestClient + local debugging
+    #                     with curl --include-header). Logged at INFO
+    #                     so a sudden surge of non-browser connects is
+    #                     visible in the audit log.
+    #  - Origin foreign  → rejected with 1008 Policy Violation, the
+    #                     equivalent of a CORS preflight failure.
+    #  - Origin allowed  → proceeds normally.
+    #
+    # If we later deploy beyond localhost, flip this to strict mode
+    # (reject missing OR foreign) and add a settings.ws_strict_origin
+    # toggle so the dev workflow doesn't break.
     origin = ws.headers.get("origin", "")
     allowed = set(get_settings().allowed_origins)
     if origin and origin not in allowed:
         log.warning("ws_agent_origin_rejected", origin=origin)
         await ws.close(code=_CLOSE_POLICY_VIOLATION, reason="origin not allowed")
         return
+    if not origin:
+        log.info("ws_agent_origin_missing", note="non-browser client or local debug tool")
 
     await ws.accept()
 
