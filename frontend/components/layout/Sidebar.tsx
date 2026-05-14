@@ -123,11 +123,16 @@ type NavItem = { label: string; icon: IconName; href: string };
 // that confused users into thinking the app was broken. They come back
 // as real pages get built (Day 8 ships Logs / Backups / Devices per
 // PROJECT_PLAN.md §7 Day 8).
+//
+// /preview was removed from the nav in the v0.3.x cleanup pass: approval
+// + execute now happen *inline in chat* under each agent reply, so the
+// dedicated Preview page is no longer a primary nav target. The route
+// still exists for deep-link debugging (`/preview?action_id=act_…`)
+// until it's rehydrated with real action data in a later milestone.
 const mainNav: NavItem[] = [
   { label: "Dashboard", icon: "dashboard", href: "/" },
   { label: "AI Chat", icon: "ai", href: "/chat" },
   { label: "Quick Actions", icon: "config", href: "/actions" },
-  { label: "Preview", icon: "preview", href: "/preview" },
   { label: "WebUI Live", icon: "live", href: "/webui-live" },
 ];
 

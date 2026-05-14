@@ -5,6 +5,11 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import ApprovalButtons from "@/components/preview/ApprovalButtons";
 import { endpoints } from "../../lib/api";
 import {
+  describeNetworkError,
+  fromResponse,
+  type FriendlyError,
+} from "../../lib/errors";
+import {
   AgentEvent,
   AgentSource,
   connectAgentWs,
@@ -18,6 +23,10 @@ type Msg = {
   time: string;
   sources?: AgentSource[];
   error?: boolean;
+  /** Friendly error payload from lib/errors.ts when the chat request
+   *  failed. Renders as a titled banner with hint + collapsible detail
+   *  instead of the previous raw `Error: HTTP 503` string. */
+  friendlyError?: FriendlyError & { detail?: string };
   // Set on agent replies that proposed an action — renders inline
   // APPROVE / REJECT / EXECUTE NOW buttons under the bubble so the
   // user doesn't have to navigate to /preview.
@@ -59,6 +68,24 @@ const Bubble = ({ msg }: { msg: Msg }) => {
         >
           {msg.text}
         </div>
+        {msg.friendlyError && (
+          <div className="border border-terminal-red bg-surface p-2">
+            <p className="mono text-[9px] font-semibold tracking-wider text-terminal-red">
+              ✗ {msg.friendlyError.title.toUpperCase()}
+            </p>
+            <p className="mono mt-1 text-[9px] leading-relaxed text-ink-muted">
+              {msg.friendlyError.hint}
+            </p>
+            {msg.friendlyError.detail && (
+              <details className="mono mt-1 text-[8px] text-ink-faint">
+                <summary className="cursor-pointer tracking-wider">DETAIL</summary>
+                <pre className="mt-1 whitespace-pre-wrap break-words">
+                  {msg.friendlyError.detail}
+                </pre>
+              </details>
+            )}
+          </div>
+        )}
         {msg.sources && msg.sources.length > 0 && (
           <div className="flex flex-wrap gap-1 pt-0.5">
             {msg.sources.map((s, i) => (
@@ -87,8 +114,18 @@ const Bubble = ({ msg }: { msg: Msg }) => {
   );
 };
 
-function eventLabel(ev: AgentEvent): string {
+// Synthetic local-only event type. Inserted into the event stream the
+// instant SEND is clicked so the operator gets immediate "yes, the
+// agent is working on it" feedback instead of staring at an empty
+// stream for the 1-5s it takes the planner to emit its first
+// agent_thinking. Review §3 HIGH. Marked optional in event handling
+// because the backend will never emit this type.
+type LocalAgentEvent = AgentEvent | { type: "_pending"; ts: string; data: { text: string } };
+
+function eventLabel(ev: LocalAgentEvent): string {
   switch (ev.type) {
+    case "_pending":
+      return `⋯ ${ev.data.text}`;
     case "agent_thinking":
       return `thinking · iter ${ev.data.iteration}`;
     case "tool_call":
@@ -113,7 +150,7 @@ function truncateParams(input: Record<string, unknown>): string {
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Msg[]>([]);
-  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [events, setEvents] = useState<LocalAgentEvent[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [history, setHistory] = useState<unknown[]>([]);
@@ -154,6 +191,24 @@ export default function ChatPage() {
     setInput("");
     setSending(true);
 
+    // Synthetic pending event — gives the operator instant feedback in
+    // the live stream while the planner spins up. The backend never
+    // emits this type; we strip it on the way out so the stream
+    // doesn't accumulate one pending line per send. The unique ts
+    // value lets us filter exactly this event later, ignoring any
+    // other pending events that might be in-flight from a prior send.
+    const pendingTs = `pending-${Date.now()}`;
+    setEvents((prev) => [
+      ...prev.slice(-199),
+      {
+        type: "_pending",
+        ts: pendingTs,
+        data: { text: "sending to agent…" },
+      },
+    ]);
+    const removePending = () =>
+      setEvents((prev) => prev.filter((ev) => !(ev.type === "_pending" && ev.ts === pendingTs)));
+
     try {
       const res = await fetch(endpoints.chat(), {
         method: "POST",
@@ -161,8 +216,19 @@ export default function ChatPage() {
         body: JSON.stringify({ message: text, history }),
       });
       if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(`HTTP ${res.status}: ${detail || res.statusText}`);
+        const friendly = await fromResponse(res);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `e-${Date.now()}`,
+            role: "agent",
+            text: friendly.title,
+            time: nowTime(),
+            error: true,
+            friendlyError: friendly,
+          },
+        ]);
+        return;
       }
       const body = (await res.json()) as {
         final_text: string;
@@ -189,18 +255,21 @@ export default function ChatPage() {
       ]);
       setHistory(body.history);
     } catch (err) {
+      const friendly = describeNetworkError(err);
       setMessages((prev) => [
         ...prev,
         {
           id: `e-${Date.now()}`,
           role: "agent",
-          text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+          text: friendly.title,
           time: nowTime(),
           error: true,
+          friendlyError: friendly,
         },
       ]);
     } finally {
       setSending(false);
+      removePending();
     }
   }
 
@@ -270,6 +339,7 @@ export default function ChatPage() {
           <button
             type="submit"
             disabled={sending || !input.trim()}
+            aria-label="Send message"
             className="mono border border-ink bg-ink px-3 py-1 text-[8px] tracking-wider text-surface disabled:opacity-50"
           >
             {sending ? "SENDING..." : "SEND"}
