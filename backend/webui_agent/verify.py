@@ -45,23 +45,30 @@ def verify_vlan_exists(vlan_id: int, name: str | None = None) -> bool:
     show_vlan_brief() always returns a list (it normalises non-list /
     unparsed output to []), so we just iterate. An empty list naturally
     falls through to the not-found path at the bottom.
+
+    Field-name note: the ntc-templates `cisco_ios_show_vlan_brief`
+    template emits `vlan_name` (NOT `name`). An earlier version of this
+    function looked for `name`, found nothing on every row, and failed
+    every WebUI VLAN add post-write with a spurious "name mismatch"
+    even though the VLAN had landed on the device correctly.
     """
     rows = show_vlan_brief()
     vlan_id_str = str(vlan_id)
     for row in rows:
         if row.get("vlan_id") != vlan_id_str:
             continue
+        row_name = row.get("vlan_name") or ""
         if name is None:
             log.info("verify_vlan", vlan_id=vlan_id, found=True)
             return True
-        if row.get("name", "").upper() == name.upper():
+        if row_name.upper() == name.upper():
             log.info("verify_vlan", vlan_id=vlan_id, name=name, found=True)
             return True
         log.warning(
             "verify_vlan_name_mismatch",
             vlan_id=vlan_id,
             expected=name,
-            got=row.get("name"),
+            got=row_name,
         )
         return False
 
