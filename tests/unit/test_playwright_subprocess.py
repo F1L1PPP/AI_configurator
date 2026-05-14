@@ -271,6 +271,130 @@ def test_unknown_eid_short_circuits_without_acting():
     assert loc.click.call_count == 0
 
 
+# ---------------------------------------------------------------------------
+# act_by_intent — intent resolver delegates to login.first_match
+# ---------------------------------------------------------------------------
+
+
+def test_act_by_intent_resolves_via_first_match():
+    """Verify _do_act_by_intent delegates to `login.first_match` rather
+    than reimplementing a fourth strategy walker.
+
+    Builds a fake locator_map where one entry (e_007) has the same
+    bounding box as what first_match returns; asserts the reverse-lookup
+    selects e_007 and dispatches the click through it.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    # `chosen_loc` is what first_match returns; bbox = (100, 200, 80, 30).
+    chosen_loc = _make_locator_for_act()
+    chosen_loc.bounding_box.return_value = {
+        "x": 100.0,
+        "y": 200.0,
+        "width": 80.0,
+        "height": 30.0,
+    }
+
+    # `matching_loc` shares the same bbox — reverse-lookup must pick this one.
+    matching_loc = _make_locator_for_act()
+    matching_loc.bounding_box.return_value = {
+        "x": 100.0,
+        "y": 200.0,
+        "width": 80.0,
+        "height": 30.0,
+    }
+
+    # `other_loc` has a different bbox — should be skipped.
+    other_loc = _make_locator_for_act()
+    other_loc.bounding_box.return_value = {
+        "x": 500.0,
+        "y": 500.0,
+        "width": 60.0,
+        "height": 30.0,
+    }
+
+    fresh_map = {"e_001": other_loc, "e_007": matching_loc}
+    fresh_view = {
+        "view_id": "fresh",
+        "url": "https://lab/",
+        "title": "T",
+        "elements": [],
+        "modals": [],
+        "errors": [],
+    }
+
+    page = MagicMock()
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+
+    with (
+        patch("backend.webui_agent.login.first_match", return_value=chosen_loc) as mock_first_match,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page",
+            return_value=(fresh_view, fresh_map),
+        ),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any_old",
+            msg={
+                "intent": {
+                    "role": "button",
+                    "name": "Apply",
+                    "action": "click",
+                    "value": None,
+                },
+            },
+            ev=ev,
+        )
+
+    # first_match was called with the strategy list.
+    mock_first_match.assert_called_once()
+    strategies = mock_first_match.call_args.args[1]
+    assert strategies[0] == {"role": "button", "name": "Apply"}
+    assert strategies[1] == {"label": "Apply"}
+    assert strategies[2] == {"text": "Apply"}
+
+    # Reverse-lookup landed on e_007 (matching bbox), and the click was
+    # dispatched through matching_loc — NOT chosen_loc or other_loc.
+    assert reply["chosen_eid"] == "e_007"
+    assert matching_loc.click.call_count == 1
+    assert chosen_loc.click.call_count == 0
+    assert other_loc.click.call_count == 0
+    assert reply["ok"] is True
+
+
+def test_act_by_intent_returns_unknown_eid_when_first_match_returns_none():
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+
+    with (
+        patch("backend.webui_agent.login.first_match", return_value=None),
+        _patched_describe_page(),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg={
+                "intent": {
+                    "role": "button",
+                    "name": "DoesNotExist",
+                    "action": "click",
+                },
+            },
+            ev=ev,
+        )
+
+    assert reply["ok"] is False
+    assert reply["failure_reason"] == "unknown_eid"
+    assert reply["chosen_eid"] is None
+
+
 def test_unknown_action_short_circuits():
     loc = _make_locator_for_act()
     page = MagicMock()

@@ -466,6 +466,132 @@ def _do_act(
     )
 
 
+def _reverse_lookup_eid(target_loc: Any, locator_map: dict[str, Any]) -> str | None:
+    """Find which eid in ``locator_map`` points at the same DOM element as ``target_loc``.
+
+    Compares bounding boxes (rounded to int) — two interactive elements
+    on the Cisco WebUI never share the same bbox in practice. Falls back
+    to None if either bbox is unavailable.
+    """
+    try:
+        target_bbox = target_loc.bounding_box(timeout=_ACT_TIMEOUT_MS)
+    except Exception:
+        return None
+    if target_bbox is None:
+        return None
+
+    tx, ty = int(round(target_bbox["x"])), int(round(target_bbox["y"]))
+    tw, th = int(round(target_bbox["width"])), int(round(target_bbox["height"]))
+
+    for eid, cand_loc in locator_map.items():
+        try:
+            cand_bbox = cand_loc.bounding_box(timeout=_ACT_TIMEOUT_MS)
+        except Exception:
+            continue
+        if cand_bbox is None:
+            continue
+        if (
+            int(round(cand_bbox["x"])) == tx
+            and int(round(cand_bbox["y"])) == ty
+            and int(round(cand_bbox["width"])) == tw
+            and int(round(cand_bbox["height"])) == th
+        ):
+            return eid
+    return None
+
+
+def _do_act_by_intent(
+    page: Any,
+    locator_map: dict[str, Any],
+    current_view_id: str | None,
+    msg: dict[str, Any],
+    ev: Any,
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Resolve a planner intent (role + name) to an eid, then dispatch into ``_do_act``.
+
+    Reuses `login.first_match` — the canonical strategy walker — rather
+    than introducing a fourth variant. Re-describes child-side so the
+    returned `chosen_eid` always aligns with a fresh view.
+
+    Intent shape: ``{"role": str, "name": str, "action": str,
+    "value": str | None}``. Action validation falls through to `_do_act`.
+    """
+    from backend.webui_agent.login import first_match  # noqa: PLC0415
+    from backend.webui_agent.semantic_dom import describe_page  # noqa: PLC0415
+
+    intent = msg.get("intent") or {}
+    role = intent.get("role")
+    name = intent.get("name")
+    action = intent.get("action")
+    value = intent.get("value")
+
+    if not isinstance(role, str) or not isinstance(name, str) or not isinstance(action, str):
+        view, new_map = describe_page(page)
+        return (
+            {
+                "ok": False,
+                "failure_reason": "bad_intent",
+                "chosen_eid": None,
+                "view": view,
+                "attempts": 0,
+            },
+            new_map,
+            view["view_id"],
+        )
+
+    # 1. Resolve intent via the existing fuzzy walker. Three fallback
+    #    strategies — role+name, label-only, text-only — matching the
+    #    Cisco WebUI's mix of ARIA + HTML labels.
+    strategies: list[dict[str, Any]] = [
+        {"role": role, "name": name},
+        {"label": name},
+        {"text": name},
+    ]
+    chosen_loc = first_match(page, strategies)
+    if chosen_loc is None:
+        view, new_map = describe_page(page)
+        return (
+            {
+                "ok": False,
+                "failure_reason": "unknown_eid",
+                "chosen_eid": None,
+                "view": view,
+                "attempts": 0,
+            },
+            new_map,
+            view["view_id"],
+        )
+
+    # 2. Re-describe to get a fresh locator_map, then reverse-lookup the
+    #    chosen locator's eid.
+    view, fresh_map = describe_page(page)
+    fresh_view_id: str = view["view_id"]
+    eid = _reverse_lookup_eid(chosen_loc, fresh_map)
+    if eid is None:
+        return (
+            {
+                "ok": False,
+                "failure_reason": "unknown_eid",
+                "chosen_eid": None,
+                "view": view,
+                "attempts": 0,
+            },
+            fresh_map,
+            fresh_view_id,
+        )
+
+    # 3. Dispatch into the same _do_act machinery (self-heal, never-retry-click).
+    synthetic_msg = {
+        "view_id": fresh_view_id,
+        "eid": eid,
+        "action": action,
+        "value": value,
+    }
+    reply, new_map, new_vid = _do_act(page, fresh_map, fresh_view_id, synthetic_msg, ev)
+    reply["chosen_eid"] = eid
+    return reply, new_map, new_vid
+
+
 def _run_session_loop(init_payload: dict[str, Any]) -> None:
     """Phase 4 long-lived session: log in once, handle ops until shutdown.
 
@@ -585,14 +711,10 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                         _reply(reply)
 
                     elif op == "act_by_intent":
-                        # Intent resolver arrives in Phase 4 slice 2 commit 3.
-                        _reply(
-                            {
-                                "ok": False,
-                                "error": "op 'act_by_intent' arrives in Phase 4 slice 2 commit 3",
-                                "exc_type": "NotImplementedError",
-                            }
+                        reply, locator_map, current_view_id = _do_act_by_intent(
+                            page, locator_map, current_view_id, msg, ev
                         )
+                        _reply(reply)
 
                     else:
                         _reply(

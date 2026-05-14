@@ -600,6 +600,85 @@ def test_webui_act_multi_act_does_not_self_lockout(_act_patches):
     assert _act_patches["is_approved"].call_count == 2
 
 
+# ---------------------------------------------------------------------------
+# webui_act_by_intent (Phase 4 slice 2 commit 3)
+# ---------------------------------------------------------------------------
+
+
+def test_webui_act_by_intent_happy_path(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act_by_intent
+
+    fake_view = {"view_id": "post_intent", "elements": []}
+    sess = _act_session(
+        {
+            "ok": True,
+            "view": fake_view,
+            "chosen_eid": "e_007",
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_INT"] = sess
+
+    intent = {"role": "button", "name": "Apply", "action": "click", "value": None}
+    result = webui_act_by_intent(
+        session_id="sess_INT",
+        intent=intent,
+        action_id="act_INT",
+    )
+
+    sess.send.assert_called_once_with({"op": "act_by_intent", "intent": intent})
+    assert result["ok"] is True
+    assert result["chosen_eid"] == "e_007"
+    _act_patches["pool"].invalidate.assert_called_once_with("192.168.10.1", "cisco")
+    _act_patches["mark_failed"].assert_not_called()
+
+
+def test_webui_act_by_intent_unknown_eid_soft_failure(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act_by_intent
+
+    sess = _act_session(
+        {
+            "ok": False,
+            "failure_reason": "unknown_eid",
+            "chosen_eid": None,
+            "view": {"view_id": "v"},
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_INT2"] = sess
+
+    result = webui_act_by_intent(
+        session_id="sess_INT2",
+        intent={"role": "button", "name": "Mystery", "action": "click"},
+        action_id="act_INT2",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == "unknown_eid"
+    assert result["chosen_eid"] is None
+    # Soft failure — action stays retryable.
+    _act_patches["mark_failed"].assert_not_called()
+    _act_patches["pool"].invalidate.assert_not_called()
+
+
+def test_webui_act_by_intent_refuses_without_approval(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act_by_intent
+
+    _act_patches["is_approved"].return_value = False
+    sess = _act_session({"ok": True, "view": {}})
+    generic_driver._sessions["sess_INT3"] = sess
+
+    result = webui_act_by_intent(
+        session_id="sess_INT3",
+        intent={"role": "button", "name": "Apply", "action": "click"},
+        action_id="act_unapproved_intent",
+    )
+
+    assert result["error"] == "not_approved"
+    sess.send.assert_not_called()
+    _act_patches["mark_failed"].assert_not_called()
+
+
 def test_close_all_sessions_closes_every_cached_session():
     sess_a = _make_fake_session()
     sess_b = _make_fake_session()

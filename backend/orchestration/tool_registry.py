@@ -37,6 +37,7 @@ from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 from backend.webui_agent.generic_driver import (
     webui_act,
+    webui_act_by_intent,
     webui_describe_page,
     webui_open,
     webui_verify,
@@ -106,9 +107,10 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "set_access_vlan",
         "webui_set_hostname",
         "webui_add_access_vlan",
-        # Phase 4 slice 2 — generic AI-driven write tool. Acts on whatever
+        # Phase 4 slice 2 — generic AI-driven write tools. Act on whatever
         # element the planner picked; same HITL gate as the fast paths.
         "webui_act",
+        "webui_act_by_intent",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -519,6 +521,67 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["session_id", "view_id", "eid", "action", "action_id"],
         },
     },
+    {
+        "name": "webui_act_by_intent",
+        "description": (
+            "Phase 4 slice 2 HITL-gated write tool — DO NOT call standalone "
+            "until Phase 5 wires the planner. Convenience wrapper: instead "
+            "of (view_id, eid), the planner passes an intent dict "
+            "({role, name, action, value}) and the child resolves it to an "
+            "eid via login.first_match against a freshly-described view. "
+            "Useful when the planner can name the element semantically but "
+            "doesn't have a fresh view_id. Returns the same shape as "
+            "webui_act plus chosen_eid (the eid the child resolved to)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id from a prior webui_open call.",
+                },
+                "intent": {
+                    "type": "object",
+                    "description": (
+                        "Element description + action to perform. Required "
+                        "fields: role, name, action. Optional: value (for "
+                        "fill/select)."
+                    ),
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "description": (
+                                "ARIA role of the target element (button, "
+                                "textbox, combobox, link, ...)."
+                            ),
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Accessible name to match (label text, button text, etc.)."
+                            ),
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["click", "fill", "select", "check", "hover"],
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": (
+                                "Value for fill/select; ignored for click / hover / check."
+                            ),
+                        },
+                    },
+                    "required": ["role", "name", "action"],
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": "APPROVED action_id from the approval gate.",
+                },
+            },
+            "required": ["session_id", "intent", "action_id"],
+        },
+    },
 ]
 
 
@@ -657,6 +720,10 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "webui_verify": webui_verify,
     # Phase 4 slice 2 (commit 2) — the HITL-gated generic write tool.
     "webui_act": webui_act,
+    # Phase 4 slice 2 (commit 3) — convenience wrapper that resolves a
+    # planner intent ({role, name, action}) to an eid child-side, then
+    # dispatches into the same _do_act self-heal machine.
+    "webui_act_by_intent": webui_act_by_intent,
 }
 
 

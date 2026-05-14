@@ -349,6 +349,98 @@ def webui_act(
     }
 
 
+def webui_act_by_intent(
+    session_id: str,
+    intent: dict[str, Any],
+    action_id: str,
+) -> dict[str, Any]:
+    """Act on an element described by intent ({role, name, action, value}).
+
+    Convenience wrapper around the child's intent resolver — the planner
+    states what it wants ("click the Apply button"), the child uses
+    `login.first_match` to resolve the live Locator, reverse-looks-up
+    the eid against a fresh describe, and dispatches into the same
+    `_do_act` self-heal machine as `webui_act`.
+
+    Returns:
+        Same shape as `webui_act` plus a `chosen_eid` field that names
+        the eid the child resolved the intent to (or ``None`` if the
+        resolution failed).
+
+    HITL + pool invalidation + mark_failed semantics are identical to
+    `webui_act`. Does NOT call `mark_executed`.
+    """
+    # HITL layer 2 — re-check before any side effect.
+    if not is_approved(action_id):
+        log.info("webui_act_by_intent_not_approved", action_id=action_id)
+        return {
+            "error": "not_approved",
+            "message": f"action_id {action_id!r} is not APPROVED",
+            "session_id": session_id,
+        }
+
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        mark_failed(action_id)
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send({"op": "act_by_intent", "intent": intent})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        mark_failed(action_id)
+        log.error(
+            "webui_act_by_intent_subprocess_error",
+            session_id=session_id,
+            action_id=action_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_act_by_intent_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        log.info(
+            "webui_act_by_intent_soft_failure",
+            session_id=session_id,
+            action_id=action_id,
+            failure_reason=reply.get("failure_reason"),
+            chosen_eid=reply.get("chosen_eid"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": reply.get("failure_reason"),
+            "chosen_eid": reply.get("chosen_eid"),
+            "view": reply.get("view"),
+            "attempts": reply.get("attempts", 0),
+            "session_id": session_id,
+        }
+
+    # Success — pool.invalidate like webui_act.
+    settings = get_settings()
+    pool.invalidate(settings.router_host, settings.router_ssh_user)
+    log.info(
+        "webui_act_by_intent_complete",
+        session_id=session_id,
+        action_id=action_id,
+        chosen_eid=reply.get("chosen_eid"),
+        attempts=reply.get("attempts", 0),
+    )
+    return {
+        "ok": True,
+        "view": reply["view"],
+        "chosen_eid": reply.get("chosen_eid"),
+        "evidence": reply.get("evidence", {}),
+        "session_id": session_id,
+        "attempts": reply.get("attempts", 0),
+    }
+
+
 def _session_not_found(session_id: str) -> dict[str, Any]:
     return {
         "error": "session_not_found",
