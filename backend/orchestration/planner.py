@@ -39,6 +39,32 @@ MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 4096
 MAX_ITERATIONS = 8
 
+# ---------------------------------------------------------------------------
+# Prompt caching (Phase 1a of the AI-first plan).
+#
+# Without caching the system prompt (~2 KB after Phase 5 expansion) and the
+# tool schemas (~4 KB, growing) re-transmit every iteration. Marking them
+# `cache_control: ephemeral` lets Anthropic cache the prefix server-side;
+# subsequent iterations within the 5-minute TTL pay ~10% of the input-token
+# cost for the cached portion.
+#
+# Wire shape:
+#   - `system=[{type: text, text: ..., cache_control: ephemeral}]`
+#     A LIST of content blocks (not a plain string) is required for the
+#     cache_control marker to be accepted by the API.
+#   - On `tools=[...]`, only the LAST tool carries the marker. That marker
+#     caches the entire tools array as a single prefix.
+#
+# Cumulative cache key = system block + tools array. For Haiku 4.5 the
+# minimum cacheable prefix is 2048 tokens; system alone (~500) is below it
+# and may not actually cache, but tools (~2000+) + system together comfortably
+# clear the threshold. Telemetry below logs `cache_read_input_tokens` so we
+# can verify hits in real flows.
+#
+# To disable caching for an experiment, drop the cache_control entries.
+# ---------------------------------------------------------------------------
+_CACHE_EPHEMERAL = {"type": "ephemeral"}
+
 
 SYSTEM_PROMPT = """\
 You are a Cisco network configuration assistant for a single Cisco C1111 \
@@ -114,6 +140,9 @@ and mention that WebUI is also available for visible evidence.
        - isr1100-sw-config.pdf — Basic Router Configuration
    Skip the Sources section only if you did not call `search_docs` in
    this turn.
+   **Cost discipline:** prefer `top_k=3` when you know what you're
+   looking for (e.g. "how to create OSPF route in WebUI"). Use the
+   default `top_k=5` only when the question is broad ("explain VLANs").
 
 5. Stay in scope: hostname changes (CLI or WebUI), interface IP
    assignments, access VLAN add (WebUI), and read operations. If asked
@@ -158,6 +187,60 @@ class PlannerResult:
     events: list[PlannerEvent]
     messages: list[dict[str, Any]]  # full conversation, for follow-up turns
     stop_reason: str = "end_turn"
+
+
+def _system_prompt_blocks() -> list[dict[str, Any]]:
+    """System prompt in cacheable-block form. See cache_control rationale above."""
+    return [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": _CACHE_EPHEMERAL,
+        }
+    ]
+
+
+def _tools_with_cache_marker() -> list[dict[str, Any]]:
+    """TOOL_SCHEMAS with cache_control on the last tool.
+
+    Only the LAST entry carries the marker — that's how Anthropic caches the
+    full tools array as one prefix. Adding markers on every tool is wasteful
+    (each marker creates its own cache breakpoint, capped at 4 per request).
+    """
+    if not TOOL_SCHEMAS:
+        return []
+    head = list(TOOL_SCHEMAS[:-1])
+    tail = {**TOOL_SCHEMAS[-1], "cache_control": _CACHE_EPHEMERAL}
+    return [*head, tail]
+
+
+def _log_usage(iteration: int, response: Any) -> None:
+    """Emit a structlog `planner_iteration_usage` event with token + cache fields.
+
+    Anthropic SDK populates `response.usage` with input_tokens, output_tokens,
+    cache_creation_input_tokens, cache_read_input_tokens. Tests use
+    SimpleNamespace responses that lack `usage` — we treat that as zeros so
+    test mocks don't need to be updated for telemetry alone.
+
+    Why these four fields:
+      - input_tokens: fresh input we paid full price for
+      - output_tokens: assistant text + tool_use blocks
+      - cache_creation_input_tokens: first call after a cache miss (full price + 25% surcharge)
+      - cache_read_input_tokens: subsequent cache hits (~10% of full price)
+
+    Sum (input + cache_creation + cache_read) ≈ total input billed.
+    """
+    usage = getattr(response, "usage", None)
+    log.info(
+        "planner_iteration_usage",
+        iteration=iteration,
+        input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+        output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+        cache_creation_input_tokens=(
+            getattr(usage, "cache_creation_input_tokens", 0) if usage else 0
+        ),
+        cache_read_input_tokens=(getattr(usage, "cache_read_input_tokens", 0) if usage else 0),
+    )
 
 
 def _text_from_response(response: Any) -> str:
@@ -230,6 +313,12 @@ def run_planner(
 
     events: list[PlannerEvent] = []
 
+    # Hoist the cache-marked system + tools out of the loop — they're
+    # constant per planner call, and rebuilding them per iteration is
+    # wasted work (and would defeat structural identity for caching).
+    system_blocks = _system_prompt_blocks()
+    cached_tools = _tools_with_cache_marker()
+
     for iteration in range(MAX_ITERATIONS):
         _emit(events, "agent_thinking", {"iteration": iteration, "model": MODEL})
         log.info("planner_iteration", iteration=iteration)
@@ -237,10 +326,12 @@ def run_planner(
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=TOOL_SCHEMAS,
+            system=system_blocks,
+            tools=cached_tools,
             messages=messages,
         )
+
+        _log_usage(iteration, response)
 
         stop_reason = response.stop_reason
 

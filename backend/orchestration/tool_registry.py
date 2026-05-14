@@ -150,7 +150,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "corpus. Returns up to top_k chunks, each with source filename, section "
             "heading, and a relevance score. Call this BEFORE generating CLI commands "
             "or WebUI steps for any topic you're not certain about — it grounds your "
-            "answer in real Cisco docs. Read-only."
+            "answer in real Cisco docs. Read-only.\n\n"
+            "Cost tip: prefer `top_k=3` for narrow lookups (specific feature like "
+            "'how to create OSPF route via WebUI'). Use `top_k=5` only for broader "
+            "explanatory questions ('explain VLAN trunking'). Each extra chunk is "
+            "~250 tokens added to the context."
         ),
         "input_schema": {
             "type": "object",
@@ -161,7 +165,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "top_k": {
                     "type": "integer",
-                    "description": "Max number of chunks to return (default 5).",
+                    "description": (
+                        "Max number of chunks to return. Default 5. "
+                        "Use 3 for narrow / specific-feature lookups to keep cost "
+                        "down; 5 for broader topics."
+                    ),
                     "default": 5,
                 },
             },
