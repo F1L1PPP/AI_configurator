@@ -34,6 +34,7 @@ import threading
 import uuid
 from typing import Any
 
+from backend.cli_agent.snapshots import take_snapshot
 from backend.core.logging import get_logger
 from backend.webui_agent._subprocess import SubprocessFlowError, WebUISession
 
@@ -45,6 +46,15 @@ log = get_logger(__name__)
 # spawning sessions for the same action_id concurrently.
 _sessions: dict[str, WebUISession] = {}
 _sessions_lock = threading.Lock()
+
+# Action_ids that have already had their pre-snapshot taken. Phase 4 design
+# moved pre-snap from "first webui_act" into "first webui_open with an
+# action_id" — so pre-snap exists even if the very first act crashes
+# before any post-snap could be taken. This set is the dedupe guard so we
+# don't re-snap when the same action_id reuses the cached session for
+# multiple navigations. Cleared per-test by the autouse fixture in
+# tests/unit/test_generic_driver.py.
+_pre_snapshotted: set[str] = set()
 
 
 def webui_open(
@@ -75,6 +85,13 @@ def webui_open(
             "exc_type": str, "session_id": str}``.
     """
     session_id = action_id or f"sess_{uuid.uuid4().hex[:8]}"
+
+    # Pre-snapshot for any real action_id (skipped for the auto-generated
+    # sess_XXXX ids, which represent read-only navigations the planner
+    # isn't tracking). Best-effort — take_snapshot raises on SSH failure
+    # but we don't want pre-snap failure aborting the WebUI flow.
+    _maybe_pre_snapshot(action_id)
+
     try:
         sess = _get_or_create_session(session_id, headless=headless)
     except SubprocessFlowError as exc:
@@ -126,6 +143,125 @@ def webui_open(
         }
 
     return {"view": reply["view"], "session_id": session_id}
+
+
+def webui_describe_page(session_id: str) -> dict[str, Any]:
+    """Re-describe the current page of an existing session.
+
+    Read-only. Returns the fresh semantic-DOM view (with a new
+    `view_id`); the locator_map is rebuilt child-side. The caller
+    (Phase 5's planner wrapper) must drop any cached eid references
+    after this call — they were tied to the previous view_id.
+    """
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send({"op": "describe"})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        log.error(
+            "webui_describe_subprocess_error",
+            session_id=session_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_describe_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        return {
+            "error": "webui_describe_failed",
+            "message": str(reply.get("error", "describe failed")),
+            "exc_type": str(reply.get("exc_type", "Unknown")),
+            "session_id": session_id,
+        }
+
+    return {"view": reply["view"], "session_id": session_id}
+
+
+def webui_verify(session_id: str, text: str) -> dict[str, Any]:
+    """Check whether ``text`` appears in the current page's HTML.
+
+    Read-only post-condition check. Use after a `webui_act` chain to
+    confirm a success banner or expected value rendered. Returns
+    ``{"present": bool, "url": str, "session_id": str}`` on success.
+    """
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send({"op": "verify", "text": text})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        log.error(
+            "webui_verify_subprocess_error",
+            session_id=session_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_verify_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        return {
+            "error": "webui_verify_failed",
+            "message": str(reply.get("error", "verify failed")),
+            "exc_type": str(reply.get("exc_type", "Unknown")),
+            "session_id": session_id,
+        }
+
+    return {
+        "present": bool(reply.get("present", False)),
+        "url": str(reply.get("url", "")),
+        "session_id": session_id,
+    }
+
+
+def _session_not_found(session_id: str) -> dict[str, Any]:
+    return {
+        "error": "session_not_found",
+        "message": f"no live session for session_id={session_id!r}",
+        "session_id": session_id,
+    }
+
+
+def _maybe_pre_snapshot(action_id: str | None) -> None:
+    """Take pre-snapshot for an action_id once (best-effort).
+
+    Skipped for auto-generated sess_XXXX ids (no real action_id behind
+    them — they're throwaway read-only navigations). Skipped if this
+    action_id already had its pre-snap. Snapshot failure is logged but
+    NOT raised — pre-snap is evidence, not a flow precondition.
+    """
+    if action_id is None:
+        return
+    with _sessions_lock:
+        if action_id in _pre_snapshotted:
+            return
+        _pre_snapshotted.add(action_id)
+    # Lock released before SSH I/O — take_snapshot can take seconds.
+    try:
+        take_snapshot(action_id, "pre")
+        log.info("webui_open_pre_snapshot_taken", action_id=action_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "webui_open_pre_snapshot_failed",
+            action_id=action_id,
+            error=str(exc),
+        )
 
 
 def _get_or_create_session(

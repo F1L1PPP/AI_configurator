@@ -204,6 +204,23 @@ def _reply(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def _relogin_if_needed(page: Any) -> None:
+    """Re-run WebUI login if the page has dropped back to the login screen.
+
+    The Cisco WebUI session idles out after ~5 minutes. The planner can
+    pause that long between ops (waiting on Claude, waiting on Filip),
+    so the next op would land on the login page instead of the requested
+    feature. URL-based heuristic: `login.is_session_expired()` doesn't
+    exist (verified by the Phase 4 slice 2 mapping pass), so we check
+    `"login" in page.url.lower()` instead and re-run `login(page)`.
+    """
+    if "login" in page.url.lower():
+        # Lazy import — keeps cold start cheap for the one-shot path.
+        from backend.webui_agent.login import login
+
+        login(page)
+
+
 def _run_session_loop(init_payload: dict[str, Any]) -> None:
     """Phase 4 long-lived session: log in once, handle ops until shutdown.
 
@@ -280,6 +297,11 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                     return
 
                 try:
+                    # Re-login if the Cisco WebUI session timed out
+                    # between ops. Cheap if we're still logged in
+                    # (string check on page.url).
+                    _relogin_if_needed(page)
+
                     if op == "open":
                         path = str(msg["path"])
                         page.goto(path)

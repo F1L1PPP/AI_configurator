@@ -14,7 +14,9 @@ from backend.webui_agent import generic_driver
 from backend.webui_agent._subprocess import SubprocessFlowError
 from backend.webui_agent.generic_driver import (
     close_all_sessions,
+    webui_describe_page,
     webui_open,
+    webui_verify,
 )
 
 pytestmark = pytest.mark.webui
@@ -22,10 +24,16 @@ pytestmark = pytest.mark.webui
 
 @pytest.fixture(autouse=True)
 def _clean_sessions():
-    """Reset the module-level session cache before and after every test."""
+    """Reset module-level state before and after every test.
+
+    Both `_sessions` and `_pre_snapshotted` are guarded so test order
+    (including pytest --random-order) cannot leak state across tests.
+    """
     generic_driver._sessions.clear()
+    generic_driver._pre_snapshotted.clear()
     yield
     generic_driver._sessions.clear()
+    generic_driver._pre_snapshotted.clear()
 
 
 def _make_fake_session(open_reply: dict | None = None) -> MagicMock:
@@ -194,6 +202,159 @@ def test_webui_open_returns_op_failure_when_reply_not_ok():
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# webui_describe_page (Phase 4 slice 2 commit 1)
+# ---------------------------------------------------------------------------
+
+
+def test_webui_describe_page_returns_fresh_view():
+    fake_sess = _make_fake_session()
+    fake_sess.send.return_value = {
+        "ok": True,
+        "view": {
+            "view_id": "fresh999",
+            "url": "https://lab/webui/#/general",
+            "title": "General",
+            "elements": [],
+            "modals": [],
+            "errors": [],
+        },
+    }
+    generic_driver._sessions["sess_X"] = fake_sess
+
+    result = webui_describe_page("sess_X")
+
+    fake_sess.send.assert_called_once_with({"op": "describe"})
+    assert result["session_id"] == "sess_X"
+    assert result["view"]["view_id"] == "fresh999"
+
+
+def test_webui_describe_page_session_not_found():
+    # _sessions is empty (autouse fixture); the session_id is bogus.
+    result = webui_describe_page("nonexistent")
+
+    assert result["error"] == "session_not_found"
+    assert result["session_id"] == "nonexistent"
+
+
+def test_webui_describe_page_propagates_subprocess_error():
+    fake_sess = _make_fake_session()
+    fake_sess.send.side_effect = SubprocessFlowError(
+        flow="webui_session",
+        error="timed out after 30.0s",
+        exc_type="Timeout",
+        stderr="",
+    )
+    generic_driver._sessions["sess_Y"] = fake_sess
+
+    result = webui_describe_page("sess_Y")
+
+    assert result["error"] == "webui_describe_failed"
+    assert result["exc_type"] == "Timeout"
+    # Crashed session is removed so the next call rebuilds clean.
+    assert "sess_Y" not in generic_driver._sessions
+
+
+# ---------------------------------------------------------------------------
+# webui_verify (Phase 4 slice 2 commit 1)
+# ---------------------------------------------------------------------------
+
+
+def test_webui_verify_present_true():
+    fake_sess = _make_fake_session()
+    fake_sess.send.return_value = {
+        "ok": True,
+        "present": True,
+        "url": "https://lab/webui/#/general",
+    }
+    generic_driver._sessions["sess_Z"] = fake_sess
+
+    result = webui_verify("sess_Z", "VLAN 46 created")
+
+    fake_sess.send.assert_called_once_with({"op": "verify", "text": "VLAN 46 created"})
+    assert result["present"] is True
+    assert result["url"] == "https://lab/webui/#/general"
+    assert result["session_id"] == "sess_Z"
+
+
+def test_webui_verify_propagates_subprocess_error():
+    fake_sess = _make_fake_session()
+    fake_sess.send.side_effect = SubprocessFlowError(
+        flow="webui_session",
+        error="subprocess closed stdout unexpectedly",
+        exc_type="UnexpectedEOF",
+        stderr="",
+    )
+    generic_driver._sessions["sess_W"] = fake_sess
+
+    result = webui_verify("sess_W", "anything")
+
+    assert result["error"] == "webui_verify_failed"
+    assert result["exc_type"] == "UnexpectedEOF"
+    # Session removed so retries rebuild.
+    assert "sess_W" not in generic_driver._sessions
+
+
+# ---------------------------------------------------------------------------
+# Pre-snapshot move (Phase 4 slice 2 commit 1)
+# ---------------------------------------------------------------------------
+
+
+def test_webui_open_takes_pre_snapshot_first_time_only():
+    fake_sess = _make_fake_session()
+
+    with (
+        patch(
+            "backend.webui_agent.generic_driver.WebUISession",
+            return_value=fake_sess,
+        ),
+        patch("backend.webui_agent.generic_driver.take_snapshot") as mock_snap,
+    ):
+        # First webui_open for action_id="act_PS1" — pre-snap taken.
+        webui_open("/webui/#/general", action_id="act_PS1")
+        # Second call with same action_id (session reused) — NOT taken again.
+        webui_open("/webui/#/vlan", action_id="act_PS1")
+
+    mock_snap.assert_called_once_with("act_PS1", "pre")
+
+
+def test_webui_open_skips_pre_snapshot_without_action_id():
+    fake_sess = _make_fake_session()
+
+    with (
+        patch(
+            "backend.webui_agent.generic_driver.WebUISession",
+            return_value=fake_sess,
+        ),
+        patch("backend.webui_agent.generic_driver.take_snapshot") as mock_snap,
+    ):
+        # No action_id — caller is a throwaway read-only navigation.
+        webui_open("/webui/#/general")
+
+    mock_snap.assert_not_called()
+
+
+def test_webui_open_continues_when_pre_snapshot_raises():
+    fake_sess = _make_fake_session()
+
+    with (
+        patch(
+            "backend.webui_agent.generic_driver.WebUISession",
+            return_value=fake_sess,
+        ),
+        patch(
+            "backend.webui_agent.generic_driver.take_snapshot",
+            side_effect=RuntimeError("SSH boom"),
+        ),
+    ):
+        # Pre-snap blowing up must NOT abort the WebUI flow — pre-snap is
+        # evidence, not a precondition.
+        result = webui_open("/webui/#/general", action_id="act_PS2")
+
+    assert "view" in result
+    assert "error" not in result
 
 
 def test_close_all_sessions_closes_every_cached_session():

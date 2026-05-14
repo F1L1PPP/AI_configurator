@@ -35,7 +35,11 @@ from backend.orchestration.confirmations import (
 )
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
-from backend.webui_agent.generic_driver import webui_open
+from backend.webui_agent.generic_driver import (
+    webui_describe_page,
+    webui_open,
+    webui_verify,
+)
 
 # Maximum length of a search_docs query. Caps the embedding cost — a 10 MB
 # query embedded through MiniLM is several seconds of CPU per call, easy
@@ -410,6 +414,50 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["path"],
         },
     },
+    {
+        "name": "webui_describe_page",
+        "description": (
+            "Phase 4 slice 2 read-only session op — DO NOT call standalone "
+            "until Phase 5 wires the planner. Re-describe the current page "
+            "of an existing webui_open session. Returns a fresh "
+            "{view, session_id}; the view carries a new view_id, so any "
+            "eid the caller cached from a prior view is now stale."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": ("Session id returned by a prior webui_open call."),
+                },
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "webui_verify",
+        "description": (
+            "Phase 4 slice 2 read-only session op — DO NOT call standalone "
+            "until Phase 5 wires the planner. Check whether a substring is "
+            "present in the current page's HTML. Use after a webui_act "
+            "chain to confirm a success banner or expected value. Returns "
+            "{present, url, session_id}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": ("Session id returned by a prior webui_open call."),
+                },
+                "text": {
+                    "type": "string",
+                    "description": ("Substring to search for in page.content() (full DOM HTML)."),
+                },
+            },
+            "required": ["session_id", "text"],
+        },
+    },
 ]
 
 
@@ -539,9 +587,13 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "webui_add_access_vlan": add_access_vlan_via_webui,
     # Phase 4 slice 1 — generic AI-driven driver. Schema is in TOOL_SCHEMAS
     # below but the description tells Claude to skip it until the full
-    # toolkit (act / describe_page / verify / propose_webui_configure)
-    # lands in slice 2 + Phase 5. Callable via execute_tool() for tests.
+    # toolkit (act / propose_webui_configure) lands in Phase 5. Callable
+    # via execute_tool() for tests.
     "webui_open": webui_open,
+    # Phase 4 slice 2 (commit 1) — read-only session ops on top of slice 1.
+    # Same caveat: not user-facing until Phase 5 wires the planner.
+    "webui_describe_page": webui_describe_page,
+    "webui_verify": webui_verify,
 }
 
 
