@@ -42,9 +42,20 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 
-from backend.orchestration.confirmations import approve_action, propose_action
-from backend.webui_agent.generic_driver import (
+# Make `backend` importable when running this script directly via the
+# worktree venv (no `pip install -e .` applied). Path is repo-root,
+# parent of this scripts/ dir.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from backend.orchestration.confirmations import (  # noqa: E402
+    approve_action,
+    propose_action,
+)
+from backend.webui_agent.generic_driver import (  # noqa: E402
     close_all_sessions,
     webui_act_by_intent,
     webui_describe_page,
