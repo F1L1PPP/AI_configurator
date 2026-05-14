@@ -1,4 +1,16 @@
-"""Unit tests for backend.webui_agent.flows.add_access_vlan — mocked Playwright + CLI."""
+"""Unit tests for backend.webui_agent.flows.add_access_vlan — subprocess-isolated.
+
+The Playwright portion of the flow now runs in a child Python process
+(see backend/webui_agent/_playwright_subprocess.py). These tests mock
+the parent-side `run_flow_in_subprocess` helper, so they verify
+EVERYTHING the parent does (guard, snapshots, verify, mark_executed/
+mark_failed, pool invalidation, result shape) without touching real
+Playwright OR spawning real subprocesses.
+
+For tests of the Playwright steps themselves, see the page-object tests
+in test_webui_vlan_page.py and test_webui_login.py — those are still
+mocked-Playwright unit tests but live a layer down.
+"""
 
 from __future__ import annotations
 
@@ -14,51 +26,24 @@ from backend.orchestration.confirmations import (
     propose_action,
 )
 
-# All tests in this module exercise the WebUI agent layer (Playwright is
-# mocked at the page-object level so no real browser launches). Tagged with
-# the `webui` marker so `pytest -m 'not webui'` skips them during fast
-# iteration on unrelated layers. Review §5 cleanup.
+# All tests in this module exercise the WebUI agent layer (Playwright
+# runs in a mocked subprocess; no real browser launches). Tagged with
+# the `webui` marker so `pytest -m 'not webui'` skips them.
 pytestmark = pytest.mark.webui
 
-# _clean_actions fixture is in tests/conftest.py (autouse).
+# `_clean_actions` fixture is in tests/conftest.py (autouse).
 
 
 @pytest.fixture()
 def _isolated_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    import backend.webui_agent.evidence as ev_mod
-
+    """Point settings at a temp directory so screenshots / snapshots don't bleed."""
     fake = MagicMock()
     fake.artifacts_dir = tmp_path
     fake.router_host = "10.0.0.1"
     fake.router_ssh_user = "admin"
     fake.router_ssh_password = "pass"
-    monkeypatch.setattr(ev_mod, "get_settings", lambda: fake)
     monkeypatch.setattr(flow_mod, "get_settings", lambda: fake)
     return tmp_path
-
-
-@pytest.fixture()
-def _stub_browser(monkeypatch: pytest.MonkeyPatch):
-    """Replace webui_browser context manager with one yielding a mock Page."""
-    from contextlib import contextmanager
-
-    page = MagicMock()
-    page.screenshot = MagicMock(
-        side_effect=lambda path, full_page=False: Path(path).write_bytes(b"png")
-    )
-    page.content.return_value = "<html></html>"
-
-    @contextmanager
-    def fake_browser(headless: bool = False):
-        yield page
-
-    monkeypatch.setattr(flow_mod, "webui_browser", fake_browser)
-    return page
-
-
-@pytest.fixture()
-def _stub_login(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(flow_mod, "login", MagicMock(return_value=True))
 
 
 @pytest.fixture()
@@ -83,19 +68,19 @@ def _stub_snapshots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 @pytest.fixture()
-def _stub_vlan_page(monkeypatch: pytest.MonkeyPatch):
-    """Replace VlanPage with a mock class so flow tests don't touch real selectors."""
-    instance = MagicMock()
+def _stub_subprocess(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Replace run_flow_in_subprocess with a configurable mock.
 
-    class FakeVP:
-        def __init__(self, page):
-            pass
-
-        def __getattr__(self, name):
-            return getattr(instance, name)
-
-    monkeypatch.setattr(flow_mod, "VlanPage", FakeVP)
-    return instance
+    Default behaviour: return a successful `{"screenshots": <path>}`
+    so the parent proceeds to verify + post-snapshot. Tests that need
+    failure can override `.side_effect` or `.return_value` on the
+    returned mock.
+    """
+    screenshots_dir = tmp_path / "screens"
+    screenshots_dir.mkdir(exist_ok=True)
+    mock = MagicMock(return_value={"screenshots": str(screenshots_dir)})
+    monkeypatch.setattr(flow_mod, "run_flow_in_subprocess", mock)
+    return mock
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +88,12 @@ def _stub_vlan_page(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refuses_without_approval(_isolated_artifacts, _stub_browser, _stub_login, _stub_vlan_page):
+def test_refuses_without_approval(_isolated_artifacts, _stub_subprocess):
     action_id = propose_action("webui_add_access_vlan", {"vlan_id": 30, "vlan_name": "OFFICE"})
     # NOT approved
     with pytest.raises(NotApproved):
         flow_mod.add_access_vlan_via_webui(30, "OFFICE", action_id=action_id)
+    _stub_subprocess.assert_not_called()
 
 
 def test_refuses_for_unknown_action_id(_isolated_artifacts):
@@ -116,17 +102,15 @@ def test_refuses_for_unknown_action_id(_isolated_artifacts):
 
 
 # ---------------------------------------------------------------------------
-# Happy path — full flow with mocked browser, login, page, verify
+# Happy path — full flow with mocked subprocess
 # ---------------------------------------------------------------------------
 
 
 def test_happy_path_returns_structured_result(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_vlan_page,
 ):
     action_id = propose_action("webui_add_access_vlan", {"vlan_id": 30, "vlan_name": "OFFICE"})
     approve_action(action_id)
@@ -143,13 +127,33 @@ def test_happy_path_returns_structured_result(
     assert Path(result["screenshots"]).exists()
 
 
-def test_happy_path_takes_pre_then_post_snapshots(
+def test_happy_path_passes_args_to_subprocess(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_vlan_page,
+):
+    """The parent must pass vlan_id / vlan_name / action_id / headless to the child."""
+    action_id = propose_action("webui_add_access_vlan", {"vlan_id": 42, "vlan_name": "DEV"})
+    approve_action(action_id)
+
+    with patch.object(flow_mod, "verify_vlan_exists", return_value=True):
+        flow_mod.add_access_vlan_via_webui(42, "DEV", action_id=action_id, headless=True)
+
+    _stub_subprocess.assert_called_once()
+    flow_name, payload = _stub_subprocess.call_args.args
+    assert flow_name == "add_access_vlan"
+    assert payload["vlan_id"] == 42
+    assert payload["vlan_name"] == "DEV"
+    assert payload["action_id"] == action_id
+    assert payload["headless"] is True
+
+
+def test_happy_path_takes_pre_then_post_snapshots(
+    _isolated_artifacts,
+    _stub_subprocess,
+    _stub_pool,
+    _stub_snapshots,
 ):
     action_id = propose_action("webui_add_access_vlan", {"vlan_id": 99, "vlan_name": "TEST"})
     approve_action(action_id)
@@ -163,11 +167,9 @@ def test_happy_path_takes_pre_then_post_snapshots(
 
 def test_happy_path_invalidates_connection_pool(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_vlan_page,
 ):
     """After WebUI add, the pooled SSH may have stale state. Pool must be
     invalidated before the verify CLI call so verify reads fresh."""
@@ -180,29 +182,6 @@ def test_happy_path_invalidates_connection_pool(
     _stub_pool.invalidate.assert_called_once()
 
 
-def test_happy_path_drives_form_in_correct_order(
-    _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
-    _stub_pool,
-    _stub_snapshots,
-    _stub_vlan_page,
-):
-    """POM methods must be called in goto -> click_add -> set_id -> set_name -> save."""
-    action_id = propose_action("webui_add_access_vlan", {"vlan_id": 42, "vlan_name": "DEV"})
-    approve_action(action_id)
-
-    with patch.object(flow_mod, "verify_vlan_exists", return_value=True):
-        flow_mod.add_access_vlan_via_webui(42, "DEV", action_id=action_id)
-
-    # Check call order on the mocked VlanPage methods
-    _stub_vlan_page.goto.assert_called_once()
-    _stub_vlan_page.click_add.assert_called_once()
-    _stub_vlan_page.set_vlan_id.assert_called_once_with(42)
-    _stub_vlan_page.set_vlan_name.assert_called_once_with("DEV")
-    _stub_vlan_page.save.assert_called_once()
-
-
 # ---------------------------------------------------------------------------
 # Failure paths
 # ---------------------------------------------------------------------------
@@ -210,11 +189,9 @@ def test_happy_path_drives_form_in_correct_order(
 
 def test_verification_failure_raises_and_marks_failed(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_vlan_page,
 ):
     """WebUI clicked Save but CLI 'show vlan brief' doesn't list it → raise."""
     from backend.orchestration.confirmations import ActionState, get_action
@@ -231,18 +208,29 @@ def test_verification_failure_raises_and_marks_failed(
     assert get_action(action_id)["state"] == ActionState.FAILED
 
 
-def test_login_failure_aborts_flow(
+def test_subprocess_failure_propagates_and_marks_failed(
     _isolated_artifacts,
-    _stub_browser,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_vlan_page,
 ):
+    """If the child Playwright process raises (login fail / Playwright crash /
+    selector timeout / etc.), the parent must mark_failed and re-raise so
+    the dispatcher / route can translate it into a 500 + error banner."""
+    from backend.orchestration.confirmations import ActionState, get_action
+    from backend.webui_agent._subprocess import SubprocessFlowError
+
     action_id = propose_action("webui_add_access_vlan", {"vlan_id": 30, "vlan_name": "OFFICE"})
     approve_action(action_id)
 
-    with (
-        patch.object(flow_mod, "login", return_value=False),
-        pytest.raises(RuntimeError, match="login failed"),
-    ):
+    _stub_subprocess.side_effect = SubprocessFlowError(
+        flow="add_access_vlan",
+        error="WebUI login failed",
+        exc_type="RuntimeError",
+        stderr="(traceback omitted)",
+    )
+
+    with pytest.raises(SubprocessFlowError):
         flow_mod.add_access_vlan_via_webui(30, "OFFICE", action_id=action_id)
+
+    assert get_action(action_id)["state"] == ActionState.FAILED

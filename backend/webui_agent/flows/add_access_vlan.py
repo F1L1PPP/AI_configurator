@@ -2,21 +2,28 @@
 
 Composition of the same building blocks as `change_hostname.py`:
 
-    browser → login → VlanPage.goto → click_add → fill → save → CLI verify
+    pre-snapshot → child(Playwright: browser → login → VlanPage → save)
+                 → invalidate pool → CLI verify → post-snapshot
+
+Why the Playwright portion runs in a child process:
+    Windows + Playwright sync API + FastAPI thread pool deadlocks on
+    asyncio's Catch-22 (Proactor lacks add_reader, Selector lacks
+    subprocess_exec; Playwright needs both). Spawning a fresh Python
+    process gives Playwright its own asyncio state, independent of
+    FastAPI's. See `_playwright_subprocess.py` for the full rationale.
 
 Safety:
 - Requires an APPROVED action_id (defense-in-depth: dispatcher layer 1
   + this function's `_guard` layer 2).
 - Pre-snapshot before any UI interaction; post-snapshot after success.
-- Every step screenshotted into artifacts/screenshots/<flow>_<action_id>/.
-- On error: DOM dump + mark action FAILED + re-raise. Never auto-retry.
+- Every step screenshotted into artifacts/screenshots/<flow>_<action_id>/
+  (the child writes these; the parent doesn't touch them).
+- On error: mark action FAILED + re-raise. Never auto-retry.
 - CLI ground-truth check after save: `verify_vlan_exists(vlan_id, name)`
   reads `show vlan brief` and confirms the row landed in the VLAN database.
 """
 
 from __future__ import annotations
-
-import contextlib
 
 from backend.cli_agent.connection import pool
 from backend.cli_agent.snapshots import take_snapshot
@@ -28,10 +35,7 @@ from backend.orchestration.confirmations import (
     mark_executed,
     mark_failed,
 )
-from backend.webui_agent.browser import webui_browser
-from backend.webui_agent.evidence import EvidenceCollector
-from backend.webui_agent.login import login
-from backend.webui_agent.pages.vlan_page import VlanPage
+from backend.webui_agent._subprocess import run_flow_in_subprocess
 from backend.webui_agent.verify import verify_vlan_exists
 
 log = get_logger(__name__)
@@ -58,14 +62,18 @@ def add_access_vlan_via_webui(
 ) -> dict:
     """Drive the WebUI to add an access VLAN. Returns a structured result.
 
+    The Playwright portion (browser launch → login → form → save → screenshots)
+    runs in a child Python process to side-step the Windows asyncio
+    Catch-22; everything else (guard, snapshots, verification, state
+    transitions, pool invalidation) stays in this process.
+
     Args:
         vlan_id:   VLAN number (1..4094). Router validates the range.
         vlan_name: Human-readable name (e.g. "OFFICE").
         action_id: Must be in state APPROVED.
-        headless:  Defaults to None → `webui_browser._resolve_headless`
-                   reads PLAYWRIGHT_HEADLESS or CI env vars, falling back
-                   to False (dev / watch-it-click). Pass True/False
-                   explicitly to override.
+        headless:  None → child reads PLAYWRIGHT_HEADLESS / CI env vars
+                   (defaults to False = dev / watch-it-click). Pass
+                   True/False explicitly to override.
 
     Returns:
         dict with keys: tool, vlan_id, vlan_name, snapshot_pre,
@@ -73,8 +81,8 @@ def add_access_vlan_via_webui(
 
     Raises:
         NotApproved:            action not in APPROVED state
+        SubprocessFlowError:    Playwright child process failed
         WebUIVerificationError: WebUI clicked Save but CLI doesn't see the VLAN
-        Any Playwright exception bubbles up unchanged
     """
     _guard(action_id)
 
@@ -84,34 +92,20 @@ def add_access_vlan_via_webui(
         vlan_name=vlan_name,
         action_id=action_id,
     )
-    ev = EvidenceCollector("add_access_vlan", action_id=action_id)
 
     # Pre-snapshot via SSH (independent of the WebUI session)
     pre_dir = take_snapshot(action_id, "pre")
 
-    page = None
     try:
-        with webui_browser(headless=headless) as page:
-            ev.step("01-browser-launched", page)
-
-            if not login(page):
-                ev.dump_dom(page, "99-login-failed")
-                raise RuntimeError("WebUI login failed")
-            ev.step("02-logged-in", page)
-
-            vp = VlanPage(page)
-            vp.goto()
-            ev.step("03-vlan-page", page)
-
-            vp.click_add()
-            ev.step("04-add-form-opened", page)
-
-            vp.set_vlan_id(vlan_id)
-            vp.set_vlan_name(vlan_name)
-            ev.step("05-form-filled", page)
-
-            vp.save()
-            ev.step("06-saved", page)
+        child_result = run_flow_in_subprocess(
+            "add_access_vlan",
+            {
+                "vlan_id": vlan_id,
+                "vlan_name": vlan_name,
+                "action_id": action_id,
+                "headless": headless,
+            },
+        )
 
         # The VLAN database changed; invalidate the pooled SSH so the
         # next CLI call sees a fresh state (same pattern as hostname).
@@ -134,7 +128,7 @@ def add_access_vlan_via_webui(
             "add_access_vlan_via_webui_complete",
             vlan_id=vlan_id,
             vlan_name=vlan_name,
-            screenshots=str(ev.session_dir),
+            screenshots=child_result.get("screenshots"),
         )
 
         return {
@@ -143,14 +137,11 @@ def add_access_vlan_via_webui(
             "vlan_name": vlan_name,
             "snapshot_pre": str(pre_dir),
             "snapshot_post": str(post_dir),
-            "screenshots": str(ev.session_dir),
+            "screenshots": child_result.get("screenshots"),
             "verified": True,
         }
 
     except Exception as exc:
-        if page is not None:
-            with contextlib.suppress(Exception):
-                ev.dump_dom(page, "99-error")
         mark_failed(action_id)
         log.error(
             "add_access_vlan_via_webui_failed",

@@ -1,4 +1,15 @@
-"""Unit tests for backend.webui_agent.flows.change_hostname — mocked Playwright + CLI."""
+"""Unit tests for backend.webui_agent.flows.change_hostname — subprocess-isolated.
+
+The Playwright portion of the flow now runs in a child Python process
+(see backend/webui_agent/_playwright_subprocess.py). These tests mock
+the parent-side `run_flow_in_subprocess` helper, so they verify
+EVERYTHING the parent does (guard, snapshots, verify, mark_executed/
+mark_failed, pool invalidation, result shape) without touching real
+Playwright OR spawning real subprocesses.
+
+For tests of the Playwright steps themselves, see the page-object tests
+in test_webui_hostname_page.py and test_webui_login.py.
+"""
 
 from __future__ import annotations
 
@@ -14,51 +25,21 @@ from backend.orchestration.confirmations import (
     propose_action,
 )
 
-# All tests in this module exercise the WebUI agent layer (Playwright is
-# mocked at the page-object level so no real browser launches). Tagged with
-# the `webui` marker so `pytest -m 'not webui'` skips them during fast
-# iteration on unrelated layers. Review §5 cleanup.
+# All tests in this module exercise the WebUI agent layer (Playwright
+# runs in a mocked subprocess; no real browser launches). Tagged with
+# the `webui` marker so `pytest -m 'not webui'` skips them.
 pytestmark = pytest.mark.webui
-
-# _clean_actions fixture is now in tests/conftest.py (autouse).
 
 
 @pytest.fixture()
 def _isolated_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    import backend.webui_agent.evidence as ev_mod
-
     fake = MagicMock()
     fake.artifacts_dir = tmp_path
     fake.router_host = "10.0.0.1"
     fake.router_ssh_user = "admin"
     fake.router_ssh_password = "pass"
-    monkeypatch.setattr(ev_mod, "get_settings", lambda: fake)
     monkeypatch.setattr(flow_mod, "get_settings", lambda: fake)
     return tmp_path
-
-
-@pytest.fixture()
-def _stub_browser(monkeypatch: pytest.MonkeyPatch):
-    """Replace webui_browser context manager with one yielding a mock Page."""
-    from contextlib import contextmanager
-
-    page = MagicMock()
-    page.screenshot = MagicMock(
-        side_effect=lambda path, full_page=False: Path(path).write_bytes(b"png")
-    )
-    page.content.return_value = "<html></html>"
-
-    @contextmanager
-    def fake_browser(headless: bool = False):
-        yield page
-
-    monkeypatch.setattr(flow_mod, "webui_browser", fake_browser)
-    return page
-
-
-@pytest.fixture()
-def _stub_login(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(flow_mod, "login", MagicMock(return_value=True))
 
 
 @pytest.fixture()
@@ -83,20 +64,23 @@ def _stub_snapshots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 @pytest.fixture()
-def _stub_hostname_page(monkeypatch: pytest.MonkeyPatch):
-    """Replace HostnamePage with a mock class."""
-    instance = MagicMock()
-    instance.get_current_hostname.return_value = "c1111-lab"
+def _stub_subprocess(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Replace run_flow_in_subprocess with a configurable mock.
 
-    class FakeHP:
-        def __init__(self, page):
-            pass
-
-        def __getattr__(self, name):
-            return getattr(instance, name)
-
-    monkeypatch.setattr(flow_mod, "HostnamePage", FakeHP)
-    return instance
+    Default: returns a successful payload with `old_hostname` and a
+    screenshots dir. Override `.side_effect` to simulate a child
+    failure, or `.return_value` to simulate a different result shape.
+    """
+    screenshots_dir = tmp_path / "screens"
+    screenshots_dir.mkdir(exist_ok=True)
+    mock = MagicMock(
+        return_value={
+            "old_hostname": "c1111-lab",
+            "screenshots": str(screenshots_dir),
+        }
+    )
+    monkeypatch.setattr(flow_mod, "run_flow_in_subprocess", mock)
+    return mock
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +88,12 @@ def _stub_hostname_page(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refuses_without_approval(
-    _isolated_artifacts, _stub_browser, _stub_login, _stub_hostname_page
-):
-    action_id = propose_action("webui_set_hostname", {"name": "LAB-R1"})
+def test_refuses_without_approval(_isolated_artifacts, _stub_subprocess):
+    action_id = propose_action("webui_set_hostname", {"new_name": "LAB-R1"})
     # NOT approved
     with pytest.raises(NotApproved):
         flow_mod.change_hostname_via_webui("LAB-R1", action_id=action_id)
+    _stub_subprocess.assert_not_called()
 
 
 def test_refuses_for_unknown_action_id(_isolated_artifacts):
@@ -119,19 +102,17 @@ def test_refuses_for_unknown_action_id(_isolated_artifacts):
 
 
 # ---------------------------------------------------------------------------
-# Happy path — full flow with mocked browser, login, page, verify
+# Happy path — full flow with mocked subprocess
 # ---------------------------------------------------------------------------
 
 
 def test_happy_path_returns_structured_result(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_hostname_page,
 ):
-    action_id = propose_action("webui_set_hostname", {"name": "LAB-R1"})
+    action_id = propose_action("webui_set_hostname", {"new_name": "LAB-R1"})
     approve_action(action_id)
 
     with patch.object(flow_mod, "verify_hostname", return_value=True):
@@ -146,15 +127,34 @@ def test_happy_path_returns_structured_result(
     assert Path(result["screenshots"]).exists()
 
 
-def test_happy_path_takes_pre_then_post_snapshots(
+def test_happy_path_passes_args_to_subprocess(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_hostname_page,
 ):
-    action_id = propose_action("webui_set_hostname", {"name": "R1"})
+    """Parent must hand the new_name / action_id / headless flag down to the child."""
+    action_id = propose_action("webui_set_hostname", {"new_name": "R1"})
+    approve_action(action_id)
+
+    with patch.object(flow_mod, "verify_hostname", return_value=True):
+        flow_mod.change_hostname_via_webui("R1", action_id=action_id, headless=False)
+
+    _stub_subprocess.assert_called_once()
+    flow_name, payload = _stub_subprocess.call_args.args
+    assert flow_name == "change_hostname"
+    assert payload["new_name"] == "R1"
+    assert payload["action_id"] == action_id
+    assert payload["headless"] is False
+
+
+def test_happy_path_takes_pre_then_post_snapshots(
+    _isolated_artifacts,
+    _stub_subprocess,
+    _stub_pool,
+    _stub_snapshots,
+):
+    action_id = propose_action("webui_set_hostname", {"new_name": "R1"})
     approve_action(action_id)
 
     with patch.object(flow_mod, "verify_hostname", return_value=True):
@@ -166,15 +166,13 @@ def test_happy_path_takes_pre_then_post_snapshots(
 
 def test_happy_path_invalidates_connection_pool(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_hostname_page,
 ):
     """After WebUI changes hostname, the pooled SSH base_prompt is stale.
     Pool must be invalidated before verification CLI call."""
-    action_id = propose_action("webui_set_hostname", {"name": "R1"})
+    action_id = propose_action("webui_set_hostname", {"new_name": "R1"})
     approve_action(action_id)
 
     with patch.object(flow_mod, "verify_hostname", return_value=True):
@@ -190,16 +188,14 @@ def test_happy_path_invalidates_connection_pool(
 
 def test_verification_failure_raises_and_marks_failed(
     _isolated_artifacts,
-    _stub_browser,
-    _stub_login,
+    _stub_subprocess,
     _stub_pool,
     _stub_snapshots,
-    _stub_hostname_page,
 ):
     """WebUI clicked Apply but CLI doesn't see the new hostname → raise."""
-    from backend.orchestration.confirmations import get_action
+    from backend.orchestration.confirmations import ActionState, get_action
 
-    action_id = propose_action("webui_set_hostname", {"name": "R1"})
+    action_id = propose_action("webui_set_hostname", {"new_name": "R1"})
     approve_action(action_id)
 
     with (
@@ -208,20 +204,31 @@ def test_verification_failure_raises_and_marks_failed(
     ):
         flow_mod.change_hostname_via_webui("R1", action_id=action_id)
 
-    # action_id must be marked FAILED
-    from backend.orchestration.confirmations import ActionState
-
     assert get_action(action_id)["state"] == ActionState.FAILED
 
 
-def test_login_failure_aborts_flow(
-    _isolated_artifacts, _stub_browser, _stub_pool, _stub_snapshots, _stub_hostname_page
+def test_subprocess_failure_propagates_and_marks_failed(
+    _isolated_artifacts,
+    _stub_subprocess,
+    _stub_pool,
+    _stub_snapshots,
 ):
-    action_id = propose_action("webui_set_hostname", {"name": "R1"})
+    """If the child Playwright process raises (login fail / browser crash /
+    selector timeout), the parent must mark_failed and re-raise."""
+    from backend.orchestration.confirmations import ActionState, get_action
+    from backend.webui_agent._subprocess import SubprocessFlowError
+
+    action_id = propose_action("webui_set_hostname", {"new_name": "R1"})
     approve_action(action_id)
 
-    with (
-        patch.object(flow_mod, "login", return_value=False),
-        pytest.raises(RuntimeError, match="login failed"),
-    ):
+    _stub_subprocess.side_effect = SubprocessFlowError(
+        flow="change_hostname",
+        error="WebUI login failed",
+        exc_type="RuntimeError",
+        stderr="(traceback omitted)",
+    )
+
+    with pytest.raises(SubprocessFlowError):
         flow_mod.change_hostname_via_webui("R1", action_id=action_id)
+
+    assert get_action(action_id)["state"] == ActionState.FAILED
