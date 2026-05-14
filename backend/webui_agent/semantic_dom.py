@@ -6,7 +6,9 @@ Produces a token-bounded snapshot of the current Playwright Page so the
 planner (Claude) can decide which element to click without us hand-coding
 a Page Object Model per feature.
 
-Output shape (JSON-serialisable, designed to fit in ~800 tokens):
+Output shape (JSON-serialisable). Typical button-heavy page ~700 tokens;
+worst case 30 textboxes with max-length labels + value/required ≈ 1400
+tokens — still under 1% of Haiku 4.5's input window and ~$0.001 per call.
 
     {
       "url": str,
@@ -14,6 +16,10 @@ Output shape (JSON-serialisable, designed to fit in ~800 tokens):
       "elements": [
           {"eid": "e_001", "role": "button", "name": "Add",
            "enabled": True, "bbox": [x, y, w, h]},
+          {"eid": "e_002", "role": "textbox", "name": "Host Name*",
+           "enabled": True, "bbox": [...], "value": "LAB-R4", "required": True},
+          {"eid": "e_003", "role": "combobox", "name": "VLAN List",
+           "enabled": True, "bbox": [...], "value": "VLAN46"},
           ...
       ],
       "modals": [...same shape, role in {dialog, alertdialog}, eid "m_NNN"...],
@@ -84,8 +90,10 @@ _UNION_SELECTOR = ",".join(
     ]
 )
 
-# Truncate accessible names to keep token budget bounded (~28 tokens / element).
-_MAX_NAME_LEN = 80
+# Truncate accessible names to keep token budget bounded (~18 tokens / element).
+# 50 covers "Maximum Number of Equal Cost Multipath Routes" (47 chars) — the
+# longest real Cisco label observed so far. 80 was over budget at worst case.
+_MAX_NAME_LEN = 50
 
 # Fallback when page.viewport_size returns None. Matches browser.py default.
 # Typed as dict[str, Any] so Playwright's ViewportSize TypedDict slots in.
@@ -247,6 +255,20 @@ def _serialise(eid: str, cand: dict[str, Any]) -> dict[str, Any]:
             int(round(bbox["width"])),
             int(round(bbox["height"])),
         ]
+
+    # value and required let Phase 4's propose_webui_configure reason about
+    # pre-filled form state on a re-describe (don't overwrite already-correct
+    # fields). Only emitted for the roles that actually carry these concepts.
+    role = cand["role"]
+    if role in ("textbox", "combobox"):
+        loc = cand["loc"]
+        value = _safe_call(lambda: loc.input_value(timeout=_PROBE_TIMEOUT_MS), default="")
+        if isinstance(value, str):
+            out["value"] = value
+    if role == "textbox":
+        # HTML5 boolean attr: present (even with empty string) means required.
+        loc = cand["loc"]
+        out["required"] = _safe_attr(loc, "required") is not None
     return out
 
 

@@ -30,11 +30,14 @@ def _make_locator(
     visible: bool = True,
     enabled: bool = True,
     bbox: dict[str, float] | None = None,
+    input_value: str = "",
 ) -> MagicMock:
     """Return a MagicMock that quacks like a Playwright Locator.
 
     `attrs` keys are checked by get_attribute (e.g. "role", "aria-label",
-    "placeholder", "type"). Missing keys return None.
+    "placeholder", "type", "required"). Missing keys return None.
+    `input_value` is returned by ``loc.input_value()`` — used by the value
+    field for textbox/combobox roles.
     """
     attrs = attrs or {}
     loc = MagicMock()
@@ -47,6 +50,7 @@ def _make_locator(
         "height": 30.0,
     }
     loc.inner_text.return_value = text
+    loc.input_value.return_value = input_value
     loc.get_attribute.side_effect = lambda name, **kw: attrs.get(name)
     loc.evaluate.return_value = tag
     return loc
@@ -334,7 +338,7 @@ def test_placeholder_fallback_for_unlabelled_input():
     assert view["elements"][0]["name"] == "Search VLANs"
 
 
-def test_name_truncated_at_eighty_chars():
+def test_name_truncated_at_fifty_chars():
     long = "x" * 200
     btn = _make_locator(
         tag="BUTTON",
@@ -345,8 +349,90 @@ def test_name_truncated_at_eighty_chars():
     view, _ = describe_page(page)
 
     name = view["elements"][0]["name"]
-    assert len(name) == 80
-    assert name == "x" * 80
+    assert len(name) == 50
+    assert name == "x" * 50
+
+
+def test_aria_labelledby_resolves_referenced_text():
+    # Element points to another node via aria-labelledby. The walker should
+    # look up that node by id and return its inner_text.
+    btn = _make_locator(
+        tag="BUTTON",
+        attrs={"aria-labelledby": "lbl_001"},
+        text="should be ignored",
+    )
+    # loc.page.locator("#lbl_001").inner_text(...) returns the referenced text.
+    btn.page.locator.return_value.inner_text.return_value = "Confirm change"
+    page = _make_page(locators=[btn])
+
+    view, _ = describe_page(page)
+
+    assert view["elements"][0]["name"] == "Confirm change"
+
+
+# ---------------------------------------------------------------------------
+# value / required for textbox + combobox
+# ---------------------------------------------------------------------------
+
+
+def test_textbox_emits_value_and_required():
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "required": "", "placeholder": "VLAN ID"},
+        input_value="42",
+    )
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["role"] == "textbox"
+    assert el["value"] == "42"
+    # HTML5 boolean attr — present even with empty value means required.
+    assert el["required"] is True
+
+
+def test_textbox_without_required_attribute():
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "Optional field"},
+        input_value="",
+    )
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["value"] == ""
+    assert el["required"] is False
+
+
+def test_combobox_emits_value_not_required():
+    sel = _make_locator(
+        tag="SELECT",
+        attrs={"aria-label": "VLAN List"},
+        input_value="VLAN46",
+    )
+    page = _make_page(locators=[sel])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["role"] == "combobox"
+    assert el["value"] == "VLAN46"
+    # `required` is a textbox-only concept — comboboxes don't carry it.
+    assert "required" not in el
+
+
+def test_button_does_not_emit_value_or_required():
+    btn = _make_locator(tag="BUTTON", text="Apply")
+    page = _make_page(locators=[btn])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert "value" not in el
+    assert "required" not in el
 
 
 # ---------------------------------------------------------------------------
@@ -379,3 +465,36 @@ def test_typical_view_fits_under_token_budget():
     serialised = json.dumps(view)
     # 4 chars per token rule of thumb -> ~800 tokens cap at 3 200 chars.
     assert len(serialised) < 3_200, f"view bloated to {len(serialised)} chars"
+
+
+def test_worst_case_view_fits_under_realistic_budget():
+    # Worst case: 30 textboxes with names truncated AT _MAX_NAME_LEN (50),
+    # `value` + `required` populated. This is the page we'd see on a heavy
+    # Cisco config form (e.g. interface settings, OSPF advanced).
+    import json
+
+    long_name = "x" * 50  # at _MAX_NAME_LEN
+    locators = [
+        _make_locator(
+            tag="INPUT",
+            attrs={"type": "text", "aria-label": long_name, "required": ""},
+            input_value=f"val{i}",
+            bbox={
+                "x": 100.0,
+                "y": 200.0 + i * 5.0,
+                "width": 100.0,
+                "height": 28.0,
+            },
+        )
+        for i in range(30)
+    ]
+    page = _make_page(locators=locators)
+
+    view, _ = describe_page(page)
+
+    serialised = json.dumps(view)
+    # Worst-case target: ~1400 tokens (~5600 chars at 4 chars/token).
+    # 30 max-length textboxes each carrying value + required is pathological;
+    # real Cisco pages are 5-15 elements with sub-30-char labels. Even this
+    # pathological case is still <$0.001 per call at Haiku 4.5 pricing.
+    assert len(serialised) < 5_600, f"worst-case view bloated to {len(serialised)} chars"
