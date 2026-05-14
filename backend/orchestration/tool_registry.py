@@ -35,6 +35,13 @@ from backend.orchestration.confirmations import (
 )
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
+from backend.webui_agent.generic_driver import (
+    webui_act,
+    webui_act_by_intent,
+    webui_describe_page,
+    webui_open,
+    webui_verify,
+)
 
 # Maximum length of a search_docs query. Caps the embedding cost — a 10 MB
 # query embedded through MiniLM is several seconds of CPU per call, easy
@@ -100,6 +107,10 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "set_access_vlan",
         "webui_set_hostname",
         "webui_add_access_vlan",
+        # Phase 4 slice 2 — generic AI-driven write tools. Act on whatever
+        # element the planner picked; same HITL gate as the fast paths.
+        "webui_act",
+        "webui_act_by_intent",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -373,6 +384,204 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["vlan_id", "vlan_name", "action_id"],
         },
     },
+    {
+        "name": "webui_open",
+        "description": (
+            "Phase 4 slice 1 of the AI-driven WebUI driver — DO NOT call "
+            "this directly yet. The full toolkit (act / describe_page / "
+            "verify / propose_webui_configure) arrives in slice 2 + Phase "
+            "5. Calling webui_open alone yields a semantic-DOM view of the "
+            "page but no way to act on it; for hostname / VLAN / interface "
+            "changes use the existing propose_webui_set_hostname / "
+            "propose_webui_add_access_vlan fast paths instead.\n\n"
+            "When wired (Phase 5): navigates the Cisco WebUI to a path and "
+            "returns {view, session_id}. Read-only (no router write)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Cisco WebUI URL path (e.g. '/webui/#/general' for "
+                        "the General page). Hash-fragment routing skips the "
+                        "sidebar navigation walk."
+                    ),
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": (
+                        "Planner-turn key. Reuses an existing live session "
+                        "if one is cached under this id. Auto-allocated if "
+                        "omitted."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "webui_describe_page",
+        "description": (
+            "Phase 4 slice 2 read-only session op — DO NOT call standalone "
+            "until Phase 5 wires the planner. Re-describe the current page "
+            "of an existing webui_open session. Returns a fresh "
+            "{view, session_id}; the view carries a new view_id, so any "
+            "eid the caller cached from a prior view is now stale."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": ("Session id returned by a prior webui_open call."),
+                },
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "webui_verify",
+        "description": (
+            "Phase 4 slice 2 read-only session op — DO NOT call standalone "
+            "until Phase 5 wires the planner. Check whether a substring is "
+            "present in the current page's HTML. Use after a webui_act "
+            "chain to confirm a success banner or expected value. Returns "
+            "{present, url, session_id}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": ("Session id returned by a prior webui_open call."),
+                },
+                "text": {
+                    "type": "string",
+                    "description": ("Substring to search for in page.content() (full DOM HTML)."),
+                },
+            },
+            "required": ["session_id", "text"],
+        },
+    },
+    {
+        "name": "webui_act",
+        "description": (
+            "Phase 4 slice 2 HITL-gated write tool — DO NOT call standalone "
+            "until Phase 5 wires the planner. Acts on an element from a "
+            "previously-described view. The (session_id, view_id) pair ties "
+            "this call to a specific describe — if a re-describe has happened "
+            "in between, the eid may no longer point at the same element, and "
+            "the child returns failure_reason='stale_view'. Click on a "
+            "Timeout is NEVER retried (router-write safety per CLAUDE.md). "
+            "Soft failures (stale_view / element_*) leave the action "
+            "retryable; hard failures (subprocess crash / not_approved) "
+            "transition the action_id to FAILED."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id from a prior webui_open call.",
+                },
+                "view_id": {
+                    "type": "string",
+                    "description": (
+                        "view_id from the describe whose eid is referenced. "
+                        "If the child's current view_id has rolled past this "
+                        "one, the call is rejected with failure_reason='stale_view'."
+                    ),
+                },
+                "eid": {
+                    "type": "string",
+                    "description": "Element id from the referenced view.",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["click", "fill", "select", "check", "hover"],
+                    "description": (
+                        "Playwright action. 'click' is never auto-retried on "
+                        "Timeout (Cisco WebUI Apply fires via XHR — a retry "
+                        "would be a duplicate router write)."
+                    ),
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": (
+                        "APPROVED action_id from the approval gate. Required; "
+                        "the dispatcher refuses without it."
+                    ),
+                },
+                "value": {
+                    "type": "string",
+                    "description": ("Value for fill/select; ignored for click/hover/check."),
+                },
+            },
+            "required": ["session_id", "view_id", "eid", "action", "action_id"],
+        },
+    },
+    {
+        "name": "webui_act_by_intent",
+        "description": (
+            "Phase 4 slice 2 HITL-gated write tool — DO NOT call standalone "
+            "until Phase 5 wires the planner. Convenience wrapper: instead "
+            "of (view_id, eid), the planner passes an intent dict "
+            "({role, name, action, value}) and the child resolves it to an "
+            "eid via login.first_match against a freshly-described view. "
+            "Useful when the planner can name the element semantically but "
+            "doesn't have a fresh view_id. Returns the same shape as "
+            "webui_act plus chosen_eid (the eid the child resolved to)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id from a prior webui_open call.",
+                },
+                "intent": {
+                    "type": "object",
+                    "description": (
+                        "Element description + action to perform. Required "
+                        "fields: role, name, action. Optional: value (for "
+                        "fill/select)."
+                    ),
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "description": (
+                                "ARIA role of the target element (button, "
+                                "textbox, combobox, link, ...)."
+                            ),
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Accessible name to match (label text, button text, etc.)."
+                            ),
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["click", "fill", "select", "check", "hover"],
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": (
+                                "Value for fill/select; ignored for click / hover / check."
+                            ),
+                        },
+                    },
+                    "required": ["role", "name", "action"],
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": "APPROVED action_id from the approval gate.",
+                },
+            },
+            "required": ["session_id", "intent", "action_id"],
+        },
+    },
 ]
 
 
@@ -500,6 +709,21 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "webui_set_hostname": change_hostname_via_webui,
     "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,
     "webui_add_access_vlan": add_access_vlan_via_webui,
+    # Phase 4 slice 1 — generic AI-driven driver. Schema is in TOOL_SCHEMAS
+    # below but the description tells Claude to skip it until the full
+    # toolkit (act / propose_webui_configure) lands in Phase 5. Callable
+    # via execute_tool() for tests.
+    "webui_open": webui_open,
+    # Phase 4 slice 2 (commit 1) — read-only session ops on top of slice 1.
+    # Same caveat: not user-facing until Phase 5 wires the planner.
+    "webui_describe_page": webui_describe_page,
+    "webui_verify": webui_verify,
+    # Phase 4 slice 2 (commit 2) — the HITL-gated generic write tool.
+    "webui_act": webui_act,
+    # Phase 4 slice 2 (commit 3) — convenience wrapper that resolves a
+    # planner intent ({role, name, action}) to an eid child-side, then
+    # dispatches into the same _do_act self-heal machine.
+    "webui_act_by_intent": webui_act_by_intent,
 }
 
 
