@@ -221,6 +221,251 @@ def _relogin_if_needed(page: Any) -> None:
         login(page)
 
 
+# Actions accepted by `webui_act`. Anything else returns failure_reason="unknown_action".
+_VALID_ACTIONS = frozenset({"click", "fill", "select", "check", "hover"})
+
+# Per-action Playwright timeout (ms). Five seconds is plenty for a click /
+# fill against a healthy WebUI; anything longer is a real problem.
+_ACT_TIMEOUT_MS = 5000
+
+
+def _invoke_action(locator: Any, action: str, value: str | None) -> None:
+    """Dispatch one Playwright action against ``locator``.
+
+    Raises whatever Playwright raises (TimeoutError on intercepted / hidden /
+    detached elements). Caller distinguishes via `isinstance` against
+    `playwright.sync_api.TimeoutError`.
+    """
+    if action == "click":
+        locator.click(timeout=_ACT_TIMEOUT_MS)
+    elif action == "fill":
+        locator.fill(str(value or ""), timeout=_ACT_TIMEOUT_MS)
+    elif action == "select":
+        locator.select_option(str(value or ""), timeout=_ACT_TIMEOUT_MS)
+    elif action == "check":
+        locator.check(timeout=_ACT_TIMEOUT_MS)
+    elif action == "hover":
+        locator.hover(timeout=_ACT_TIMEOUT_MS)
+    else:  # pragma: no cover — caller pre-validates against _VALID_ACTIONS
+        raise ValueError(f"unknown action: {action!r}")
+
+
+def _do_act(
+    page: Any,
+    locator_map: dict[str, Any],
+    current_view_id: str | None,
+    msg: dict[str, Any],
+    ev: Any,
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Run one act op with the self-heal state machine.
+
+    Returns a tuple of (reply, new_locator_map, new_view_id). The caller
+    rebinds the loop's state from the returned values — every code path
+    here ensures the returned map and view_id reflect what the planner
+    will see next.
+
+    Failure modes:
+    - `stale_view`         : the parent's view_id no longer matches.
+    - `unknown_eid`        : eid not in the current locator_map.
+    - `unknown_action`     : action not in _VALID_ACTIONS.
+    - `click_timeout_unsafe_retry`: PlaywrightTimeoutError on a click. NEVER
+        retried — CLAUDE.md §4 (Cisco WebUI Apply fires via XHR; the click
+        may have already landed at the router).
+    - `element_missing`    : non-click timeout, eid gone after re-describe.
+    - `element_hidden`     : non-click timeout, element no longer visible.
+    - `element_disabled`   : non-click timeout, element not enabled.
+    - `element_intercepted`: non-click timeout, element looks fine — likely
+        a modal/overlay. Retried once after re-describing.
+    - `unknown_error`      : non-Playwright exception during the action.
+    """
+    # Lazy imports — keep cold start cheap.
+    import contextlib as _contextlib  # noqa: PLC0415
+
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: PLC0415
+
+    from backend.webui_agent.semantic_dom import _safe_bool, describe_page  # noqa: PLC0415
+
+    # ---- 1. view_id staleness check ----
+    if msg.get("view_id") != current_view_id:
+        view, new_map = describe_page(page)
+        return (
+            {
+                "ok": False,
+                "failure_reason": "stale_view",
+                "view": view,
+                "attempts": 0,
+            },
+            new_map,
+            view["view_id"],
+        )
+
+    eid = str(msg.get("eid", ""))
+    action = str(msg.get("action", ""))
+    value = msg.get("value")
+
+    # ---- 2. action validation ----
+    if action not in _VALID_ACTIONS:
+        view, new_map = describe_page(page)
+        return (
+            {
+                "ok": False,
+                "failure_reason": "unknown_action",
+                "view": view,
+                "attempts": 0,
+            },
+            new_map,
+            view["view_id"],
+        )
+
+    # ---- 3. eid lookup ----
+    locator = locator_map.get(eid)
+    if locator is None:
+        view, new_map = describe_page(page)
+        return (
+            {
+                "ok": False,
+                "failure_reason": "unknown_eid",
+                "view": view,
+                "attempts": 0,
+            },
+            new_map,
+            view["view_id"],
+        )
+
+    # ---- 4. Action dispatch with bounded self-heal ----
+    # MAX_ATTEMPTS=2 means 1 initial attempt + 1 retry. Retry is ONLY for
+    # non-click actions on TimeoutError after re-describe + element-still-OK.
+    max_attempts = 2
+    for attempt_idx in range(max_attempts):
+        try:
+            _invoke_action(locator, action, value)
+
+            # Success — re-describe so the planner sees the post-action view.
+            ev.step(f"act-{eid}-{action}", page)
+            view, new_map = describe_page(page)
+            return (
+                {
+                    "ok": True,
+                    "view": view,
+                    "attempts": attempt_idx,
+                    "evidence": {"screenshot_dir": str(ev.session_dir)},
+                },
+                new_map,
+                view["view_id"],
+            )
+
+        except PlaywrightTimeoutError:  # noqa: PERF203
+            # THE CRITICAL GUARD: click never retries on TimeoutError.
+            # Cisco WebUI Apply clicks fire via XHR; a TimeoutError after
+            # locator.click() may mean the network call already landed at
+            # the router. Retrying = duplicate router write. CLAUDE.md §4.
+            if action == "click":
+                with _contextlib.suppress(Exception):
+                    ev.dump_dom(page, f"99-click-timeout-{eid}")
+                view, new_map = describe_page(page)
+                return (
+                    {
+                        "ok": False,
+                        "failure_reason": "click_timeout_unsafe_retry",
+                        "view": view,
+                        "attempts": attempt_idx,
+                    },
+                    new_map,
+                    view["view_id"],
+                )
+
+            # Non-click: re-describe and classify what went wrong.
+            view, locator_map = describe_page(page)
+            current_view_id = view["view_id"]
+            new_loc = locator_map.get(eid)
+
+            if new_loc is None:
+                return (
+                    {
+                        "ok": False,
+                        "failure_reason": "element_missing",
+                        "view": view,
+                        "attempts": attempt_idx,
+                    },
+                    locator_map,
+                    current_view_id,
+                )
+
+            visible = _safe_bool(new_loc.is_visible, default=False)
+            if not visible:
+                return (
+                    {
+                        "ok": False,
+                        "failure_reason": "element_hidden",
+                        "view": view,
+                        "attempts": attempt_idx,
+                    },
+                    locator_map,
+                    current_view_id,
+                )
+
+            enabled = _safe_bool(new_loc.is_enabled, default=False)
+            if not enabled:
+                return (
+                    {
+                        "ok": False,
+                        "failure_reason": "element_disabled",
+                        "view": view,
+                        "attempts": attempt_idx,
+                    },
+                    locator_map,
+                    current_view_id,
+                )
+
+            # Element looks fine but the action timed out — likely intercepted.
+            # Retry once with the refreshed locator handle.
+            if attempt_idx + 1 < max_attempts:
+                locator = new_loc
+                continue
+
+            return (
+                {
+                    "ok": False,
+                    "failure_reason": "element_intercepted",
+                    "view": view,
+                    "attempts": attempt_idx,
+                },
+                locator_map,
+                current_view_id,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            # Non-Playwright exception — fail loudly with the raw type.
+            with _contextlib.suppress(Exception):
+                ev.dump_dom(page, f"99-act-error-{eid}")
+            view, new_map = describe_page(page)
+            return (
+                {
+                    "ok": False,
+                    "failure_reason": "unknown_error",
+                    "view": view,
+                    "attempts": attempt_idx,
+                    "error": str(exc) or repr(exc),
+                    "exc_type": type(exc).__name__,
+                },
+                new_map,
+                view["view_id"],
+            )
+
+    # Should be unreachable: every branch above returns.
+    view, new_map = describe_page(page)  # pragma: no cover
+    return (  # pragma: no cover
+        {
+            "ok": False,
+            "failure_reason": "retry_exhausted",
+            "view": view,
+            "attempts": max_attempts,
+        },
+        new_map,
+        view["view_id"],
+    )
+
+
 def _run_session_loop(init_payload: dict[str, Any]) -> None:
     """Phase 4 long-lived session: log in once, handle ops until shutdown.
 
@@ -247,8 +492,10 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
 
     ev = EvidenceCollector("generic_session", action_id=action_id)
     # locator_map is rebuilt on every describe; held child-side only.
-    # Phase 4 slice 2 will also track `current_view_id` to reject stale eids.
+    # current_view_id tracks the latest view's view_id so `act` can reject
+    # stale eid references from the planner (eids renumber per describe).
     locator_map: dict[str, Any] = {}
+    current_view_id: str | None = None
 
     try:
         with webui_browser(headless=headless) as page:
@@ -309,10 +556,12 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                         label_tail = path.split("/")[-1] or "root"
                         ev.step(f"goto-{label_tail}", page)
                         view, locator_map = describe_page(page)
+                        current_view_id = view["view_id"]
                         _reply({"ok": True, "view": view})
 
                     elif op == "describe":
                         view, locator_map = describe_page(page)
+                        current_view_id = view["view_id"]
                         _reply({"ok": True, "view": view})
 
                     elif op == "verify":
@@ -329,11 +578,18 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                             }
                         )
 
-                    elif op in ("act", "act_by_intent"):
+                    elif op == "act":
+                        reply, locator_map, current_view_id = _do_act(
+                            page, locator_map, current_view_id, msg, ev
+                        )
+                        _reply(reply)
+
+                    elif op == "act_by_intent":
+                        # Intent resolver arrives in Phase 4 slice 2 commit 3.
                         _reply(
                             {
                                 "ok": False,
-                                "error": f"op {op!r} arrives in Phase 4 slice 2",
+                                "error": "op 'act_by_intent' arrives in Phase 4 slice 2 commit 3",
                                 "exc_type": "NotImplementedError",
                             }
                         )

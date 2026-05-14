@@ -34,8 +34,11 @@ import threading
 import uuid
 from typing import Any
 
+from backend.cli_agent.connection import pool
 from backend.cli_agent.snapshots import take_snapshot
 from backend.core.logging import get_logger
+from backend.core.settings import get_settings
+from backend.orchestration.confirmations import is_approved, mark_failed
 from backend.webui_agent._subprocess import SubprocessFlowError, WebUISession
 
 log = get_logger(__name__)
@@ -227,6 +230,122 @@ def webui_verify(session_id: str, text: str) -> dict[str, Any]:
         "present": bool(reply.get("present", False)),
         "url": str(reply.get("url", "")),
         "session_id": session_id,
+    }
+
+
+def webui_act(
+    session_id: str,
+    view_id: str,
+    eid: str,
+    action: str,
+    action_id: str,
+    value: str | None = None,
+) -> dict[str, Any]:
+    """Act on a previously-described element. HITL-gated write tool.
+
+    The `view_id` ties this call to a specific describe — the child rejects
+    the act with `failure_reason="stale_view"` if its current_view_id has
+    rolled past this one (e.g. a re-describe happened between the planner
+    reading the view and issuing this call).
+
+    Returns:
+        Success: ``{"ok": True, "view": ..., "attempts": int, "evidence":
+            {"screenshot_dir": str}, "session_id": str}``.
+        Soft failure (planner can retry): ``{"ok": False, "failure_reason":
+            "<one of stale_view|unknown_eid|unknown_action|click_timeout_
+            unsafe_retry|element_missing|element_hidden|element_disabled|
+            element_intercepted|unknown_error>", "view": ..., "attempts":
+            int, "session_id": str}``. `mark_failed` is NOT called — the
+            action stays APPROVED/EXECUTING so the planner can retry.
+        Hard failure (subprocess died / not_approved): ``{"error":
+            "<not_approved|session_not_found|webui_act_failed>", ...}``.
+            `mark_failed(action_id)` is called for subprocess crashes and
+            session_not_found (no session = state unrecoverable).
+
+    Does NOT call `mark_executed`. The multi-act flow needs the action to
+    stay in EXECUTING so subsequent acts pass `is_approved`. `mark_executed`
+    is Phase 5's `propose_webui_configure` wrapper's responsibility.
+    """
+    # HITL layer 2 — re-check before any side effect.
+    if not is_approved(action_id):
+        log.info("webui_act_not_approved", action_id=action_id)
+        return {
+            "error": "not_approved",
+            "message": f"action_id {action_id!r} is not APPROVED",
+            "session_id": session_id,
+        }
+
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        # No session means we can't proceed; the state machine considers
+        # this a hard failure.
+        mark_failed(action_id)
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send(
+            {
+                "op": "act",
+                "view_id": view_id,
+                "eid": eid,
+                "action": action,
+                "value": value,
+            }
+        )
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        mark_failed(action_id)
+        log.error(
+            "webui_act_subprocess_error",
+            session_id=session_id,
+            action_id=action_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_act_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        # Soft failure — surface the failure_reason to the caller without
+        # transitioning the action_id. The planner re-describes and retries.
+        log.info(
+            "webui_act_soft_failure",
+            session_id=session_id,
+            action_id=action_id,
+            failure_reason=reply.get("failure_reason"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": reply.get("failure_reason"),
+            "view": reply.get("view"),
+            "attempts": reply.get("attempts", 0),
+            "session_id": session_id,
+        }
+
+    # Success — the act may have mutated the router (e.g. clicking Apply).
+    # Invalidate the SSH pool so the next CLI tool call sees a fresh
+    # connection. Pattern mirrors flows/change_hostname.py:101.
+    settings = get_settings()
+    pool.invalidate(settings.router_host, settings.router_ssh_user)
+    log.info(
+        "webui_act_complete",
+        session_id=session_id,
+        action_id=action_id,
+        eid=eid,
+        action=action,
+        attempts=reply.get("attempts", 0),
+    )
+    return {
+        "ok": True,
+        "view": reply["view"],
+        "evidence": reply.get("evidence", {}),
+        "session_id": session_id,
+        "attempts": reply.get("attempts", 0),
     }
 
 

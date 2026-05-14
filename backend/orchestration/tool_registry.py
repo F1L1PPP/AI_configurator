@@ -36,6 +36,7 @@ from backend.orchestration.confirmations import (
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 from backend.webui_agent.generic_driver import (
+    webui_act,
     webui_describe_page,
     webui_open,
     webui_verify,
@@ -105,6 +106,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "set_access_vlan",
         "webui_set_hostname",
         "webui_add_access_vlan",
+        # Phase 4 slice 2 — generic AI-driven write tool. Acts on whatever
+        # element the planner picked; same HITL gate as the fast paths.
+        "webui_act",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -458,6 +462,63 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["session_id", "text"],
         },
     },
+    {
+        "name": "webui_act",
+        "description": (
+            "Phase 4 slice 2 HITL-gated write tool — DO NOT call standalone "
+            "until Phase 5 wires the planner. Acts on an element from a "
+            "previously-described view. The (session_id, view_id) pair ties "
+            "this call to a specific describe — if a re-describe has happened "
+            "in between, the eid may no longer point at the same element, and "
+            "the child returns failure_reason='stale_view'. Click on a "
+            "Timeout is NEVER retried (router-write safety per CLAUDE.md). "
+            "Soft failures (stale_view / element_*) leave the action "
+            "retryable; hard failures (subprocess crash / not_approved) "
+            "transition the action_id to FAILED."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id from a prior webui_open call.",
+                },
+                "view_id": {
+                    "type": "string",
+                    "description": (
+                        "view_id from the describe whose eid is referenced. "
+                        "If the child's current view_id has rolled past this "
+                        "one, the call is rejected with failure_reason='stale_view'."
+                    ),
+                },
+                "eid": {
+                    "type": "string",
+                    "description": "Element id from the referenced view.",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["click", "fill", "select", "check", "hover"],
+                    "description": (
+                        "Playwright action. 'click' is never auto-retried on "
+                        "Timeout (Cisco WebUI Apply fires via XHR — a retry "
+                        "would be a duplicate router write)."
+                    ),
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": (
+                        "APPROVED action_id from the approval gate. Required; "
+                        "the dispatcher refuses without it."
+                    ),
+                },
+                "value": {
+                    "type": "string",
+                    "description": ("Value for fill/select; ignored for click/hover/check."),
+                },
+            },
+            "required": ["session_id", "view_id", "eid", "action", "action_id"],
+        },
+    },
 ]
 
 
@@ -594,6 +655,8 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     # Same caveat: not user-facing until Phase 5 wires the planner.
     "webui_describe_page": webui_describe_page,
     "webui_verify": webui_verify,
+    # Phase 4 slice 2 (commit 2) — the HITL-gated generic write tool.
+    "webui_act": webui_act,
 }
 
 

@@ -357,6 +357,249 @@ def test_webui_open_continues_when_pre_snapshot_raises():
     assert "error" not in result
 
 
+# ---------------------------------------------------------------------------
+# webui_act (Phase 4 slice 2 commit 2) — HITL-gated write tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _act_patches():
+    """Stack the four patches webui_act needs.
+
+    is_approved → True by default; tests override per-case.
+    mark_failed / pool / get_settings → no-op MagicMocks the tests can
+    assert against.
+    """
+    with (
+        patch("backend.webui_agent.generic_driver.is_approved") as mock_approved,
+        patch("backend.webui_agent.generic_driver.mark_failed") as mock_failed,
+        patch("backend.webui_agent.generic_driver.pool") as mock_pool,
+        patch("backend.webui_agent.generic_driver.get_settings") as mock_settings,
+    ):
+        mock_approved.return_value = True
+        fake_settings = MagicMock()
+        fake_settings.router_host = "192.168.10.1"
+        fake_settings.router_ssh_user = "cisco"
+        mock_settings.return_value = fake_settings
+        yield {
+            "is_approved": mock_approved,
+            "mark_failed": mock_failed,
+            "pool": mock_pool,
+            "settings": mock_settings,
+        }
+
+
+def _act_session(act_reply: dict) -> MagicMock:
+    sess = _make_fake_session()
+    sess.send.return_value = act_reply
+    return sess
+
+
+def test_webui_act_happy_path(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act
+
+    fake_view = {"view_id": "post123", "elements": []}
+    sess = _act_session({"ok": True, "view": fake_view, "attempts": 0})
+    generic_driver._sessions["sess_A"] = sess
+
+    result = webui_act(
+        session_id="sess_A",
+        view_id="pre123",
+        eid="e_001",
+        action="click",
+        action_id="act_X",
+    )
+
+    sess.send.assert_called_once_with(
+        {
+            "op": "act",
+            "view_id": "pre123",
+            "eid": "e_001",
+            "action": "click",
+            "value": None,
+        }
+    )
+    assert result["ok"] is True
+    assert result["view"]["view_id"] == "post123"
+    # Pool invalidated so next CLI tool sees a fresh SSH connection.
+    _act_patches["pool"].invalidate.assert_called_once_with("192.168.10.1", "cisco")
+    # NOT marked failed (happy path).
+    _act_patches["mark_failed"].assert_not_called()
+
+
+def test_webui_act_refuses_without_approval(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act
+
+    _act_patches["is_approved"].return_value = False
+    sess = _act_session({"ok": True, "view": {}})
+    generic_driver._sessions["sess_B"] = sess
+
+    result = webui_act(
+        session_id="sess_B",
+        view_id="v",
+        eid="e_001",
+        action="click",
+        action_id="act_unapproved",
+    )
+
+    assert result["error"] == "not_approved"
+    # Sub-process was NEVER asked to act.
+    sess.send.assert_not_called()
+    # mark_failed should NOT fire on a HITL refusal (state unchanged).
+    _act_patches["mark_failed"].assert_not_called()
+    _act_patches["pool"].invalidate.assert_not_called()
+
+
+def test_webui_act_surfaces_stale_view_without_mark_failed(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act
+
+    sess = _act_session(
+        {
+            "ok": False,
+            "failure_reason": "stale_view",
+            "view": {"view_id": "fresh"},
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_C"] = sess
+
+    result = webui_act(
+        session_id="sess_C",
+        view_id="old",
+        eid="e_001",
+        action="click",
+        action_id="act_X",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == "stale_view"
+    # Soft failure — action stays retryable.
+    _act_patches["mark_failed"].assert_not_called()
+    _act_patches["pool"].invalidate.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        "element_missing",
+        "element_hidden",
+        "element_disabled",
+        "element_intercepted",
+        "click_timeout_unsafe_retry",
+        "unknown_eid",
+    ],
+)
+def test_webui_act_surfaces_soft_failures(_act_patches, failure_reason):
+    from backend.webui_agent.generic_driver import webui_act
+
+    sess = _act_session(
+        {
+            "ok": False,
+            "failure_reason": failure_reason,
+            "view": {"view_id": "v"},
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_D"] = sess
+
+    result = webui_act(
+        session_id="sess_D",
+        view_id="v",
+        eid="e_001",
+        action="click",
+        action_id="act_X",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == failure_reason
+    # All soft failures preserve action state for planner retry.
+    _act_patches["mark_failed"].assert_not_called()
+    _act_patches["pool"].invalidate.assert_not_called()
+
+
+def test_webui_act_marks_failed_on_subprocess_error(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act
+
+    sess = _make_fake_session()
+    sess.send.side_effect = SubprocessFlowError(
+        flow="webui_session",
+        error="timed out after 30.0s",
+        exc_type="Timeout",
+        stderr="",
+    )
+    generic_driver._sessions["sess_E"] = sess
+
+    result = webui_act(
+        session_id="sess_E",
+        view_id="v",
+        eid="e_001",
+        action="click",
+        action_id="act_crash",
+    )
+
+    assert result["error"] == "webui_act_failed"
+    assert result["exc_type"] == "Timeout"
+    # Subprocess crash IS a hard failure — state must transition.
+    _act_patches["mark_failed"].assert_called_once_with("act_crash")
+    # Failed session removed so next call rebuilds clean.
+    assert "sess_E" not in generic_driver._sessions
+
+
+def test_webui_act_session_not_found_marks_failed(_act_patches):
+    from backend.webui_agent.generic_driver import webui_act
+
+    # _sessions empty — session_id never seen by webui_open.
+
+    result = webui_act(
+        session_id="nonexistent",
+        view_id="v",
+        eid="e_001",
+        action="click",
+        action_id="act_no_session",
+    )
+
+    assert result["error"] == "session_not_found"
+    # No session = unrecoverable; hard failure.
+    _act_patches["mark_failed"].assert_called_once_with("act_no_session")
+
+
+def test_webui_act_multi_act_does_not_self_lockout(_act_patches):
+    """Two acts with the same action_id must both pass HITL.
+
+    Regression guard for the Phase 4 design-critique concern: if a future
+    refactor calls mark_executed inside webui_act, the second act in a
+    multi-act flow would see state == EXECUTED and be refused. Slice 2
+    deliberately does NOT call mark_executed (Phase 5 owns it).
+    """
+    from backend.webui_agent.generic_driver import webui_act
+
+    sess = _act_session({"ok": True, "view": {"view_id": "v"}, "attempts": 0})
+    generic_driver._sessions["sess_F"] = sess
+
+    # Act 1
+    r1 = webui_act(
+        session_id="sess_F",
+        view_id="v",
+        eid="e_001",
+        action="click",
+        action_id="act_multi",
+    )
+    # Act 2 — same action_id
+    r2 = webui_act(
+        session_id="sess_F",
+        view_id="v",
+        eid="e_002",
+        action="fill",
+        action_id="act_multi",
+        value="LAB-R5",
+    )
+
+    assert r1["ok"] is True
+    assert r2["ok"] is True
+    # is_approved called for BOTH acts — neither was self-blocked.
+    assert _act_patches["is_approved"].call_count == 2
+
+
 def test_close_all_sessions_closes_every_cached_session():
     sess_a = _make_fake_session()
     sess_b = _make_fake_session()
