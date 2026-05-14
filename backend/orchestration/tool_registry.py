@@ -35,6 +35,7 @@ from backend.orchestration.confirmations import (
 )
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
+from backend.webui_agent.generic_driver import webui_open
 
 # Maximum length of a search_docs query. Caps the embedding cost — a 10 MB
 # query embedded through MiniLM is several seconds of CPU per call, easy
@@ -373,6 +374,42 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["vlan_id", "vlan_name", "action_id"],
         },
     },
+    {
+        "name": "webui_open",
+        "description": (
+            "Phase 4 slice 1 of the AI-driven WebUI driver — DO NOT call "
+            "this directly yet. The full toolkit (act / describe_page / "
+            "verify / propose_webui_configure) arrives in slice 2 + Phase "
+            "5. Calling webui_open alone yields a semantic-DOM view of the "
+            "page but no way to act on it; for hostname / VLAN / interface "
+            "changes use the existing propose_webui_set_hostname / "
+            "propose_webui_add_access_vlan fast paths instead.\n\n"
+            "When wired (Phase 5): navigates the Cisco WebUI to a path and "
+            "returns {view, session_id}. Read-only (no router write)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Cisco WebUI URL path (e.g. '/webui/#/general' for "
+                        "the General page). Hash-fragment routing skips the "
+                        "sidebar navigation walk."
+                    ),
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": (
+                        "Planner-turn key. Reuses an existing live session "
+                        "if one is cached under this id. Auto-allocated if "
+                        "omitted."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
 ]
 
 
@@ -500,6 +537,11 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "webui_set_hostname": change_hostname_via_webui,
     "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,
     "webui_add_access_vlan": add_access_vlan_via_webui,
+    # Phase 4 slice 1 — generic AI-driven driver. Schema is in TOOL_SCHEMAS
+    # below but the description tells Claude to skip it until the full
+    # toolkit (act / describe_page / verify / propose_webui_configure)
+    # lands in slice 2 + Phase 5. Callable via execute_tool() for tests.
+    "webui_open": webui_open,
 }
 
 

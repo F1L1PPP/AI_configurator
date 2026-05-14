@@ -14,23 +14,50 @@ thread is part of a FastAPI process, no single asyncio policy lets
 Playwright start up cleanly.
 
 The cleanest fix is to give Playwright its own fresh Python process.
-This module is that process. It reads a small JSON payload on stdin,
-runs ONLY the Playwright steps for a single flow (no `_guard`, no
-state mutation, no Netmiko — those stay in the parent), and writes
-the result back on stdout.
+This module is that process. It supports TWO entry shapes:
 
-Invocation (from the parent):
+1. **One-shot mode** (existing, used by `flows/change_hostname.py` and
+   `flows/add_access_vlan.py`): the parent passes `{"flow": "<name>",
+   "args": {...}}` on stdin, the child runs that one flow and exits.
+   Used for the hand-coded fast paths.
+
+2. **Session mode** (Phase 4): the parent passes
+   `{"mode": "session", "action_id": "...", "headless": null}` on stdin
+   followed by additional JSON-line ops (`open` / `describe` / `verify`
+   / `act` / `shutdown`). The child logs in once and stays alive across
+   ops, holding the Playwright Page + the latest `describe_page`
+   locator_map in local memory. Used by the AI-driven generic driver in
+   `generic_driver.py`. Lifetime = one planner turn; 120 s watchdog
+   backstop via the parent.
+
+Invocation (one-shot):
     proc = subprocess.run(
         [sys.executable, "-m", "backend.webui_agent._playwright_subprocess"],
         input=json.dumps({"flow": "add_access_vlan", "args": {...}}),
         capture_output=True, text=True, timeout=...
     )
 
-Protocol:
+Invocation (session):
+    proc = subprocess.Popen([sys.executable, "-m", "backend.webui_agent._playwright_subprocess"],
+                            stdin=PIPE, stdout=PIPE, stderr=DEVNULL, text=True, bufsize=1)
+    proc.stdin.write(json.dumps({"mode": "session", "action_id": ...}) + "\n")
+    proc.stdin.flush()
+    ready = json.loads(proc.stdout.readline())  # {"ok": true, "ready": true, ...}
+    # then per-op:
+    proc.stdin.write(json.dumps({"op": "open", "path": "/webui/#/general"}) + "\n")
+    proc.stdin.flush()
+    reply = json.loads(proc.stdout.readline())
+
+Protocol (one-shot):
   - stdin:  `{"flow": "<name>", "args": {<kwargs>}}`
   - stdout: `{"ok": true,  "result": {...}}` on success
             `{"ok": false, "error": "<msg>", "exc_type": "<name>"}` on failure
             (also exit code 1 on failure, traceback on stderr).
+
+Protocol (session): JSON-line on stdin, JSON-line replies on stdout, one
+reply per op. Each reply is `{"ok": bool, ...}` with op-specific fields.
+The child writes to stdout flushed after every reply so the parent's
+blocking `readline()` returns immediately.
 
 The parent does pre-snapshot, post-snapshot, CLI verify, state
 transitions, and pool invalidation. Splitting the responsibilities
@@ -161,6 +188,167 @@ _DISPATCH: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Session mode (Phase 4) — long-lived loop for AI-driven WebUI configuration.
+# ---------------------------------------------------------------------------
+
+
+def _reply(payload: dict[str, Any]) -> None:
+    """Write one JSON-line reply on stdout, flushed.
+
+    Flushing matters: the parent does a blocking `readline()`; without
+    flush the reply can sit in the OS pipe buffer indefinitely. On
+    Windows specifically (Python bug #34504) this would deadlock.
+    """
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def _run_session_loop(init_payload: dict[str, Any]) -> None:
+    """Phase 4 long-lived session: log in once, handle ops until shutdown.
+
+    Recognised ops:
+      - `open(path)`           — navigate + describe; returns view
+      - `describe`             — fresh describe of the current page
+      - `verify(text)`         — text-presence check, read-only
+      - `act` / `act_by_intent` — placeholder in slice 1, returns NotImplemented
+      - `shutdown`             — clean exit
+
+    All replies are `{"ok": bool, ...}` JSON lines. On the FIRST line
+    after a successful login the child emits `{"ok": true, "ready": true,
+    "evidence_dir": "..."}` — the parent must read this before issuing
+    any op (handshake).
+    """
+    # Lazy imports — keep cold start cheap and the one-shot path unaffected.
+    from backend.webui_agent.browser import webui_browser
+    from backend.webui_agent.evidence import EvidenceCollector
+    from backend.webui_agent.login import login
+    from backend.webui_agent.semantic_dom import describe_page
+
+    action_id = str(init_payload.get("action_id") or "session")
+    headless = init_payload.get("headless")
+
+    ev = EvidenceCollector("generic_session", action_id=action_id)
+    # locator_map is rebuilt on every describe; held child-side only.
+    # Phase 4 slice 2 will also track `current_view_id` to reject stale eids.
+    locator_map: dict[str, Any] = {}
+
+    try:
+        with webui_browser(headless=headless) as page:
+            if not login(page):
+                ev.dump_dom(page, "99-login-failed")
+                _reply(
+                    {
+                        "ok": False,
+                        "error": "WebUI login failed",
+                        "exc_type": "RuntimeError",
+                    }
+                )
+                return
+            ev.step("00-logged-in", page)
+
+            # Handshake — parent blocks on this readline before sending ops.
+            _reply(
+                {
+                    "ok": True,
+                    "ready": True,
+                    "evidence_dir": str(ev.session_dir),
+                }
+            )
+
+            while True:
+                line = sys.stdin.readline()
+                if not line:  # EOF — parent closed stdin
+                    return
+
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    _reply(
+                        {
+                            "ok": False,
+                            "error": f"invalid JSON message: {exc!s}",
+                            "exc_type": "JSONDecodeError",
+                        }
+                    )
+                    continue
+
+                op = msg.get("op")
+
+                if op == "shutdown":
+                    _reply({"ok": True, "shutdown": True})
+                    return
+
+                try:
+                    if op == "open":
+                        path = str(msg["path"])
+                        page.goto(path)
+                        # Label uses the path tail so screenshots stay scannable.
+                        label_tail = path.split("/")[-1] or "root"
+                        ev.step(f"goto-{label_tail}", page)
+                        view, locator_map = describe_page(page)
+                        _reply({"ok": True, "view": view})
+
+                    elif op == "describe":
+                        view, locator_map = describe_page(page)
+                        _reply({"ok": True, "view": view})
+
+                    elif op == "verify":
+                        text = str(msg.get("text", ""))
+                        # Use page.content() — full DOM HTML — for substring check.
+                        # The planner can pass a verbose phrase ("VLAN 46 created")
+                        # to look for the success banner.
+                        present = text in page.content()
+                        _reply(
+                            {
+                                "ok": True,
+                                "present": present,
+                                "url": page.url,
+                            }
+                        )
+
+                    elif op in ("act", "act_by_intent"):
+                        _reply(
+                            {
+                                "ok": False,
+                                "error": f"op {op!r} arrives in Phase 4 slice 2",
+                                "exc_type": "NotImplementedError",
+                            }
+                        )
+
+                    else:
+                        _reply(
+                            {
+                                "ok": False,
+                                "error": f"unknown op {op!r}",
+                                "exc_type": "ValueError",
+                            }
+                        )
+
+                except Exception as exc:  # noqa: BLE001
+                    # Dump DOM for forensics, then surface to parent.
+                    with contextlib.suppress(Exception):
+                        ev.dump_dom(page, f"99-error-{op or 'unknown'}")
+                    _reply(
+                        {
+                            "ok": False,
+                            "error": str(exc) or repr(exc),
+                            "exc_type": type(exc).__name__,
+                        }
+                    )
+
+    except Exception as exc:  # noqa: BLE001
+        # Top-level failure: browser launch crashed, login imploded, etc.
+        traceback.print_exc(file=sys.stderr)
+        _reply(
+            {
+                "ok": False,
+                "error": str(exc) or repr(exc),
+                "exc_type": type(exc).__name__,
+            }
+        )
+
+
 def main() -> None:
     # Configure structlog so log lines from inside the flow land in
     # the same logs/actions.log the parent writes to. Without this,
@@ -173,19 +361,37 @@ def main() -> None:
     configure_logging(log_level=settings.log_level, logs_dir=settings.logs_dir)
 
     try:
-        payload_text = sys.stdin.read()
-        payload = json.loads(payload_text)
-        flow_name = payload["flow"]
-        args = payload.get("args", {})
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        # Bad payload from parent — should never happen in normal use.
-        # Surface a clear error so the parent's RuntimeError message is
-        # actually informative.
+        # readline (not read) so session mode can keep reading more lines
+        # after the initial config. For one-shot the parent passes a single
+        # JSON object with no trailing newline; readline returns it at EOF.
+        first_line = sys.stdin.readline()
+        payload = json.loads(first_line)
+    except (json.JSONDecodeError, TypeError) as exc:
         sys.stdout.write(
             json.dumps(
                 {
                     "ok": False,
                     "error": f"invalid subprocess payload: {exc!s}",
+                    "exc_type": type(exc).__name__,
+                }
+            )
+        )
+        sys.exit(1)
+
+    if payload.get("mode") == "session":
+        _run_session_loop(payload)
+        return
+
+    # ---- One-shot mode (existing path, unchanged semantics) ----
+    try:
+        flow_name = payload["flow"]
+        args = payload.get("args", {})
+    except (KeyError, TypeError) as exc:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"invalid subprocess payload: missing 'flow' ({exc!s})",
                     "exc_type": type(exc).__name__,
                 }
             )
