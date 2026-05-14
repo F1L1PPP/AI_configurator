@@ -6,6 +6,12 @@ import pytest
 
 from backend.webui_agent.selectors import load_selectors
 
+# All tests in this module exercise the WebUI agent layer (Playwright is
+# mocked at the page-object level so no real browser launches). Tagged with
+# the `webui` marker so `pytest -m 'not webui'` skips them during fast
+# iteration on unrelated layers. Review §5 cleanup.
+pytestmark = pytest.mark.webui
+
 
 def test_load_default_map_returns_dict():
     sel = load_selectors()

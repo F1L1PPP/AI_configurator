@@ -26,6 +26,51 @@ asyncio_mode = "auto"
 markers = [
     "slow:        slow tests; deselect with -m 'not slow'",
     "integration: tests that talk to a real router or external service",
-    "webui:       tests that launch a real Chromium browser via Playwright",
+    # `webui` covers both real-browser smoke tests in tests/smoke/scenarios/
+    # AND the Playwright-mocked unit tests in tests/unit/test_webui_*.py.
+    # The grouping exists so a developer iterating on backend/orchestration
+    # or backend/api can run `pytest -m 'not webui'` and skip the noisier
+    # Playwright fixture setup.
+    "webui:       tests for the WebUI-agent layer (mocked Playwright or real browser)",
     "smoke:       end-to-end scenarios for the 6 PROJECT_PLAN.md §2 cases",
 ]
+
+# ---------------------------------------------------------------------------
+# mypy — review §2 HIGH closes the audit-#22 follow-up.
+#
+# Previously CI ran mypy with `|| true`, which surfaced errors in logs but
+# never blocked merges. Effect: type drift accumulated silently across
+# refactors. Now mypy is *gated* in CI for every file EXCEPT the 7 files
+# below that carry known unsoundness (mostly Anthropic SDK union-type
+# narrowing in planner.py — the SDK returns a discriminated union over
+# ~15 block types and we don't narrow before .name/.id access). Each
+# entry in `[[tool.mypy.overrides]]` is a known-issue list — fixes go in
+# as separate PRs and the entry is removed when the file is clean.
+#
+# New code MUST be type-correct from day one. Tests pass mypy too.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["backend"]
+ignore_missing_imports = true
+# Lax defaults — we tighten per-module as files get cleaned up. The point
+# of CI gating today is "don't regress further", not "100% strict".
+allow_untyped_defs = true
+no_strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+show_error_codes = true
+
+# Files with pre-existing errors. Remove from this list (one at a time)
+# as they're cleaned up. Don't add new files here — fix the types instead.
+[[tool.mypy.overrides]]
+module = [
+    "backend.core.logging",
+    "backend.knowledge_agent.ingest",
+    "backend.orchestration.planner",
+    "backend.webui_agent.browser",
+    "backend.webui_agent.pages.hostname_page",
+    "backend.webui_agent.pages.vlan_page",
+    "backend.webui_agent.selectors",
+]
+ignore_errors = true

@@ -7,6 +7,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# All tests in this module exercise the WebUI agent layer (Playwright is
+# mocked at the page-object level so no real browser launches). Tagged with
+# the `webui` marker so `pytest -m 'not webui'` skips them during fast
+# iteration on unrelated layers. Review §5 cleanup.
+pytestmark = pytest.mark.webui
+
 
 @pytest.fixture()
 def _isolated_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

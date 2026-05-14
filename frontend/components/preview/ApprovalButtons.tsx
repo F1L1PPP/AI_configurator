@@ -1,9 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { endpoints } from "@/lib/api";
+import {
+  describeNetworkError,
+  fromResponse,
+  type FriendlyError,
+} from "@/lib/errors";
 
 type BtnState =
   | "idle"
@@ -16,24 +21,58 @@ type BtnState =
 
 interface Props {
   actionId?: string;
-  /** Network timeout in ms for approve/reject. Execute has no timeout
-   *  because WebUI flows can run 20-30s while Playwright drives. */
+  /** Network timeout in ms for approve/reject. Execute uses a separate
+   *  longer cap (`executeTimeoutMs`) because Playwright flows are slow. */
   timeoutMs?: number;
+  /** Hard cap on the EXECUTING state. If the backend doesn't respond by
+   *  this time the UI flips to error so the operator isn't staring at a
+   *  frozen "EXECUTING…" forever. Review §3 HIGH. The fetch keeps
+   *  running — we only flip UI state, so a late success will still log
+   *  to the LiveEventStream + Logs. */
+  executeTimeoutMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_EXECUTE_TIMEOUT_MS = 90_000;
 
 export default function ApprovalButtons({
   actionId,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  executeTimeoutMs = DEFAULT_EXECUTE_TIMEOUT_MS,
 }: Props) {
   const [state, setState] = useState<BtnState>("idle");
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [friendlyError, setFriendlyError] = useState<
+    (FriendlyError & { detail?: string }) | null
+  >(null);
   const [executeResult, setExecuteResult] = useState<unknown>(null);
+  // Sticky "has been approved" flag — separate from `state` which tracks
+  // the LAST OPERATION's transient status. Decoupling these closes a
+  // Copilot-flagged bug: the previous `canExecute` clause
+  // `state === "error" && !!executeResult` only fired after a *successful*
+  // execute (where state is actually "executed", not "error"), so the
+  // EXECUTE NOW button vanished after any real execute failure or the
+  // 90s watchdog timeout — leaving the operator with no way to retry the
+  // exact scenario where retry matters most. Now: once the server has
+  // accepted the approve, this flag stays true until reject/executed.
+  const [hasBeenApproved, setHasBeenApproved] = useState(false);
   // Track an in-flight request so a second click while the first hasn't
   // resolved doesn't fire a duplicate POST. Ref instead of state because
   // we don't want a re-render between click and guard.
   const inFlight = useRef(false);
+  // Hold the EXECUTING-timeout id so we can clear it if the fetch
+  // resolves normally — otherwise the timer would still fire and
+  // overwrite the success state.
+  const executeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup the execute timer on unmount so a navigation away from this
+  // bubble doesn't leave a dangling setState call.
+  useEffect(() => {
+    return () => {
+      if (executeTimerRef.current !== null) {
+        clearTimeout(executeTimerRef.current);
+      }
+    };
+  }, []);
 
   const approveDisabled =
     !actionId ||
@@ -51,14 +90,16 @@ export default function ApprovalButtons({
     state === "executing" ||
     state === "executed";
 
-  // Execute Now button is visible from approval onward — including during
-  // execution (showing "EXECUTING…") and on error (so the user can retry).
-  // Including "executing" in the union keeps TS happy with the label switch.
+  // EXECUTE NOW visibility — sticky to "has been approved", excluding
+  // only the terminal states. Crucially this includes `state === "error"`
+  // so the operator can retry after a tool_failed dispatch, network blip,
+  // or watchdog timeout (the three failure modes that previously left
+  // them stranded).
   const canExecute =
     !!actionId &&
-    (state === "approved" ||
-      state === "executing" ||
-      (state === "error" && !!executeResult));
+    hasBeenApproved &&
+    state !== "rejected" &&
+    state !== "executed";
 
   const post = async (endpoint: "approve" | "reject") => {
     if (!actionId) return;
@@ -74,7 +115,7 @@ export default function ApprovalButtons({
     }
     inFlight.current = true;
     setState("loading");
-    setErrorMsg(null);
+    setFriendlyError(null);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -89,18 +130,18 @@ export default function ApprovalButtons({
         signal: controller.signal,
       });
       if (res.ok) {
-        setState(endpoint === "approve" ? "approved" : "rejected");
+        if (endpoint === "approve") {
+          setHasBeenApproved(true);
+          setState("approved");
+        } else {
+          setState("rejected");
+        }
       } else {
-        const body = await res.text().catch(() => res.statusText);
-        setErrorMsg(body || `HTTP ${res.status}`);
+        setFriendlyError(await fromResponse(res));
         setState("error");
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        setErrorMsg(`Request timed out after ${timeoutMs} ms`);
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : "Network error");
-      }
+      setFriendlyError(describeNetworkError(err));
       setState("error");
     } finally {
       clearTimeout(timeout);
@@ -112,24 +153,49 @@ export default function ApprovalButtons({
     if (!actionId || !canExecute || inFlight.current) return;
     inFlight.current = true;
     setState("executing");
-    setErrorMsg(null);
+    setFriendlyError(null);
     setExecuteResult(null);
 
-    // No AbortController — WebUI flows can take 20-30s while Playwright
-    // drives the browser; we don't want to abort mid-flow.
+    // EXECUTING timeout cap — the previous code parked indefinitely; if
+    // Playwright hung or SSH stalled the button showed "EXECUTING…"
+    // forever. Now we flip to error after executeTimeoutMs so the
+    // operator sees a clear failure state and can go check logs/. We
+    // do NOT abort the underlying fetch — a late success still
+    // mark_executed's the action server-side; we just stop blocking
+    // the UI on a request we've given up on.
+    executeTimerRef.current = setTimeout(() => {
+      setFriendlyError({
+        title: "Execution timed out",
+        hint: `No response from the backend after ${Math.round(
+          executeTimeoutMs / 1000,
+        )}s. Open the WebUI Live tab or check the most recent logs/ entries. The action may still be running on the router — verify with \`show running-config\` before retrying.`,
+      });
+      setState("error");
+      inFlight.current = false;
+    }, executeTimeoutMs);
+
     try {
       const res = await fetch(endpoints.execute(actionId), { method: "POST" });
+      // The fetch resolved — drop the watchdog timer so the timeout
+      // doesn't fire and overwrite the result we're about to render.
+      if (executeTimerRef.current !== null) {
+        clearTimeout(executeTimerRef.current);
+        executeTimerRef.current = null;
+      }
       if (res.ok) {
         const body = await res.json();
         setExecuteResult(body);
         setState("executed");
       } else {
-        const body = await res.text().catch(() => res.statusText);
-        setErrorMsg(body || `HTTP ${res.status}`);
+        setFriendlyError(await fromResponse(res));
         setState("error");
       }
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Network error");
+      if (executeTimerRef.current !== null) {
+        clearTimeout(executeTimerRef.current);
+        executeTimerRef.current = null;
+      }
+      setFriendlyError(describeNetworkError(err));
       setState("error");
     } finally {
       inFlight.current = false;
@@ -172,7 +238,8 @@ export default function ApprovalButtons({
       {state === "executing" && (
         <p className="mono text-[8px] tracking-wider text-ink-faint">
           Backend is running the tool. WebUI flows open a Chromium window;
-          watch the live event stream below for progress.
+          watch the live event stream below for progress. Auto-cancels after{" "}
+          {Math.round(executeTimeoutMs / 1000)}s.
         </p>
       )}
 
@@ -198,10 +265,23 @@ export default function ApprovalButtons({
         </div>
       )}
 
-      {state === "error" && errorMsg && (
-        <p className="mono text-[8px] tracking-wider text-terminal-red">
-          ERROR: {errorMsg}
-        </p>
+      {state === "error" && friendlyError && (
+        <div className="border border-terminal-red bg-surface p-2">
+          <p className="mono text-[9px] font-semibold tracking-wider text-terminal-red">
+            ✗ {friendlyError.title.toUpperCase()}
+          </p>
+          <p className="mono mt-1 text-[9px] leading-relaxed text-ink-muted">
+            {friendlyError.hint}
+          </p>
+          {friendlyError.detail && (
+            <details className="mono mt-1 text-[8px] text-ink-faint">
+              <summary className="cursor-pointer tracking-wider">DETAIL</summary>
+              <pre className="mt-1 whitespace-pre-wrap break-words">
+                {friendlyError.detail}
+              </pre>
+            </details>
+          )}
+        </div>
       )}
 
       {!actionId && (

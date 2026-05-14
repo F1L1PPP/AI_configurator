@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from backend.webui_agent.verify import verify_hostname, verify_vlan_exists
+
+# All tests in this module exercise the WebUI agent layer (Playwright is
+# mocked at the page-object level so no real browser launches). Tagged with
+# the `webui` marker so `pytest -m 'not webui'` skips them during fast
+# iteration on unrelated layers. Review §5 cleanup.
+pytestmark = pytest.mark.webui
 
 # ---------------------------------------------------------------------------
 # verify_hostname

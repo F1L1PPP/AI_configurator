@@ -28,11 +28,13 @@ jobs:
       - name: Format check (ruff format --check)
         run: ruff format --check .
 
-      # mypy is run in permissive mode for now — the codebase has heavy
-      # type hints but they've never been gated by CI, so we accept warnings
-      # as we tighten. Audit #22.
+      # mypy is *gated* — it must pass for the PR to merge. The set of
+      # known-bad files is configured in pyproject.toml under
+      # [[tool.mypy.overrides]] ignore_errors=true. New code in any
+      # other file is type-checked. Fix-then-remove-from-overrides is
+      # the migration path. Audit #22 follow-up.
       - name: Type check (mypy)
-        run: mypy backend/ --ignore-missing-imports --no-strict-optional --allow-untyped-defs --no-error-summary || true
+        run: mypy
 
       - name: Test (pytest)
         run: pytest -q
@@ -57,5 +59,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build (also runs TypeScript type-check)
+      # Explicit type check separate from build — fails faster on type
+      # errors and gates merges without needing to wait for the full
+      # Next.js build. Review §2 HIGH follow-up.
+      - name: Type check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Build (Next.js)
         run: npm run build

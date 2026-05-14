@@ -57,6 +57,14 @@ def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) ->
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
+        # Render exc_info=True into a real `exception` field with the full
+        # traceback as a string. Without this processor, exc_info appears
+        # as the literal bool `true` in the JSON log — the calling site
+        # captured the exception but the formatter dropped it on the floor.
+        # Diagnosed during the Windows + Playwright NotImplementedError
+        # hunt — we couldn't see WHERE in the stack the failure happened
+        # until tracebacks were rendered.
+        structlog.processors.format_exc_info,
         redact_secrets,
     ]
 
