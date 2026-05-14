@@ -137,12 +137,21 @@ each URL above; if it 404s, search for the exact doc title in
 update this file with the working URL + the date you verified it. Update the
 record below as you go:
 
-| # | Doc | URL verified working as of | Local path after download |
+| # | Doc | Status | Local path |
 |---|---|---|---|
-| 1 | C1111 Software Config Guide IOS XE 17.x | — | `knowledge_base/docs/01_c1111_software_config.pdf` |
-| 2 | IOS XE 17.x Layer 2 Config Guide | — | `knowledge_base/docs/02_iosxe_l2_config.pdf` |
-| 3 | IOS XE WebUI User Guide 17.x | — | `knowledge_base/docs/03_iosxe_webui_user_guide.pdf` |
-| 4 | IOS XE 17.x Command Ref — Basic System Mgmt | — | `knowledge_base/docs/04_cmdref_basic_system.pdf` |
-| 5 | IOS XE 17.x Command Ref — Interface | — | `knowledge_base/docs/05_cmdref_interface.pdf` |
-| 6 | IOS XE 17.x Command Ref — LAN Switching | — | `knowledge_base/docs/06_cmdref_lan_switching.pdf` |
-| 7 | (optional) C1100 Series Data Sheet | — | `knowledge_base/docs/07_c1100_data_sheet.pdf` |
+| 1 | ISR 1100 Software Configuration Guide (IOS XE 17.x) | ✅ ingested | `knowledge_base/docs/isr1100-sw-config.pdf` (8.8 MB) |
+| 2 | Cisco 1000 Series Hardware Installation Guide | ✅ ingested | `knowledge_base/docs/b-cisco-1100-series-hig.pdf` (14 MB) |
+| 3 | Cisco IOS XE Web UI User Guide | ✅ ingested 2026-05-14 | `knowledge_base/docs/cisco_guide_for_the_web_ui.pdf` (4 MB) |
+| 4 | IOS XE Layer 2 Config Guide (VLAN chapter) | pending | — |
+| 5 | IOS XE Command Ref — Interface and Hardware | pending | — |
+| 6 | IOS XE Command Ref — LAN Switching | pending | — |
+| 7 | (optional) C1100 Series Data Sheet | pending | — |
+
+**Corpus state after #3 ingest (2026-05-14):**
+913 chunks, 227 865 tokens, persisted in `knowledge_base/vectorstore/cisco_docs`.
+Spot-check retrievals confirmed:
+- "how do I create an OSPF route in the WebUI" → top hit is `cisco_guide_for_the_web_ui.pdf — Configuring OSPF Routing` (cosine 0.564)
+- "configure interface IP address VLAN" → `cisco_guide_for_the_web_ui.pdf — Configuring VLANs` + `Configuring Sub Interfaces`
+
+This unblocks Workstream 2 (generic AI-driven WebUI navigation) from the
+next-phase plan.
