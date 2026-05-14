@@ -32,6 +32,12 @@ copy .env.example .env
 cd frontend
 npm install
 cd ..
+
+# First-time SSH host-key acceptance for the lab router. Netmiko refuses
+# unknown hosts; this seeds known_hosts so the backend can connect.
+ssh -o StrictHostKeyChecking=accept-new <ROUTER_HOST_FROM_DOTENV>
+# (You'll see the lab router login prompt — type Ctrl-C, the host key is
+#  already saved.)
 ```
 
 ## Run (development)
@@ -51,7 +57,27 @@ npm run dev
 ```powershell
 .venv\Scripts\Activate.ps1
 ruff check .
+mypy                 # gated in CI — pyproject.toml [tool.mypy]
 pytest -q
+pytest -m "not webui" -q   # fast iteration; skips WebUI-agent layer
+```
+
+## Debug / Operations helpers
+
+A few one-shot CLI tools live in `tools/` for poking at the running system.
+
+```powershell
+# Show ChromaDB collection size + sample chunks
+python tools/check_vectorstore.py
+
+# Interactive RAG search ("does the agent find the right doc for X?")
+python tools/query_rag.py "how do I configure OSPF"
+```
+
+End-of-day rollup (lint + test + commit + push + annotated backup tag):
+
+```powershell
+scripts\checkpoint.ps1
 ```
 
 ## Project structure
