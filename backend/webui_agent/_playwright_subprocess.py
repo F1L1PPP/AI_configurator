@@ -204,6 +204,40 @@ def _reply(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def _resolve_target_url(page: Any, raw_path: str) -> str:
+    """Turn a relative path (e.g. ``/webui/#/general``) into an absolute URL.
+
+    Playwright's ``page.goto`` requires an absolute URL. The existing
+    HostnamePage / VlanPage do this by splitting ``page.url`` on
+    ``/webui/`` and prepending the base. Mirror that here so the
+    session-mode ``open`` op accepts both absolute and relative inputs.
+
+    If ``raw_path`` already has a scheme, return it unchanged. Otherwise
+    derive ``scheme://host`` from the current page URL.
+    """
+    if raw_path.startswith(("http://", "https://")):
+        return raw_path
+
+    current = page.url or ""
+    # Preferred path: split on /webui/ like the existing pages do.
+    if "/webui/" in current:
+        base = current.split("/webui/")[0]
+        return f"{base}{raw_path}"
+
+    # Fallback: derive scheme+host from page.url via urllib.
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    parsed = urlparse(current)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}{raw_path}"
+
+    # Last resort: load the base URL from settings.
+    from backend.core.settings import get_settings  # noqa: PLC0415
+
+    base = get_settings().router_webui_base_url.rstrip("/")
+    return f"{base}{raw_path}"
+
+
 def _relogin_if_needed(page: Any) -> None:
     """Re-run WebUI login if the page has dropped back to the login screen.
 
@@ -676,10 +710,13 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                     _relogin_if_needed(page)
 
                     if op == "open":
-                        path = str(msg["path"])
-                        page.goto(path)
+                        raw_path = str(msg["path"])
+                        target = _resolve_target_url(page, raw_path)
+                        # wait_until="domcontentloaded" so we don't time out on
+                        # third-party network calls; Angular renders after.
+                        page.goto(target, wait_until="domcontentloaded", timeout=20_000)
                         # Label uses the path tail so screenshots stay scannable.
-                        label_tail = path.split("/")[-1] or "root"
+                        label_tail = raw_path.split("/")[-1] or "root"
                         ev.step(f"goto-{label_tail}", page)
                         view, locator_map = describe_page(page)
                         current_view_id = view["view_id"]
