@@ -156,5 +156,7 @@ def add_access_vlan_via_webui(
             "add_access_vlan_via_webui_failed",
             action_id=action_id,
             error=str(exc),
+            exc_type=type(exc).__name__,
+            exc_info=True,
         )
         raise
