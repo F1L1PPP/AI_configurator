@@ -45,6 +45,16 @@ export default function ApprovalButtons({
     (FriendlyError & { detail?: string }) | null
   >(null);
   const [executeResult, setExecuteResult] = useState<unknown>(null);
+  // Sticky "has been approved" flag — separate from `state` which tracks
+  // the LAST OPERATION's transient status. Decoupling these closes a
+  // Copilot-flagged bug: the previous `canExecute` clause
+  // `state === "error" && !!executeResult` only fired after a *successful*
+  // execute (where state is actually "executed", not "error"), so the
+  // EXECUTE NOW button vanished after any real execute failure or the
+  // 90s watchdog timeout — leaving the operator with no way to retry the
+  // exact scenario where retry matters most. Now: once the server has
+  // accepted the approve, this flag stays true until reject/executed.
+  const [hasBeenApproved, setHasBeenApproved] = useState(false);
   // Track an in-flight request so a second click while the first hasn't
   // resolved doesn't fire a duplicate POST. Ref instead of state because
   // we don't want a re-render between click and guard.
@@ -80,11 +90,16 @@ export default function ApprovalButtons({
     state === "executing" ||
     state === "executed";
 
+  // EXECUTE NOW visibility — sticky to "has been approved", excluding
+  // only the terminal states. Crucially this includes `state === "error"`
+  // so the operator can retry after a tool_failed dispatch, network blip,
+  // or watchdog timeout (the three failure modes that previously left
+  // them stranded).
   const canExecute =
     !!actionId &&
-    (state === "approved" ||
-      state === "executing" ||
-      (state === "error" && !!executeResult));
+    hasBeenApproved &&
+    state !== "rejected" &&
+    state !== "executed";
 
   const post = async (endpoint: "approve" | "reject") => {
     if (!actionId) return;
@@ -115,7 +130,12 @@ export default function ApprovalButtons({
         signal: controller.signal,
       });
       if (res.ok) {
-        setState(endpoint === "approve" ? "approved" : "rejected");
+        if (endpoint === "approve") {
+          setHasBeenApproved(true);
+          setState("approved");
+        } else {
+          setState("rejected");
+        }
       } else {
         setFriendlyError(await fromResponse(res));
         setState("error");
