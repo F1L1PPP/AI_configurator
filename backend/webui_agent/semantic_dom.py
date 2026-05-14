@@ -11,6 +11,7 @@ worst case 30 textboxes with max-length labels + value/required ≈ 1400
 tokens — still under 1% of Haiku 4.5's input window and ~$0.001 per call.
 
     {
+      "view_id": "a3f9b2e1",   # 8-hex per-call id; see "Eid staleness" below
       "url": str,
       "title": str,
       "elements": [
@@ -38,6 +39,14 @@ Phase 4. The map is NOT cached on the Page or globally — it is scoped
 to the calling subprocess invocation, since Playwright Locators don't
 cross the subprocess boundary.
 
+**Eid staleness**: `eid` strings (`e_001`, `e_002`, ...) are positional in
+the score-sorted candidate list — they are NOT stable across describe
+calls. A re-describe (e.g. after a navigation or self-heal) renumbers
+every element. To detect a stale planner reference, every view carries
+a random `view_id` (8 hex chars). Phase 4's `webui_act(view_id, eid, …)`
+must reject when the supplied view_id is not the most recent — forcing
+the planner to re-describe before acting.
+
 Known limitation: iframes are not walked. The Cisco IOS XE 17.x WebUI is
 single-frame Angular (verified by grep at v0.4.0 phase 3 lands). If a
 future device introduces iframes, describe_page silently omits elements
@@ -51,6 +60,7 @@ no point describing the page in the parent and acting in the child.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from backend.core.logging import get_logger
@@ -214,7 +224,13 @@ def describe_page(
     # Errors are name-only — they're informational and not addressable. No eid.
     errors_out = [{"name": c["name"]} for c in error_candidates if c["name"]]
 
+    # view_id is a per-call cookie so Phase 4's webui_act can reject stale eid
+    # references (eids renumber on every describe). 8 hex chars from uuid4
+    # give ~4 billion permutations — plenty for the lifetime of one session.
+    view_id = uuid.uuid4().hex[:8]
+
     view: dict[str, Any] = {
+        "view_id": view_id,
         "url": url,
         "title": title,
         "elements": elements_out,
@@ -224,6 +240,7 @@ def describe_page(
 
     log.debug(
         "describe_page_complete",
+        view_id=view_id,
         url=url,
         elements=len(elements_out),
         modals=len(modals_out),

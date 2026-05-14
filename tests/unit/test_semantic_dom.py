@@ -103,6 +103,29 @@ def test_empty_page_returns_empty_arrays():
     assert locator_map == {}
 
 
+def test_view_id_present_and_eight_hex_chars():
+    page = _make_page(locators=[_make_locator(tag="BUTTON", text="Add")])
+
+    view, _ = describe_page(page)
+
+    view_id = view["view_id"]
+    assert isinstance(view_id, str)
+    assert len(view_id) == 8
+    # 8-hex from uuid4().hex[:8] — accept any lowercase hex digit.
+    assert all(c in "0123456789abcdef" for c in view_id)
+
+
+def test_view_id_differs_between_calls():
+    # Two describes of the same page must produce different view_ids so the
+    # webui_act gate in Phase 4 can detect a stale planner reference.
+    page = _make_page(locators=[_make_locator(tag="BUTTON", text="Add")])
+
+    view1, _ = describe_page(page)
+    view2, _ = describe_page(page)
+
+    assert view1["view_id"] != view2["view_id"]
+
+
 # ---------------------------------------------------------------------------
 # Role classification
 # ---------------------------------------------------------------------------
