@@ -16,6 +16,8 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -641,11 +643,41 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     }
 
 
-def _webui_configure(**kwargs: Any) -> dict:
-    """Execute a previously-approved webui_configure plan.
+# Max iterations of the multi-propose loop inside _webui_configure. Failed
+# batches count against this budget so failure-recovery stays bounded.
+# Bumping this means trusting the inner LLM to converge on more pages — keep
+# tight until real flows demand more.
+_WEBUI_CONFIGURE_MAX_ITER = 4
 
-    Iterates each step via webui_act_by_intent, screenshots, optional final
-    verify, then mark_executed.
+
+def _plan_hash(plan: list[dict[str, Any]]) -> str:
+    """Stable hash of a plan for "same plan twice in a row" detection.
+
+    Canonical JSON (sort_keys) so dict key order doesn't fool the equality
+    check. SHA-1 is fine here — we're comparing local strings, not signing
+    anything.
+    """
+    return hashlib.sha1(json.dumps(plan, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _act_ok(result: dict[str, Any]) -> bool:
+    """A webui_act_by_intent result is considered successful when it has
+    ``ok: True`` and no ``error`` key. Mirrors the original Phase 5 check."""
+    return result.get("ok") is True and "error" not in result
+
+
+def _webui_configure(**kwargs: Any) -> dict:
+    """Execute a previously-approved webui_configure plan with multi-propose.
+
+    After each batch of steps executes, the page is re-described and the
+    inner Haiku is re-invoked with the full execution history. The loop
+    continues until ``webui_verify`` returns ``present=True`` OR one of three
+    hard-stops fires: iteration cap, inner LLM returns empty plan, or inner
+    LLM returns the same plan twice in a row (no progress).
+
+    Failed Playwright steps are NOT terminal — the failure is recorded in
+    ``previous_steps`` and the inner LLM gets a chance to adapt on the next
+    iteration. Only the hard-stops bail with ``mark_failed``.
     """
     from backend.orchestration.confirmations import get_action, mark_executed, mark_failed
 
@@ -666,66 +698,236 @@ def _webui_configure(**kwargs: Any) -> dict:
     plan = params.get("plan", [])
     verify_text = params.get("verify_text")
     session_id = params.get("session_id")
+    intent = params.get("intent", "")
+    rag_chunks = [
+        {"text": "", "source": e.get("source"), "section": e.get("section")}
+        for e in params.get("evidence", [])
+    ]
 
     if not plan or not session_id:
         mark_failed(action_id)
         return {"error": "bad_action_params", "message": "action missing plan or session_id"}
 
-    # Iterate steps
-    step_results = []
-    for idx, step in enumerate(plan):
-        intent_dict = {
-            "role": step.get("intent", {}).get("role", ""),
-            "name": step.get("intent", {}).get("name", ""),
-            "action": step.get("action", "click"),
-            "value": step.get("value"),
-        }
-        step_result = webui_act_by_intent(
-            session_id=session_id,
-            intent=intent_dict,
-            action_id=action_id,
-        )
-        step_results.append({"step_index": idx, "intent": step["intent"], "result": step_result})
+    executed_steps: list[dict[str, Any]] = []
+    iteration = 0
+    last_plan_hash: str | None = _plan_hash(plan)
 
-        if "error" in step_result or not step_result.get("ok"):
-            mark_failed(action_id)
-            log.error(
-                "webui_configure_step_failed",
+    while True:
+        iteration += 1
+        log.info(
+            "webui_configure_iteration_started",
+            action_id=action_id,
+            iteration=iteration,
+            prev_steps_count=len(executed_steps),
+            step_count=len(plan),
+        )
+        batch_had_failure = False
+        last_failure: dict[str, Any] | None = None
+
+        for idx, step in enumerate(plan):
+            intent_dict = {
+                "role": step.get("intent", {}).get("role", ""),
+                "name": step.get("intent", {}).get("name", ""),
+                "action": step.get("action", "click"),
+                "value": step.get("value"),
+            }
+            step_result = webui_act_by_intent(
+                session_id=session_id,
+                intent=intent_dict,
                 action_id=action_id,
-                step_index=idx,
-                step=step,
-                failure=step_result,
+            )
+            ok = _act_ok(step_result)
+            executed_steps.append(
+                {
+                    "iteration": iteration,
+                    "step_index_in_batch": idx,
+                    "step": step,
+                    "result": step_result,
+                    "status": "ok" if ok else "failed",
+                }
+            )
+            if not ok:
+                batch_had_failure = True
+                last_failure = {
+                    "iteration": iteration,
+                    "step_index_in_batch": idx,
+                    "step": step,
+                    "result": step_result,
+                }
+                log.warning(
+                    "webui_configure_step_failed_mid_loop",
+                    action_id=action_id,
+                    iteration=iteration,
+                    step=step,
+                    failure=step_result,
+                )
+                # Stop the batch — feed the failure back to the inner LLM
+                # for the next iteration instead of running more steps on
+                # what may now be an unexpected page state.
+                break
+
+        verify_result: dict[str, Any] | None = None
+
+        # Verify only when the batch ran clean. A failed step leaves the
+        # page in an unknown state; a passing verify_text check there
+        # could be a false positive (e.g. the prior page still happened
+        # to contain the text).
+        if not batch_had_failure and verify_text:
+            verify_result = webui_verify(session_id=session_id, text=verify_text)
+            if verify_result.get("present"):
+                mark_executed(action_id)
+                close_all_sessions()
+                log.info(
+                    "webui_configure_iteration_complete",
+                    action_id=action_id,
+                    iteration=iteration,
+                    batch_clean=True,
+                    verify_present=True,
+                )
+                return {
+                    "ok": True,
+                    "action_id": action_id,
+                    "iterations": iteration,
+                    "completed_steps": executed_steps,
+                    "verify_result": verify_result,
+                }
+        elif not batch_had_failure and not verify_text:
+            # Inner LLM declined to set verify_text. With nothing to check,
+            # treat a clean batch as terminal — matches the pre-multi-propose
+            # behavior for plans that have no observable post-condition.
+            mark_executed(action_id)
+            close_all_sessions()
+            log.info(
+                "webui_configure_iteration_complete",
+                action_id=action_id,
+                iteration=iteration,
+                batch_clean=True,
+                verify_present=None,
             )
             return {
-                "error": "step_failed",
-                "step_index": idx,
-                "failure": step_result,
-                "completed_steps": step_results,
+                "ok": True,
+                "action_id": action_id,
+                "iterations": iteration,
+                "completed_steps": executed_steps,
+                "verify_result": None,
             }
 
-    # Final verify
-    verify_result = None
-    if verify_text:
-        verify_result = webui_verify(session_id=session_id, text=verify_text)
-        if not verify_result.get("present"):
+        # Hard-stop 1: iteration cap
+        if iteration >= _WEBUI_CONFIGURE_MAX_ITER:
             mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_iteration_cap_hit",
+                action_id=action_id,
+                intent=intent,
+                iterations=iteration,
+                executed_count=len(executed_steps),
+            )
             return {
-                "error": "verify_failed",
-                "verify_text": verify_text,
+                "error": "iteration_cap_hit",
+                "iterations": iteration,
+                "completed_steps": executed_steps,
+                "last_failure": last_failure,
                 "verify_result": verify_result,
-                "completed_steps": step_results,
             }
 
-    # Success — mark_executed, close session
-    mark_executed(action_id)
-    close_all_sessions()
+        # Re-describe regardless of whether the batch failed — a failed
+        # click may still have scrolled or partially filled. Fresh view
+        # tells the truth.
+        new_view_result = webui_describe_page(session_id=session_id)
+        if "error" in new_view_result:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_describe_failed",
+                action_id=action_id,
+                iteration=iteration,
+                error=new_view_result,
+            )
+            return {
+                "error": "describe_failed",
+                "iteration": iteration,
+                "describe_error": new_view_result,
+                "completed_steps": executed_steps,
+            }
+        new_view = new_view_result.get("view", {})
 
-    return {
-        "ok": True,
-        "action_id": action_id,
-        "completed_steps": step_results,
-        "verify_result": verify_result,
-    }
+        try:
+            drafted = draft_plan(
+                intent,
+                rag_chunks,
+                new_view,
+                previous_steps=executed_steps,
+            )
+        except RuntimeError as exc:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_inner_draft_failed",
+                action_id=action_id,
+                iteration=iteration,
+                error=str(exc),
+            )
+            return {
+                "error": "inner_draft_failed",
+                "iteration": iteration,
+                "message": str(exc),
+                "completed_steps": executed_steps,
+            }
+
+        next_plan = drafted.get("plan") or []
+        next_verify_text = drafted.get("verify_text")
+        if next_verify_text:
+            # Inner LLM may revise verify_text as the flow advances (e.g.
+            # narrower expected text once we're past navigation). Honour the
+            # update; fall back to original if planner returned None.
+            verify_text = next_verify_text
+
+        # Hard-stop 2: inner LLM says give up
+        if not next_plan:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_inner_plan_empty",
+                action_id=action_id,
+                iteration=iteration,
+                risk=drafted.get("risk"),
+            )
+            return {
+                "error": "inner_plan_empty",
+                "iteration": iteration,
+                "risk": drafted.get("risk"),
+                "completed_steps": executed_steps,
+            }
+
+        # Hard-stop 3: identical plan twice in a row → no forward progress
+        next_hash = _plan_hash(next_plan)
+        if next_hash == last_plan_hash:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_inner_plan_stuck",
+                action_id=action_id,
+                iteration=iteration,
+                plan_hash=next_hash,
+            )
+            return {
+                "error": "inner_plan_stuck",
+                "iteration": iteration,
+                "repeated_plan": next_plan,
+                "completed_steps": executed_steps,
+            }
+        last_plan_hash = next_hash
+
+        log.info(
+            "webui_configure_iteration_complete",
+            action_id=action_id,
+            iteration=iteration,
+            batch_clean=not batch_had_failure,
+            verify_present=False,
+            next_plan_steps=len(next_plan),
+        )
+        plan = next_plan
 
 
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {

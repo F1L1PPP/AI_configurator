@@ -108,7 +108,29 @@ OK output:
 WRONG output (do NOT do this): drafting a click on "Routing Protocols"
 or similar category header that isn't in the view, OR drafting a click
 on "Static Routing" sidebar link as a navigation step (navigation is the
-outer planner's job via webui_path)."""
+outer planner's job via webui_path).
+
+## Mid-flow continuation (previous_steps)
+
+When the user message includes a "Previous steps executed:" section, you
+are mid-flow continuing an approved action. Each entry has either
+`status: "ok"` (the step succeeded) or `status: "failed"` (the step
+errored — error message attached).
+
+Rules for the continuation case:
+
+- Treat `ok` entries as already done. Do NOT repeat them in your next plan.
+- For `failed` entries, consult the current describe_page view. Three
+  choices: (a) try a different `{role, name}` that matches the same
+  step intent (e.g. the original target wasn't visible but an
+  equivalent element is); (b) skip if the current view shows the
+  failure was harmless and the flow can continue; (c) return
+  `plan: []` with a risk note explaining why the intent can't continue
+  (caller will surface this to the operator and abort the action).
+- Your next plan should advance toward `verify_text` becoming present.
+  If the verify text is already visible in the current view, return
+  `plan: []` with risk `"verify text already present — caller should
+  check verify"` so the caller can re-verify and finish."""
 
 
 def _extract_first_json_object(text: str) -> str | None:
@@ -157,11 +179,17 @@ def draft_plan(
     rag_chunks: list[dict[str, Any]],
     view: dict[str, Any],
     client: Anthropic | None = None,
+    previous_steps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Draft a step plan via Haiku 4.5.
 
     Returns {plan, verify_text, risk}. Plan may be empty if intent doesn't
     map cleanly to current view.
+
+    ``previous_steps`` is for the multi-propose continuation case: pass
+    entries like ``{"step": {...}, "result": {...}, "status": "ok" | "failed"}``
+    so Haiku knows what already ran (and what failed). Default ``None``
+    keeps single-shot callers (initial propose) backwards-compatible.
 
     Raises RuntimeError on LLM call failure or JSON parse failure.
     """
@@ -176,6 +204,12 @@ def draft_plan(
         f"RAG chunks:\n{chunks_blob}\n\n"
         f"Current describe_page view:\n{view_blob}"
     )
+
+    if previous_steps:
+        # Compact one-line-per-entry summary keeps token cost bounded while
+        # still giving Haiku the failure reasons it needs to adapt.
+        steps_blob = json.dumps(previous_steps, indent=2)
+        user_msg += f"\n\nPrevious steps executed:\n{steps_blob}"
 
     response = client.messages.create(
         model=_PLANNER_MODEL,

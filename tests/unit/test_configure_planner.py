@@ -208,3 +208,67 @@ def test_draft_plan_raises_on_pure_prose():
             view={},
             client=client,
         )
+
+
+# ---------------------------------------------------------------------------
+# previous_steps — multi-propose continuation (Phase 5.x)
+# ---------------------------------------------------------------------------
+
+
+def test_draft_plan_passes_previous_steps_to_llm():
+    """When previous_steps is non-empty, the user message must include a
+    'Previous steps executed:' section so the inner LLM can adapt."""
+    payload = {
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None}],
+        "verify_text": "Saved",
+        "risk": "low",
+    }
+    client = _make_mock_client(json.dumps(payload))
+
+    draft_plan(
+        intent="add static route 10.0.0.0/24",
+        rag_chunks=[],
+        view={"elements": [{"role": "button", "name": "Apply"}]},
+        client=client,
+        previous_steps=[
+            {
+                "iteration": 1,
+                "step": {"action": "click", "intent": {"role": "button", "name": "Add"}},
+                "result": {"ok": False, "error": "element_not_found"},
+                "status": "failed",
+            }
+        ],
+    )
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Previous steps executed:" in sent
+    assert "element_not_found" in sent
+    assert '"status": "failed"' in sent
+
+
+def test_draft_plan_omits_previous_steps_when_none():
+    """When previous_steps is None or empty, no 'Previous steps executed:'
+    section is included (keeps the propose-time prompt unchanged)."""
+    payload = {
+        "plan": [],
+        "verify_text": None,
+        "risk": "nope",
+    }
+    client = _make_mock_client(json.dumps(payload))
+
+    draft_plan(
+        intent="add static route",
+        rag_chunks=[],
+        view={"elements": []},
+        client=client,
+    )
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Previous steps executed:" not in sent
+
+
+def test_inner_prompt_documents_previous_steps_rules():
+    """Inner prompt must describe how to interpret previous_steps so Haiku
+    can adapt to mid-flow failures."""
+    assert "Mid-flow continuation" in _INNER_SYSTEM_PROMPT
+    assert "previous_steps" in _INNER_SYSTEM_PROMPT

@@ -219,55 +219,243 @@ def test_webui_configure_iterates_plan_steps(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# webui_configure — stops on step failure
+# webui_configure — multi-propose chain: step failure feeds back to inner LLM
 # ---------------------------------------------------------------------------
 
 
-def test_webui_configure_stops_on_step_failure(monkeypatch):
-    """If step 2 (index 1) fails, mark_failed is called and error is returned."""
-    plan = [
+def test_webui_configure_step_fail_recovers_via_re_plan(monkeypatch):
+    """Step fails in iter 1; draft_plan is invoked with previous_steps
+    containing the failure; iter 2 succeeds; verify present → mark_executed."""
+    initial_plan = [
         {"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None},
-        {
-            "action": "fill",
-            "intent": {"role": "textbox", "name": "Process ID"},
-            "value": "100",
-        },
+    ]
+    recovery_plan = [
+        {"action": "click", "intent": {"role": "button", "name": "Add Route"}, "value": None},
     ]
     action_id = propose_action(
         "webui_configure",
         {
-            "intent": "configure OSPF",
-            "webui_path": "/webui/#/routing/ospf",
-            "plan": plan,
-            "verify_text": None,
-            "session_id": "sess_fail",
+            "intent": "add static route",
+            "webui_path": "/webui/#/staticRouting",
+            "plan": initial_plan,
+            "verify_text": "Route added",
+            "session_id": "sess_recover",
+            "evidence": [],
         },
     )
     approve_action(action_id)
 
+    act_calls: list[dict] = []
     call_count = 0
 
-    def _fail_on_second(**kwargs):
+    def _act(**kwargs):
         nonlocal call_count
         call_count += 1
+        act_calls.append(kwargs)
         if call_count == 1:
-            return {"ok": True, "chosen_eid": "eid_1"}
-        return {"error": "element_not_found", "ok": False}
+            return {"error": "element_not_found", "ok": False}
+        return {"ok": True, "chosen_eid": "eid_recovered"}
+
+    # Snapshot previous_steps at call time. _webui_configure passes the same
+    # list by reference and keeps appending; capturing a deep copy preserves
+    # what Haiku actually saw at this iteration.
+    import copy
+
+    draft_calls: list[dict] = []
+
+    def _draft(*args, **kwargs):
+        snapshot = copy.deepcopy(kwargs)
+        draft_calls.append(snapshot)
+        return {"plan": recovery_plan, "verify_text": "Route added", "risk": "ok"}
+
+    verify_calls: list[dict] = []
+
+    def _verify(**kwargs):
+        verify_calls.append(kwargs)
+        # Only present after the recovery batch
+        return {"present": call_count >= 2}
+
+    executed_ids: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_act_by_intent", _act)
+    monkeypatch.setattr(
+        tr, "webui_describe_page", lambda **kw: {"view": {"elements": []}, "session_id": "x"}
+    )
+    monkeypatch.setattr(tr, "webui_verify", _verify)
+    monkeypatch.setattr(tr, "draft_plan", _draft)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_executed", lambda aid: executed_ids.append(aid) or {})
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    assert result.get("ok") is True
+    assert result["iterations"] == 2
+    assert len(act_calls) == 2  # one failed, one recovered
+    assert len(draft_calls) == 1
+    # previous_steps must reach the planner so it can adapt
+    assert "previous_steps" in draft_calls[0]
+    assert len(draft_calls[0]["previous_steps"]) == 1
+    assert draft_calls[0]["previous_steps"][0]["status"] == "failed"
+    assert len(executed_ids) == 1
+
+
+def test_webui_configure_iteration_cap_hit(monkeypatch):
+    """draft_plan always returns a non-empty NEW plan; verify always False.
+    Loop must bail with iteration_cap_hit after _WEBUI_CONFIGURE_MAX_ITER
+    execute-batches and call mark_failed exactly once."""
+    initial_plan = [
+        {"action": "click", "intent": {"role": "button", "name": "Step 1"}, "value": None},
+    ]
+    action_id = propose_action(
+        "webui_configure",
+        {
+            "intent": "configure thing",
+            "webui_path": "/webui/#/x",
+            "plan": initial_plan,
+            "verify_text": "Done",
+            "session_id": "sess_cap",
+            "evidence": [],
+        },
+    )
+    approve_action(action_id)
+
+    # Each draft returns a DIFFERENT plan so the stuck-detector doesn't fire
+    # before the iteration cap.
+    draft_count = 0
+
+    def _draft(*args, **kwargs):
+        nonlocal draft_count
+        draft_count += 1
+        return {
+            "plan": [
+                {
+                    "action": "click",
+                    "intent": {"role": "button", "name": f"Step {draft_count + 1}"},
+                    "value": None,
+                }
+            ],
+            "verify_text": "Done",
+            "risk": "ok",
+        }
 
     failed_ids: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_act_by_intent", lambda **kw: {"ok": True})
+    monkeypatch.setattr(
+        tr, "webui_describe_page", lambda **kw: {"view": {"elements": []}, "session_id": "x"}
+    )
+    monkeypatch.setattr(tr, "webui_verify", lambda **kw: {"present": False})
+    monkeypatch.setattr(tr, "draft_plan", _draft)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     import backend.orchestration.confirmations as confs
 
     monkeypatch.setattr(confs, "mark_failed", lambda aid: failed_ids.append(aid) or {})
-    monkeypatch.setattr(tr, "webui_act_by_intent", _fail_on_second)
-    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool("webui_configure", {"action_id": action_id})
 
-    assert result["error"] == "step_failed"
-    assert result["step_index"] == 1
+    assert result["error"] == "iteration_cap_hit"
+    assert result["iterations"] == tr._WEBUI_CONFIGURE_MAX_ITER
+    # 1st batch came from propose; 3 in-loop drafts before the cap fires
+    # (after iteration N=_MAX_ITER finishes verifying).
+    assert draft_count == tr._WEBUI_CONFIGURE_MAX_ITER - 1
     assert len(failed_ids) == 1
-    assert failed_ids[0] == action_id
+
+
+def test_webui_configure_inner_plan_empty_mid_loop(monkeypatch):
+    """First batch acts ok, verify miss, inner LLM returns empty plan with
+    risk note → mark_failed with inner_plan_empty."""
+    initial_plan = [
+        {"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None},
+    ]
+    action_id = propose_action(
+        "webui_configure",
+        {
+            "intent": "do thing",
+            "webui_path": "/webui/#/x",
+            "plan": initial_plan,
+            "verify_text": "Done",
+            "session_id": "sess_empty",
+            "evidence": [],
+        },
+    )
+    approve_action(action_id)
+
+    failed_ids: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_act_by_intent", lambda **kw: {"ok": True})
+    monkeypatch.setattr(
+        tr, "webui_describe_page", lambda **kw: {"view": {"elements": []}, "session_id": "x"}
+    )
+    monkeypatch.setattr(tr, "webui_verify", lambda **kw: {"present": False})
+    monkeypatch.setattr(
+        tr,
+        "draft_plan",
+        lambda *a, **kw: {"plan": [], "verify_text": None, "risk": "target gone"},
+    )
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_failed", lambda aid: failed_ids.append(aid) or {})
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    assert result["error"] == "inner_plan_empty"
+    assert result["risk"] == "target gone"
+    assert len(failed_ids) == 1
+
+
+def test_webui_configure_inner_plan_stuck(monkeypatch):
+    """Inner LLM returns identical plan twice (same hash) → mark_failed
+    with inner_plan_stuck."""
+    initial_plan = [
+        {"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None},
+    ]
+    # Same plan as initial → hash matches → stuck detector fires on first
+    # in-loop draft.
+    repeated = [
+        {"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None},
+    ]
+    action_id = propose_action(
+        "webui_configure",
+        {
+            "intent": "do thing",
+            "webui_path": "/webui/#/x",
+            "plan": initial_plan,
+            "verify_text": "Done",
+            "session_id": "sess_stuck",
+            "evidence": [],
+        },
+    )
+    approve_action(action_id)
+
+    failed_ids: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_act_by_intent", lambda **kw: {"ok": True})
+    monkeypatch.setattr(
+        tr, "webui_describe_page", lambda **kw: {"view": {"elements": []}, "session_id": "x"}
+    )
+    monkeypatch.setattr(tr, "webui_verify", lambda **kw: {"present": False})
+    monkeypatch.setattr(
+        tr,
+        "draft_plan",
+        lambda *a, **kw: {"plan": repeated, "verify_text": "Done", "risk": "ok"},
+    )
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_failed", lambda aid: failed_ids.append(aid) or {})
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    assert result["error"] == "inner_plan_stuck"
+    assert result["repeated_plan"] == repeated
+    assert len(failed_ids) == 1
 
 
 # ---------------------------------------------------------------------------
