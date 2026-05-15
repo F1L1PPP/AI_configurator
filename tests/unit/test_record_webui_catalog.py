@@ -19,8 +19,14 @@ from scripts.record_webui_catalog import _capture_if_new, _save_catalog
 
 
 def _mock_page(url: str = "https://router/foo") -> MagicMock:
+    """Mock a Playwright Page whose evaluate(window.location.href) returns ``url``.
+
+    The recorder reads URLs via ``page.evaluate("() => window.location.href")``
+    rather than ``page.url`` because the latter doesn't refresh on hash-only
+    navigations (Cisco WebUI is a hash-routed Angular SPA).
+    """
     page = MagicMock()
-    type(page).url = property(lambda self: url)
+    page.evaluate.return_value = url
     return page
 
 

@@ -75,6 +75,19 @@ def _git_short_sha() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _get_url(page: object) -> str:
+    """Read the live URL via JS evaluate.
+
+    Playwright's ``page.url`` caches the URL of the last full navigation
+    and does NOT update on hash-fragment changes.  Cisco WebUI is a
+    hash-routed Angular SPA — clicks change ``/webui/#/foo → /webui/#/bar``
+    without firing a Playwright navigation event, so ``page.url`` stays
+    stuck on the post-login landing URL.  ``evaluate("window.location.href")``
+    always reads the live value from the browser's address bar.
+    """
+    return str(page.evaluate("() => window.location.href"))  # type: ignore[attr-defined]
+
+
 def _capture_if_new(
     page: object,
     pages: list[dict],
@@ -87,9 +100,9 @@ def _capture_if_new(
     failure to downstream consumers.
     """
     try:
-        url = page.url  # type: ignore[attr-defined]
+        url = _get_url(page)
     except Exception as exc:
-        print(f"  WARN: cannot read page.url: {exc}")
+        print(f"  WARN: cannot read page url: {exc}")
         return
     if url in visited_urls:
         return
@@ -205,13 +218,13 @@ def main() -> int:
         _capture_if_new(page, pages, visited_urls)
 
         try:
-            last_url = page.url
+            last_url = _get_url(page)
             while True:
                 if len(pages) >= MAX_PAGES:
                     print(f"\n=> MAX_PAGES ({MAX_PAGES}) reached — saving now.")
                     break
                 try:
-                    current_url = page.url
+                    current_url = _get_url(page)
                 except Exception:
                     # Browser closed by Filip — exit cleanly
                     break
