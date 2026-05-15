@@ -24,7 +24,6 @@ labeling required.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import subprocess
 import sys
@@ -41,7 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from backend.core.settings import get_settings  # noqa: E402
 from backend.webui_agent.browser import webui_browser  # noqa: E402
-from backend.webui_agent.login import login, start_keepalive  # noqa: E402
+from backend.webui_agent.login import login  # noqa: E402
 from backend.webui_agent.semantic_dom import describe_page  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -200,45 +199,50 @@ def main() -> int:
     print("=> Click through each page you want catalogued.")
     print("=> Press Ctrl+C in this terminal to save and exit.\n")
 
-    with webui_browser() as page:
-        login(page)
+    # Outer try/except so save_catalog always runs, even if browser cleanup
+    # raises during exit.  Real failure mode seen on Windows: Playwright sync
+    # API's greenlet state breaks if anything calls into it from a different
+    # thread, and then browser.close() raises "Connection closed while
+    # reading from the driver" on context-manager exit — that exception
+    # would escape main() and skip the save, losing all captures.
+    try:
+        with webui_browser() as page:
+            login(page)
 
-        # Keepalive useful here: Filip may pause on a page for several minutes
-        # while thinking about what to check next.  start_keepalive docs note
-        # it must NOT overlap with active clicks; since Filip is driving, the
-        # background nudge fires only during genuine idle windows — acceptable.
-        _stop_keepalive = None
-        try:
-            _stop_keepalive = start_keepalive(page)
-        except Exception as exc:
-            print(f"  (keepalive unavailable: {exc})")
+            # Keepalive intentionally NOT started here.  start_keepalive(page)
+            # spawns a background thread that calls Playwright sync API, which
+            # is not thread-safe on Windows ("greenlet.error: cannot switch to
+            # a different thread (which happens to have exited)").  The crashed
+            # state then breaks browser.close() during Ctrl+C cleanup.  Human-
+            # paced clicking through ~30 pages takes ~5 min — well under the
+            # Cisco WebUI 5-min idle timeout — so keepalive is unnecessary.
 
-        # Capture the post-login landing page first
-        time.sleep(ANGULAR_SETTLE_S)
-        _capture_if_new(page, pages, visited_urls)
+            # Capture the post-login landing page first
+            time.sleep(ANGULAR_SETTLE_S)
+            _capture_if_new(page, pages, visited_urls)
 
-        try:
-            last_url = _get_url(page)
-            while True:
-                if len(pages) >= MAX_PAGES:
-                    print(f"\n=> MAX_PAGES ({MAX_PAGES}) reached — saving now.")
-                    break
-                try:
-                    current_url = _get_url(page)
-                except Exception:
-                    # Browser closed by Filip — exit cleanly
-                    break
-                if current_url != last_url:
-                    time.sleep(ANGULAR_SETTLE_S)  # Wait for Angular paint
-                    _capture_if_new(page, pages, visited_urls)
-                    last_url = current_url
-                time.sleep(POLL_INTERVAL_S)
-        except KeyboardInterrupt:
-            print("\n=> Ctrl+C — finalizing catalog...")
-        finally:
-            if _stop_keepalive is not None:
-                with contextlib.suppress(Exception):
-                    _stop_keepalive.set()
+            try:
+                last_url = _get_url(page)
+                while True:
+                    if len(pages) >= MAX_PAGES:
+                        print(f"\n=> MAX_PAGES ({MAX_PAGES}) reached — saving now.")
+                        break
+                    try:
+                        current_url = _get_url(page)
+                    except Exception:
+                        # Browser closed by Filip — exit cleanly
+                        break
+                    if current_url != last_url:
+                        time.sleep(ANGULAR_SETTLE_S)  # Wait for Angular paint
+                        _capture_if_new(page, pages, visited_urls)
+                        last_url = current_url
+                    time.sleep(POLL_INTERVAL_S)
+            except KeyboardInterrupt:
+                print("\n=> Ctrl+C — finalizing catalog...")
+    except Exception as exc:
+        # Browser teardown blew up — log and continue to save.  Filip's
+        # captures are in `pages` already; the cleanup error is recoverable.
+        print(f"  (browser exit error, ignored: {type(exc).__name__}: {exc})")
 
     return _save_catalog(pages, settings)
 
