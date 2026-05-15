@@ -473,6 +473,124 @@ def test_id_fallback_skips_ng_prefix():
 
 
 # ---------------------------------------------------------------------------
+# Spatial label discovery (Phase 3.4)
+# ---------------------------------------------------------------------------
+
+
+def test_spatial_label_used_when_placeholder_only():
+    # Textbox with only a placeholder and no semantic name from steps 1-4.
+    # The spatial JS search finds the column header above and returns it.
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "xxx.xxx.xxx.xxx"},
+        text="",
+        bbox={"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0}
+    inp.page.evaluate.return_value = "Prefix Mask"
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    assert view["elements"][0]["name"] == "Prefix Mask"
+
+
+def test_spatial_label_falls_through_to_placeholder_when_no_spatial_hit():
+    # Spatial JS search returns None — no text element found above.
+    # Should fall through to the placeholder.
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "xxx.xxx.xxx.xxx"},
+        text="",
+        bbox={"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0}
+    inp.page.evaluate.return_value = None
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    assert view["elements"][0]["name"] == "xxx.xxx.xxx.xxx"
+
+
+def test_spatial_label_falls_through_to_placeholder_on_evaluate_exception():
+    # page.evaluate raises a RuntimeError — _spatial_label catches it and
+    # returns "". Name resolution should fall through to the placeholder.
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "xxx.xxx.xxx.xxx"},
+        text="",
+        bbox={"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0}
+    inp.page.evaluate.side_effect = RuntimeError("boom")
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    assert view["elements"][0]["name"] == "xxx.xxx.xxx.xxx"
+
+
+def test_spatial_label_skipped_when_aria_label_present():
+    # aria-label is present — should win at step 1 without ever calling
+    # page.evaluate (spatial is step 5, so short-circuit fires first).
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "aria-label": "Hostname", "placeholder": "Enter hostname"},
+        text="",
+        bbox={"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0}
+    inp.page.evaluate.return_value = "Should not be used"
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    assert view["elements"][0]["name"] == "Hostname"
+    assert inp.page.evaluate.call_count == 0
+
+
+def test_spatial_label_truncated_to_max_name_len():
+    # page.evaluate returns a 200-char string — must be truncated to _MAX_NAME_LEN.
+    from backend.webui_agent.semantic_dom import _MAX_NAME_LEN
+
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text"},
+        text="",
+        bbox={"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 627.0, "y": 315.0, "width": 161.0, "height": 32.0}
+    inp.page.evaluate.return_value = "x" * 200
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    assert len(view["elements"][0]["name"]) == _MAX_NAME_LEN
+
+
+def test_spatial_label_empty_bbox_returns_empty():
+    # Bounding box has zero dimensions — _spatial_label must bail out early
+    # without calling page.evaluate.
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "fallback"},
+        text="",
+        bbox={"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0},
+    )
+    inp.bounding_box.return_value = {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+    inp.page.evaluate.return_value = "Should not be used"
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    # evaluate must not be called — bail happens before it
+    assert inp.page.evaluate.call_count == 0
+    # name falls through to placeholder since spatial returned ""
+    assert view["elements"][0]["name"] == "fallback"
+
+
+# ---------------------------------------------------------------------------
 # value / required for textbox + combobox
 # ---------------------------------------------------------------------------
 
