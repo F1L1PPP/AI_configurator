@@ -167,7 +167,7 @@ def test_webui_configure_requires_approval():
 
 def test_webui_configure_iterates_plan_steps(monkeypatch):
     """Approve first, mock webui_act_by_intent to succeed; assert mark_executed
-    called once at the end."""
+    called once when verify_text becomes present."""
     plan = [
         {"action": "click", "intent": {"role": "button", "name": "Add Process"}, "value": None},
         {
@@ -176,14 +176,17 @@ def test_webui_configure_iterates_plan_steps(monkeypatch):
             "value": "100",
         },
     ]
-    # Register + approve an action with the plan stored in params
+    # Register + approve an action with the plan stored in params. Use a
+    # verify_text so the loop has a clean termination signal — otherwise
+    # the new "always re-plan when verify_text is null" behavior would
+    # keep iterating until cap.
     action_id = propose_action(
         "webui_configure",
         {
             "intent": "configure OSPF",
             "webui_path": "/webui/#/routing/ospf",
             "plan": plan,
-            "verify_text": None,
+            "verify_text": "OSPF 100",
             "session_id": "sess_test",
         },
     )
@@ -216,6 +219,78 @@ def test_webui_configure_iterates_plan_steps(monkeypatch):
     assert len(act_calls) == 2  # one per step
     assert len(executed_ids) == 1
     assert executed_ids[0] == action_id
+
+
+def test_webui_configure_null_verify_continues_re_planning(monkeypatch):
+    """When propose-time plan is incomplete (e.g. only [click Add] for a
+    static-route form) and verify_text is None, the loop must NOT bail
+    after the first clean batch — it must re-describe and re-plan so
+    the inner LLM can fill the form that appeared post-click. This is
+    THE regression that caused single-step exits on multi-page forms.
+    Loop should keep going until inner LLM returns empty plan."""
+    propose_plan = [
+        {"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None},
+    ]
+    fill_plan = [
+        {"action": "fill", "intent": {"role": "textbox", "name": "Prefix"}, "value": "10.0.0.0"},
+        {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None},
+    ]
+    action_id = propose_action(
+        "webui_configure",
+        {
+            "intent": "add static route",
+            "webui_path": "/webui/#/staticRouting",
+            "plan": propose_plan,
+            "verify_text": None,  # propose-time planner couldn't predict
+            "session_id": "sess_recover",
+            "evidence": [],
+        },
+    )
+    approve_action(action_id)
+
+    act_count = 0
+
+    def _act(**kwargs):
+        nonlocal act_count
+        act_count += 1
+        return {"ok": True, "chosen_eid": f"eid_{act_count}"}
+
+    draft_count = 0
+
+    def _draft(*args, **kwargs):
+        nonlocal draft_count
+        draft_count += 1
+        if draft_count == 1:
+            # After click Add, surface the fill plan
+            return {"plan": fill_plan, "verify_text": None, "risk": "fill form"}
+        # After fill+Apply, inner LLM signals done with empty plan
+        return {"plan": [], "verify_text": None, "risk": "done"}
+
+    executed_ids: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_act_by_intent", _act)
+    monkeypatch.setattr(
+        tr, "webui_describe_page", lambda **kw: {"view": {"elements": []}, "session_id": "x"}
+    )
+    monkeypatch.setattr(tr, "draft_plan", _draft)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_executed", lambda aid: executed_ids.append(aid) or {})
+    monkeypatch.setattr(confs, "mark_failed", lambda aid: None)
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    # 1 (click Add) + 2 (fill Prefix + click Apply) = 3 act calls
+    assert act_count == 3, f"expected 3 acts after re-plan, got {act_count}"
+    # 2 draft calls: one to get fill_plan, one to get empty plan (done)
+    assert draft_count == 2, f"expected 2 in-loop drafts, got {draft_count}"
+    # An empty plan with null verify_text means "no more work" — the loop
+    # surfaces that as inner_plan_empty (defensive — caller can decide).
+    # Test passes either as ok=True (terminal) or as inner_plan_empty
+    # error; the load-bearing assertion is that the loop kept going.
+    assert result.get("ok") is True or result.get("error") == "inner_plan_empty"
 
 
 # ---------------------------------------------------------------------------

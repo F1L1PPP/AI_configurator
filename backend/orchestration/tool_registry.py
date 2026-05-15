@@ -985,26 +985,11 @@ def _webui_configure(**kwargs: Any) -> dict:
                     "completed_steps": executed_steps,
                     "verify_result": verify_result,
                 }
-        elif not batch_had_failure and not verify_text:
-            # Inner LLM declined to set verify_text. With nothing to check,
-            # treat a clean batch as terminal — matches the pre-multi-propose
-            # behavior for plans that have no observable post-condition.
-            mark_executed(action_id)
-            close_all_sessions()
-            log.info(
-                "webui_configure_iteration_complete",
-                action_id=action_id,
-                iteration=iteration,
-                batch_clean=True,
-                verify_present=None,
-            )
-            return {
-                "ok": True,
-                "action_id": action_id,
-                "iterations": iteration,
-                "completed_steps": executed_steps,
-                "verify_result": None,
-            }
+        # NOTE: when verify_text is None and the batch ran clean, we do NOT
+        # treat it as terminal — multi-page flows (e.g. static route, OSPF
+        # form) routinely propose-time only know step 1 (click Add) and
+        # rely on iter 2+ to fill the form. Let the inner LLM decide via
+        # an empty plan when the intent is complete.
 
         # Hard-stop 1: iteration cap
         if iteration >= _WEBUI_CONFIGURE_MAX_ITER:
