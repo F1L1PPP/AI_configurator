@@ -90,10 +90,19 @@ Your job: produce a JSON object with this exact shape:
      - VLAN delete: `show vlan id <N>` returns
        `VLAN id <N> not found in current VLAN database` — pattern
        should match that LITERAL phrase, not an empty string.
-     - OSPF: `show ip ospf` reports `Routing Process "ospf <N>"` (note
-       the literal double-quotes around the process name).
+     - OSPF: use `show ip ospf | include Routing Process` then match
+       `Routing Process "ospf <N>"` (literal double-quotes around
+       process name). AVOID `| section <N>` — IOS XE's section-grep
+       is unreliable for OSPF process blocks and often returns empty
+       output even when the process exists.
      - Hostname: prefer `show running-config | include hostname` then
        match the literal `hostname <NEW_NAME>`.
+
+   **Prefer `| include` over `| section`** as a general rule. `| include`
+   is a line-grep that always works; `| section` requires the matched
+   line to be a recognised section header, which fails silently on
+   many feature outputs.
+
    When unsure, choose a SHORT literal substring of the most likely
    stable phrase rather than an ambitious regex. False-negatives mark
    the action FAILED even when the config landed correctly.
@@ -125,10 +134,18 @@ OK output:
     "ip ospf 100 area 0",
     "exit"
   ],
-  "verify_command": "show ip ospf | section 100",
+  "verify_command": "show ip ospf | include Routing Process",
   "verify_pattern": "Routing Process \\"ospf 100\\"",
   "risk": "Enables OSPF process 100 area 0; revertible via 'no router ospf 100' and 'no ip ospf 100 area 0' under interface."
 }
+
+NOTE the verify_command uses `| include` (line-grep) NOT `| section`
+(IOS XE's section-grep is fragile when the first line of an OSPF
+process block isn't recognised as a section header; many IOS XE
+versions return EMPTY output from `show ip ospf | section <X>` even
+when the process exists). `| include Routing Process` always returns
+the literal `Routing Process "ospf <N>"` line for every configured
+process — reliable across versions.
 
 ## Example: configure trunk port (verify_pattern uses real show wording)
 

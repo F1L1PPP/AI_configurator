@@ -123,8 +123,12 @@ def test_inner_prompt_has_refuse_example():
 
 
 def test_inner_prompt_forbids_navigation_in_plan():
-    """Inner prompt must state that navigation is the outer planner's responsibility."""
-    assert "navigation is the outer planner" in _INNER_SYSTEM_PROMPT
+    """Inner prompt must forbid the inner planner from clicking sidebar links
+    or other navigation elements — navigation is the outer planner's job via
+    webui_path. Updated wording (post-retry-loop fix): 'Do NOT attempt to
+    navigate via clicks' replaces the older 'navigation is the outer planner'
+    phrasing, but the semantic guard is the same."""
+    assert "Do NOT attempt to navigate via clicks" in _INNER_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +276,19 @@ def test_inner_prompt_documents_previous_steps_rules():
     can adapt to mid-flow failures."""
     assert "Mid-flow continuation" in _INNER_SYSTEM_PROMPT
     assert "previous_steps" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_does_not_invite_caller_to_re_propose():
+    """Regression guard: the inner prompt used to instruct the outer Haiku
+    to re-propose with a different webui_path when the form wasn't visible.
+    That triggered chromium-open loops (4× per turn) directly violating
+    outer Rule 8. The empty-plan response must now signal TERMINAL, not
+    'try another page'."""
+    assert "caller should re-propose" not in _INNER_SYSTEM_PROMPT
+    assert "caller will then re-propose" not in _INNER_SYSTEM_PROMPT
+    # Replacement language must communicate FINAL
+    assert "FINAL" in _INNER_SYSTEM_PROMPT
+    assert "TERMINAL" in _INNER_SYSTEM_PROMPT
 
 
 def test_inner_prompt_documents_cidr_splitting():

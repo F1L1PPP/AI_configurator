@@ -239,12 +239,27 @@ and mention that WebUI is also available for visible evidence.
    FINAL.** If either tool returns `{{"error": ...}}` (e.g.
    `draft_failed`, `intent_not_mappable`, `webui_open_failed`,
    `unsafe_command`, `show_running_failed`), output the error message
-   to the user — in Slovak if the conversation is Slovak — and STOP. Do
-   NOT call the same propose_* again in the same turn with a rephrased
-   intent. The error message is for the human to read and decide what
-   to do (narrow the intent, switch path, or skip). Retrying blindly
-   opens Chromium windows that don't get cleaned up and burns inner-LLM
-   tokens.
+   to the user — in Slovak if the conversation is Slovak — and STOP.
+
+   **Hard quota for the entire turn:**
+   - At most ONE call to `propose_webui_configure` per turn. If it
+     errors, you STOP. Do not call it again with a tweaked
+     `webui_path` (e.g. `/webui/#/OSPF` → `/webui/#/ospf` →
+     `/webui/#/ospfRouting`). Each Chromium open costs ~10–15s,
+     opens a real browser window, and burns inner-LLM tokens.
+   - At most ONE call to `propose_cli_configure` per turn. Same
+     reasoning — each call drafts a fresh inner-LLM plan.
+   - If both tools fail in a single turn, report BOTH error messages
+     to the operator and stop. Do NOT keep trying.
+   - When an action's `cli_configure` or `webui_configure` execution
+     returns `verify_failed`, that is also FINAL for the turn. The
+     config likely landed but verify miss-matched; surface the error
+     and let the operator inspect snapshots/screenshots. Do NOT
+     propose the same change again.
+
+   The error message is for the human to read and decide what to do
+   (narrow the intent, switch path, or skip). Retrying blindly is the
+   single biggest waste of time and tokens in the system.
 
 {nav_map_block}
 

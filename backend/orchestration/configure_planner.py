@@ -58,12 +58,13 @@ Your job: produce a JSON object with this exact shape:
 
 3. **If the intent's target isn't visible in the current view, RETURN
    AN EMPTY PLAN.** Output `{"plan": [], "verify_text": null, "risk":
-   "Page mismatch — current view shows <brief list of visible roles>; caller
-   should re-propose with a different webui_path that exposes <what intent
-   needs>"}`. The caller (the outer Haiku planner) will then re-propose
-   with a corrected webui_path. Do NOT attempt to navigate via clicks —
-   navigation is the outer planner's responsibility via webui_path; you
-   only operate within ONE page's view.
+   "Page mismatch — current view shows <brief list of visible roles>;
+   no form fields for <what intent needs> are visible on this page.
+   This is FINAL — the caller will surface this to the operator and
+   stop. The operator can decide whether to re-attempt with a
+   different approach."}`. Do NOT attempt to navigate via clicks —
+   you only operate within ONE page's view, and the empty-plan
+   response is a TERMINAL signal, not a request to try another page.
 
 4. **Output JSON only.** No prose, no Markdown fences, no commentary
    before or after the JSON object. The caller json.loads()'s your output.
@@ -133,7 +134,7 @@ OK output:
 {
   "plan": [],
   "verify_text": null,
-  "risk": "Page mismatch — current view shows sidebar links (EIGRP, OSPF, Static Routing) but no static-route form fields (Prefix Mask, Next Hop). Caller should re-propose with webui_path=/webui/#/staticRouting which lands directly on the form."
+  "risk": "Page mismatch — current view shows sidebar links (EIGRP, OSPF, Static Routing) but no static-route form fields (Prefix Mask, Next Hop). The webui_path landed on the wrong page; this is FINAL, the operator must decide next steps."
 }
 
 WRONG output (do NOT do this): drafting a click on "Routing Protocols"

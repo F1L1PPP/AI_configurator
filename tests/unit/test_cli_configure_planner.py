@@ -200,3 +200,19 @@ def test_inner_prompt_documents_verify_show_wording_gotchas():
     assert "not found in current VLAN database" in _INNER_SYSTEM_PROMPT
     # The dedicated trunk-port example with the right verify_pattern
     assert "switchport mode trunk" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_steers_away_from_section_filter():
+    """Regression guard: OSPF process 2 verify failed because Haiku used
+    `show ip ospf | section "Routing Process"` which returned empty even
+    though the process existed. Prompt must explicitly steer toward
+    `| include` (line-grep) and away from `| section` (header-grep)."""
+    # Explicit AVOID note for | section on OSPF
+    assert "AVOID `| section" in _INNER_SYSTEM_PROMPT or "AVOID | section" in _INNER_SYSTEM_PROMPT
+    # General "prefer include over section" rule
+    assert (
+        "Prefer `| include` over `| section`" in _INNER_SYSTEM_PROMPT
+        or "prefer `| include` over `| section`" in _INNER_SYSTEM_PROMPT.lower()
+    )
+    # Updated OSPF example uses include
+    assert "show ip ospf | include Routing Process" in _INNER_SYSTEM_PROMPT

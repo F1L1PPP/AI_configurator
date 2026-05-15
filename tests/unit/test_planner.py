@@ -264,3 +264,24 @@ def test_system_prompt_has_errors_final_rule():
     window = SYSTEM_PROMPT[max(0, final_idx - 200) : final_idx + 200]
     assert "propose_webui_configure" in window
     assert "propose_cli_configure" in window
+
+
+def test_system_prompt_has_per_turn_quota_for_propose_tools():
+    """Regression guard: outer Haiku opened Chromium 4× in one turn by
+    calling propose_webui_configure with successively tweaked webui_paths
+    after each empty-plan response. Rule 8 must explicitly cap each
+    propose_* tool at ONE call per turn."""
+    from backend.orchestration.planner import SYSTEM_PROMPT
+
+    # Hard cap language must be in the prompt
+    assert "Hard quota" in SYSTEM_PROMPT
+    # Both tools named explicitly with their once-per-turn limit
+    quota_idx = SYSTEM_PROMPT.index("Hard quota")
+    window = SYSTEM_PROMPT[quota_idx : quota_idx + 1000]
+    assert "ONE call to `propose_webui_configure`" in window
+    assert "ONE call to `propose_cli_configure`" in window
+    # The fictional webui_path-tweaking pattern that triggered the bug
+    # must be called out as wrong.
+    assert "/webui/#/OSPF" in window or "tweaked" in window
+    # verify_failed responses must also be FINAL
+    assert "verify_failed" in window
