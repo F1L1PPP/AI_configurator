@@ -123,8 +123,12 @@ def test_inner_prompt_has_refuse_example():
 
 
 def test_inner_prompt_forbids_navigation_in_plan():
-    """Inner prompt must state that navigation is the outer planner's responsibility."""
-    assert "navigation is the outer planner" in _INNER_SYSTEM_PROMPT
+    """Inner prompt must forbid the inner planner from clicking sidebar
+    links or other navigation elements to reach a different page —
+    navigation is the outer planner's job via webui_path. Note: clicking
+    an in-page Add/Create button to OPEN a form (Static Routing, OSPF
+    list pages) is NOT navigation and IS allowed (handled by rule 3)."""
+    assert "Do NOT attempt to navigate via sidebar/menu clicks" in _INNER_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +212,111 @@ def test_draft_plan_raises_on_pure_prose():
             view={},
             client=client,
         )
+
+
+# ---------------------------------------------------------------------------
+# previous_steps — multi-propose continuation (Phase 5.x)
+# ---------------------------------------------------------------------------
+
+
+def test_draft_plan_passes_previous_steps_to_llm():
+    """When previous_steps is non-empty, the user message must include a
+    'Previous steps executed:' section so the inner LLM can adapt."""
+    payload = {
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None}],
+        "verify_text": "Saved",
+        "risk": "low",
+    }
+    client = _make_mock_client(json.dumps(payload))
+
+    draft_plan(
+        intent="add static route 10.0.0.0/24",
+        rag_chunks=[],
+        view={"elements": [{"role": "button", "name": "Apply"}]},
+        client=client,
+        previous_steps=[
+            {
+                "iteration": 1,
+                "step": {"action": "click", "intent": {"role": "button", "name": "Add"}},
+                "result": {"ok": False, "error": "element_not_found"},
+                "status": "failed",
+            }
+        ],
+    )
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Previous steps executed:" in sent
+    assert "element_not_found" in sent
+    assert '"status": "failed"' in sent
+
+
+def test_draft_plan_omits_previous_steps_when_none():
+    """When previous_steps is None or empty, no 'Previous steps executed:'
+    section is included (keeps the propose-time prompt unchanged)."""
+    payload = {
+        "plan": [],
+        "verify_text": None,
+        "risk": "nope",
+    }
+    client = _make_mock_client(json.dumps(payload))
+
+    draft_plan(
+        intent="add static route",
+        rag_chunks=[],
+        view={"elements": []},
+        client=client,
+    )
+
+    sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Previous steps executed:" not in sent
+
+
+def test_inner_prompt_documents_previous_steps_rules():
+    """Inner prompt must describe how to interpret previous_steps so Haiku
+    can adapt to mid-flow failures."""
+    assert "Mid-flow continuation" in _INNER_SYSTEM_PROMPT
+    assert "previous_steps" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_requires_click_add_when_button_visible():
+    """Regression guard: inner prompt was returning empty plan on the
+    OSPF list page even when an 'Add' button was visible — the outer
+    Haiku then told the user 'WebUI can't click Add automatically' which
+    is wrong (the multi-propose chain handles exactly that). Prompt must
+    explicitly tell the inner planner: 'add/create' intent + 'Add' button
+    visible → draft [click Add], not empty plan."""
+    # The new rule names the click-Add-first pattern explicitly
+    assert "add" in _INNER_SYSTEM_PROMPT.lower()
+    assert "Add Process" in _INNER_SYSTEM_PROMPT
+    assert "DRAFT A SINGLE-STEP PLAN" in _INNER_SYSTEM_PROMPT
+    # The OSPF-list example is in the prompt
+    assert "Opens the OSPF Add form" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_does_not_invite_caller_to_re_propose():
+    """Regression guard: the inner prompt used to instruct the outer Haiku
+    to re-propose with a different webui_path when the form wasn't visible.
+    That triggered chromium-open loops (4× per turn) directly violating
+    outer Rule 8. The empty-plan response must now signal TERMINAL, not
+    'try another page'."""
+    assert "caller should re-propose" not in _INNER_SYSTEM_PROMPT
+    assert "caller will then re-propose" not in _INNER_SYSTEM_PROMPT
+    # Replacement language must communicate FINAL
+    assert "FINAL" in _INNER_SYSTEM_PROMPT
+    assert "TERMINAL" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_documents_cidr_splitting():
+    """Regression guard: the previous example mis-mapped 10.0.0.0/24 into
+    the 'Prefix Mask' textbox. The corrected example must teach Haiku to
+    split CIDR into Prefix + dotted mask across separate fields, and the
+    rule must explicitly forbid the broken pattern."""
+    # Field-mapping rules section present
+    assert "Field-mapping rules" in _INNER_SYSTEM_PROMPT
+    # Dotted mask hint for the common /24 case
+    assert "255.255.255.0" in _INNER_SYSTEM_PROMPT
+    # Explicit instruction to split CIDR across two fields
+    assert "split" in _INNER_SYSTEM_PROMPT.lower()
+    # Negative example warns against putting CIDR in Prefix Mask
+    assert "WRONG" in _INNER_SYSTEM_PROMPT
+    assert "Prefix Mask" in _INNER_SYSTEM_PROMPT

@@ -509,3 +509,101 @@ def test_resolve_target_url_rejects_foreign_origin():
         assert "evil.example" not in result
         assert not result.startswith("http://evil")
         assert not result.startswith("https://evil")
+
+
+# ---------------------------------------------------------------------------
+# _eid_for_intent — Phase 3.4 spatial-label name collision fix
+# ---------------------------------------------------------------------------
+
+
+def _view_with(*elements: dict, modals: list[dict] | None = None) -> dict:
+    return {
+        "view_id": "test",
+        "url": "https://x",
+        "title": "t",
+        "elements": list(elements),
+        "modals": modals or [],
+        "errors": [],
+    }
+
+
+def test_eid_for_intent_prefers_textbox_over_link_for_prefix_name():
+    """Static-route page failure mode: page has BOTH a `textbox name='Prefix'`
+    (form input) and a `link name='Prefix'` (column header). When the
+    planner asks for ``{role: textbox}``, return the textbox, not the link.
+    """
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {"eid": "e_018", "role": "link", "name": "Prefix", "enabled": True},
+        {
+            "eid": "e_003",
+            "role": "textbox",
+            "name": "Prefix",
+            "enabled": True,
+            "required": True,
+        },
+    )
+    assert _eid_for_intent(view, "textbox", "Prefix") == "e_003"
+    assert _eid_for_intent(view, "link", "Prefix") == "e_018"
+
+
+def test_eid_for_intent_tie_breaks_on_required_then_enabled():
+    """Two textboxes with same name → prefer required=True; if none required,
+    prefer enabled=True; otherwise return first."""
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {"eid": "e_001", "role": "textbox", "name": "Prefix", "enabled": True},
+        {
+            "eid": "e_002",
+            "role": "textbox",
+            "name": "Prefix",
+            "enabled": True,
+            "required": True,
+        },
+    )
+    assert _eid_for_intent(view, "textbox", "Prefix") == "e_002"  # required wins
+
+    view2 = _view_with(
+        {"eid": "e_001", "role": "textbox", "name": "X", "enabled": False},
+        {"eid": "e_002", "role": "textbox", "name": "X", "enabled": True},
+    )
+    assert _eid_for_intent(view2, "textbox", "X") == "e_002"  # enabled wins
+
+    view3 = _view_with(
+        {"eid": "e_001", "role": "textbox", "name": "Y"},
+        {"eid": "e_002", "role": "textbox", "name": "Y"},
+    )
+    assert _eid_for_intent(view3, "textbox", "Y") == "e_001"  # first hit
+
+
+def test_eid_for_intent_returns_none_when_no_match():
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {"eid": "e_001", "role": "button", "name": "Apply"},
+    )
+    assert _eid_for_intent(view, "textbox", "Prefix") is None
+    assert _eid_for_intent(view, "button", "Cancel") is None
+
+
+def test_eid_for_intent_searches_modals_too():
+    """Form elements inside a modal must be findable via the same path."""
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {"eid": "e_001", "role": "button", "name": "Add"},
+        modals=[{"eid": "m_001", "role": "textbox", "name": "Prefix", "required": True}],
+    )
+    assert _eid_for_intent(view, "textbox", "Prefix") == "m_001"
+
+
+def test_eid_for_intent_rejects_non_string_inputs():
+    """Defensive: bad inputs return None instead of raising."""
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with({"eid": "e_001", "role": "textbox", "name": "Prefix"})
+    assert _eid_for_intent(view, None, "Prefix") is None  # type: ignore[arg-type]
+    assert _eid_for_intent(view, "textbox", None) is None  # type: ignore[arg-type]
+    assert _eid_for_intent(view, 123, "Prefix") is None  # type: ignore[arg-type]

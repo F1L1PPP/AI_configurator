@@ -16,18 +16,24 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from typing import Any
 
 from backend.cli_agent import read_tools, write_tools
 from backend.cli_agent.write_tools import (
+    _validate_config_commands,
     _validate_hostname,
     _validate_interface,
     _validate_interface_ip_and_mask,
+    _validate_verify_command,
+    _validate_verify_pattern,
     _validate_vlan_id,
     _validate_vlan_name,
 )
 from backend.core.logging import get_logger
+from backend.orchestration.cli_configure_planner import draft_cli_plan
 from backend.orchestration.configure_planner import draft_plan
 from backend.orchestration.confirmations import (
     NotApproved,
@@ -113,6 +119,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         # webui_configure. webui_act / webui_act_by_intent are internal
         # helpers only (not in TOOL_SCHEMAS).
         "webui_configure",
+        # CLI AI configure — Haiku drafts IOS XE commands, denylist + human
+        # approval gate, Netmiko applies, regex-verifies post-state.
+        "cli_configure",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -440,6 +449,55 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["action_id"],
         },
     },
+    {
+        "name": "propose_cli_configure",
+        "description": (
+            "Propose an AI-drafted IOS XE configuration over SSH. Use this for CLI "
+            "configuration tasks that DON'T match a narrow tool (set_hostname, "
+            "set_interface_ip, set_access_vlan) — e.g. OSPF, BGP, route-maps, ACLs, "
+            "debug commands. The inner Haiku planner drafts a list of config-mode "
+            "commands + a 'show' verify command + a regex pattern, grounded in RAG "
+            "manual chunks and the current running-config. Returns an action_id; the "
+            "human must APPROVE before cli_configure will run. Prefer the narrow "
+            "tools when intent is unambiguous — they're cheaper and more strictly "
+            "validated. Does NOT touch the router."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of the CLI configuration "
+                        "task, e.g. 'Configure OSPF process 100 area 0 on Vlan1' or "
+                        "'Add ACL 10 permitting only 192.168.10.0/24'."
+                    ),
+                },
+            },
+            "required": ["intent"],
+        },
+    },
+    {
+        "name": "cli_configure",
+        "description": (
+            "Execute a previously-approved CLI configuration plan. Requires an "
+            "action_id from a propose_cli_configure call that has been APPROVED by "
+            "the human. Server-side denylist validators re-run before any router "
+            "contact. Pushes commands via Netmiko, runs the verify command in EXEC "
+            "mode, regex-matches the verify pattern. Marks the action EXECUTED on "
+            "verify match or FAILED on any error. No auto-rollback."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "Action ID from the matching propose_cli_configure call.",
+                },
+            },
+            "required": ["action_id"],
+        },
+    },
 ]
 
 
@@ -551,6 +609,144 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     }
 
 
+def _propose_cli_configure(**kwargs: Any) -> dict:
+    """Propose an AI-drafted IOS XE configuration action.
+
+    Flow: search_docs → show_running_config → draft_cli_plan → denylist
+    + verify-command/pattern validators → propose_action. Returns
+    awaiting_approval with the full command preview. Does NOT touch the
+    router for writes.
+    """
+    intent = kwargs.get("intent")
+    if not isinstance(intent, str) or not intent.strip():
+        return {"error": "bad_parameters", "message": "intent must be a non-empty string"}
+
+    # 1. RAG grounding — small top_k (3) keeps tokens tight; CLI syntax
+    # tends to live in a single section per feature.
+    rag_result = _search_docs(query=intent, top_k=3)
+    if "error" in rag_result:
+        return rag_result
+    rag_chunks = rag_result.get("results", [])
+
+    # 2. Snapshot current running-config for the inner planner. We do this
+    # via read_tools (not take_snapshot, which is execute-time) so a
+    # propose call doesn't litter the snapshots directory.
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.error("propose_cli_configure_show_running_failed", error=str(exc))
+        return {
+            "error": "show_running_failed",
+            "message": f"could not fetch running-config: {exc}",
+        }
+
+    # 3. Inner Haiku drafts the plan
+    try:
+        drafted = draft_cli_plan(intent, rag_chunks, running_config)
+    except RuntimeError as exc:
+        log.error("propose_cli_configure_draft_failed", intent=intent, error=str(exc))
+        return {"error": "draft_failed", "message": str(exc)}
+
+    config_commands = drafted.get("config_commands") or []
+    verify_command = drafted.get("verify_command", "")
+    verify_pattern = drafted.get("verify_pattern", "")
+    risk = drafted.get("risk", "")
+
+    if not config_commands:
+        # Inner LLM refused (non-CLI intent or unmappable). Surface to the
+        # outer planner so it can re-prompt the user or fall back.
+        return {
+            "error": "intent_not_mappable",
+            "message": risk or "Inner LLM did not produce a config plan.",
+            "evidence": [
+                {"source": c.get("source"), "section": c.get("section")} for c in rag_chunks
+            ],
+        }
+
+    # 4. Server-side denylist + verify gate. Runs BEFORE propose_action so
+    # the human never sees a preview containing a banned command. Same
+    # validators re-run at execute time inside write_tools.cli_configure
+    # (defense in depth — a tampered action dict still gets caught).
+    try:
+        _validate_config_commands(config_commands)
+        _validate_verify_command(verify_command)
+        _validate_verify_pattern(verify_pattern)
+    except ValueError as exc:
+        log.warning(
+            "propose_cli_configure_unsafe",
+            intent=intent,
+            error=str(exc),
+            drafted_commands=config_commands,
+        )
+        return {
+            "error": "unsafe_command",
+            "message": str(exc),
+            "drafted_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "evidence": [
+                {"source": c.get("source"), "section": c.get("section")} for c in rag_chunks
+            ],
+        }
+
+    evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
+    action_id = propose_action(
+        tool="cli_configure",
+        params={
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+        },
+    )
+
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "cli_configure",
+        "preview": {
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+            "command_count": len(config_commands),
+        },
+        "next_step": _NEXT_STEP_INLINE,
+    }
+
+
+def _cli_configure(**kwargs: Any) -> dict:
+    """Dispatcher wrapper that pulls executable params out of the stored
+    action and calls the actual ``write_tools.cli_configure`` executor.
+
+    The stored action dict includes preview-only fields (intent, risk,
+    evidence) that the executor doesn't need; this wrapper keeps the
+    executor's signature narrow while letting the preview be rich.
+    """
+    from backend.orchestration.confirmations import get_action
+
+    action_id = kwargs.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        return {"error": "bad_parameters", "message": "action_id must be a non-empty string"}
+
+    try:
+        action = get_action(action_id)
+    except KeyError:
+        return {"error": "unknown_action", "message": f"no action with id {action_id!r}"}
+
+    params = action.get("params", {})
+    return write_tools.cli_configure(
+        action_id=action_id,
+        config_commands=params.get("config_commands", []),
+        verify_command=params.get("verify_command", ""),
+        verify_pattern=params.get("verify_pattern", ""),
+    )
+
+
 def _propose_webui_configure(**kwargs: Any) -> dict:
     """Propose a generic WebUI configure action.
 
@@ -641,11 +837,41 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     }
 
 
-def _webui_configure(**kwargs: Any) -> dict:
-    """Execute a previously-approved webui_configure plan.
+# Max iterations of the multi-propose loop inside _webui_configure. Failed
+# batches count against this budget so failure-recovery stays bounded.
+# Bumping this means trusting the inner LLM to converge on more pages — keep
+# tight until real flows demand more.
+_WEBUI_CONFIGURE_MAX_ITER = 4
 
-    Iterates each step via webui_act_by_intent, screenshots, optional final
-    verify, then mark_executed.
+
+def _plan_hash(plan: list[dict[str, Any]]) -> str:
+    """Stable hash of a plan for "same plan twice in a row" detection.
+
+    Canonical JSON (sort_keys) so dict key order doesn't fool the equality
+    check. SHA-1 is fine here — we're comparing local strings, not signing
+    anything.
+    """
+    return hashlib.sha1(json.dumps(plan, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _act_ok(result: dict[str, Any]) -> bool:
+    """A webui_act_by_intent result is considered successful when it has
+    ``ok: True`` and no ``error`` key. Mirrors the original Phase 5 check."""
+    return result.get("ok") is True and "error" not in result
+
+
+def _webui_configure(**kwargs: Any) -> dict:
+    """Execute a previously-approved webui_configure plan with multi-propose.
+
+    After each batch of steps executes, the page is re-described and the
+    inner Haiku is re-invoked with the full execution history. The loop
+    continues until ``webui_verify`` returns ``present=True`` OR one of three
+    hard-stops fires: iteration cap, inner LLM returns empty plan, or inner
+    LLM returns the same plan twice in a row (no progress).
+
+    Failed Playwright steps are NOT terminal — the failure is recorded in
+    ``previous_steps`` and the inner LLM gets a chance to adapt on the next
+    iteration. Only the hard-stops bail with ``mark_failed``.
     """
     from backend.orchestration.confirmations import get_action, mark_executed, mark_failed
 
@@ -666,66 +892,221 @@ def _webui_configure(**kwargs: Any) -> dict:
     plan = params.get("plan", [])
     verify_text = params.get("verify_text")
     session_id = params.get("session_id")
+    intent = params.get("intent", "")
+    rag_chunks = [
+        {"text": "", "source": e.get("source"), "section": e.get("section")}
+        for e in params.get("evidence", [])
+    ]
 
     if not plan or not session_id:
         mark_failed(action_id)
         return {"error": "bad_action_params", "message": "action missing plan or session_id"}
 
-    # Iterate steps
-    step_results = []
-    for idx, step in enumerate(plan):
-        intent_dict = {
-            "role": step.get("intent", {}).get("role", ""),
-            "name": step.get("intent", {}).get("name", ""),
-            "action": step.get("action", "click"),
-            "value": step.get("value"),
-        }
-        step_result = webui_act_by_intent(
-            session_id=session_id,
-            intent=intent_dict,
-            action_id=action_id,
-        )
-        step_results.append({"step_index": idx, "intent": step["intent"], "result": step_result})
+    executed_steps: list[dict[str, Any]] = []
+    iteration = 0
+    last_plan_hash: str | None = _plan_hash(plan)
 
-        if "error" in step_result or not step_result.get("ok"):
-            mark_failed(action_id)
-            log.error(
-                "webui_configure_step_failed",
+    while True:
+        iteration += 1
+        log.info(
+            "webui_configure_iteration_started",
+            action_id=action_id,
+            iteration=iteration,
+            prev_steps_count=len(executed_steps),
+            step_count=len(plan),
+        )
+        batch_had_failure = False
+        last_failure: dict[str, Any] | None = None
+
+        for idx, step in enumerate(plan):
+            intent_dict = {
+                "role": step.get("intent", {}).get("role", ""),
+                "name": step.get("intent", {}).get("name", ""),
+                "action": step.get("action", "click"),
+                "value": step.get("value"),
+            }
+            step_result = webui_act_by_intent(
+                session_id=session_id,
+                intent=intent_dict,
                 action_id=action_id,
-                step_index=idx,
-                step=step,
-                failure=step_result,
+            )
+            ok = _act_ok(step_result)
+            executed_steps.append(
+                {
+                    "iteration": iteration,
+                    "step_index_in_batch": idx,
+                    "step": step,
+                    "result": step_result,
+                    "status": "ok" if ok else "failed",
+                }
+            )
+            if not ok:
+                batch_had_failure = True
+                last_failure = {
+                    "iteration": iteration,
+                    "step_index_in_batch": idx,
+                    "step": step,
+                    "result": step_result,
+                }
+                log.warning(
+                    "webui_configure_step_failed_mid_loop",
+                    action_id=action_id,
+                    iteration=iteration,
+                    step=step,
+                    failure=step_result,
+                )
+                # Stop the batch — feed the failure back to the inner LLM
+                # for the next iteration instead of running more steps on
+                # what may now be an unexpected page state.
+                break
+
+        verify_result: dict[str, Any] | None = None
+
+        # Verify only when the batch ran clean. A failed step leaves the
+        # page in an unknown state; a passing verify_text check there
+        # could be a false positive (e.g. the prior page still happened
+        # to contain the text).
+        if not batch_had_failure and verify_text:
+            verify_result = webui_verify(session_id=session_id, text=verify_text)
+            if verify_result.get("present"):
+                mark_executed(action_id)
+                close_all_sessions()
+                log.info(
+                    "webui_configure_iteration_complete",
+                    action_id=action_id,
+                    iteration=iteration,
+                    batch_clean=True,
+                    verify_present=True,
+                )
+                return {
+                    "ok": True,
+                    "action_id": action_id,
+                    "iterations": iteration,
+                    "completed_steps": executed_steps,
+                    "verify_result": verify_result,
+                }
+        # NOTE: when verify_text is None and the batch ran clean, we do NOT
+        # treat it as terminal — multi-page flows (e.g. static route, OSPF
+        # form) routinely propose-time only know step 1 (click Add) and
+        # rely on iter 2+ to fill the form. Let the inner LLM decide via
+        # an empty plan when the intent is complete.
+
+        # Hard-stop 1: iteration cap
+        if iteration >= _WEBUI_CONFIGURE_MAX_ITER:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_iteration_cap_hit",
+                action_id=action_id,
+                intent=intent,
+                iterations=iteration,
+                executed_count=len(executed_steps),
             )
             return {
-                "error": "step_failed",
-                "step_index": idx,
-                "failure": step_result,
-                "completed_steps": step_results,
-            }
-
-    # Final verify
-    verify_result = None
-    if verify_text:
-        verify_result = webui_verify(session_id=session_id, text=verify_text)
-        if not verify_result.get("present"):
-            mark_failed(action_id)
-            return {
-                "error": "verify_failed",
-                "verify_text": verify_text,
+                "error": "iteration_cap_hit",
+                "iterations": iteration,
+                "completed_steps": executed_steps,
+                "last_failure": last_failure,
                 "verify_result": verify_result,
-                "completed_steps": step_results,
             }
 
-    # Success — mark_executed, close session
-    mark_executed(action_id)
-    close_all_sessions()
+        # Re-describe regardless of whether the batch failed — a failed
+        # click may still have scrolled or partially filled. Fresh view
+        # tells the truth.
+        new_view_result = webui_describe_page(session_id=session_id)
+        if "error" in new_view_result:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_describe_failed",
+                action_id=action_id,
+                iteration=iteration,
+                error=new_view_result,
+            )
+            return {
+                "error": "describe_failed",
+                "iteration": iteration,
+                "describe_error": new_view_result,
+                "completed_steps": executed_steps,
+            }
+        new_view = new_view_result.get("view", {})
 
-    return {
-        "ok": True,
-        "action_id": action_id,
-        "completed_steps": step_results,
-        "verify_result": verify_result,
-    }
+        try:
+            drafted = draft_plan(
+                intent,
+                rag_chunks,
+                new_view,
+                previous_steps=executed_steps,
+            )
+        except RuntimeError as exc:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_inner_draft_failed",
+                action_id=action_id,
+                iteration=iteration,
+                error=str(exc),
+            )
+            return {
+                "error": "inner_draft_failed",
+                "iteration": iteration,
+                "message": str(exc),
+                "completed_steps": executed_steps,
+            }
+
+        next_plan = drafted.get("plan") or []
+        next_verify_text = drafted.get("verify_text")
+        if next_verify_text:
+            # Inner LLM may revise verify_text as the flow advances (e.g.
+            # narrower expected text once we're past navigation). Honour the
+            # update; fall back to original if planner returned None.
+            verify_text = next_verify_text
+
+        # Hard-stop 2: inner LLM says give up
+        if not next_plan:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_inner_plan_empty",
+                action_id=action_id,
+                iteration=iteration,
+                risk=drafted.get("risk"),
+            )
+            return {
+                "error": "inner_plan_empty",
+                "iteration": iteration,
+                "risk": drafted.get("risk"),
+                "completed_steps": executed_steps,
+            }
+
+        # Hard-stop 3: identical plan twice in a row → no forward progress
+        next_hash = _plan_hash(next_plan)
+        if next_hash == last_plan_hash:
+            mark_failed(action_id)
+            close_all_sessions()
+            log.error(
+                "webui_configure_inner_plan_stuck",
+                action_id=action_id,
+                iteration=iteration,
+                plan_hash=next_hash,
+            )
+            return {
+                "error": "inner_plan_stuck",
+                "iteration": iteration,
+                "repeated_plan": next_plan,
+                "completed_steps": executed_steps,
+            }
+        last_plan_hash = next_hash
+
+        log.info(
+            "webui_configure_iteration_complete",
+            action_id=action_id,
+            iteration=iteration,
+            batch_clean=not batch_had_failure,
+            verify_present=False,
+            next_plan_steps=len(next_plan),
+        )
+        plan = next_plan
 
 
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
@@ -749,6 +1130,11 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     # webui_act_by_intent are internal helpers only (not in TOOL_SCHEMAS).
     "propose_webui_configure": _propose_webui_configure,
     "webui_configure": _webui_configure,
+    # CLI AI configure — same propose/execute split. Inner Haiku drafts
+    # IOS XE commands grounded in RAG + running-config; denylist filters
+    # at propose AND execute time.
+    "propose_cli_configure": _propose_cli_configure,
+    "cli_configure": _cli_configure,
 }
 
 

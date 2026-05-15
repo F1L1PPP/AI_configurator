@@ -290,20 +290,31 @@ def _serialise(eid: str, cand: dict[str, Any]) -> dict[str, Any]:
 
 
 def _spatial_label(loc: Locator) -> str:
-    """Find a nearby visible text element above this input via spatial proximity.
+    """Find a nearby visible text element acting as this input's label.
 
-    Cisco's WebUI Angular forms use the pattern:
-        <a class="column-header">Prefix Mask</a>
-        ...
-        <input placeholder="xxx.xxx.xxx.xxx">
-    The label has no <label for=> link to the input — they're siblings or
-    distant cousins in the DOM. This helper queries the page for visible
-    text-bearing elements positioned above the input (within 300px vertical)
-    and horizontally overlapping or near-aligned (within ±100px), then
-    picks the closest one as the input's name.
+    Searches two layouts Cisco's WebUI Angular forms actually use:
 
-    Returns "" if no candidate found or on any error. Single ``page.evaluate``
-    call to keep the round-trip cost flat regardless of page complexity.
+      (A) Label ABOVE input — typical floating-label pattern:
+              <span>Prefix Mask</span>
+              <input placeholder="xxx.xxx.xxx.xxx">
+
+      (B) Label LEFT of input — table-row / inline-form pattern:
+              <span>Prefix Mask</span><input ...>
+
+    Earlier versions only searched (A) with a 300px dy window, which on
+    the Static Routing form was loose enough that the algorithm walked
+    past the actual row-label and grabbed a column-header text from the
+    table ABOVE the form — producing the "shifted-by-one-row" labeling
+    bug (e.g. labeling the Prefix input "IP Type" because IP Type's
+    column header was the closest aligned text above). Tighter dy + a
+    left-of-input pass fix that.
+
+    Tight thresholds (~80px above, ~200px left) match the typical
+    label-gap in dense forms; column headers from a table further up
+    the page no longer qualify.
+
+    Returns "" if no candidate found or on any error. Single
+    ``page.evaluate`` call to keep round-trip cost flat.
     """
     try:
         bbox = loc.bounding_box(timeout=_PROBE_TIMEOUT_MS)
@@ -321,39 +332,62 @@ def _spatial_label(loc: Locator) -> str:
     if target["width"] == 0 or target["height"] == 0:
         return ""
 
-    # JS-side search. Self-contained algorithm; no DOM queries from Python.
+    # JS-side search. Two layouts considered; cheaper score wins.
     js = """
     (t) => {
       const sel = 'label,span,div,a,p,td,th,h1,h2,h3,h4,h5,h6,strong,em';
       const cs = document.querySelectorAll(sel);
       let bestText = null;
       let bestScore = Infinity;
+      const inputEnd = t.x + t.width;
+      const inputCenterY = t.y + t.height / 2;
       for (const el of cs) {
-        // Skip containers that wrap form elements (they own the layout, not the label).
+        // Skip containers that wrap form elements (they own layout, not labels).
         if (el.querySelector('input, textarea, select, button')) continue;
+        // Skip ancestors of a <table> — column headers in <th> elements are
+        // NOT form labels even when spatially close to a form below. This
+        // catches the Cisco column-header-as-label false match.
+        if (el.closest('thead, table th, table thead')) continue;
         const text = (el.innerText || el.textContent || '').trim();
         if (!text || text.length > 60) continue;
         const r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) continue;
-        // Must be positioned above the input.
+
+        // Layout A: label ABOVE the input.
+        // dy = gap between label bottom and input top.
         const dy = t.y - (r.y + r.height);
-        if (dy < 0 || dy > 300) continue;
-        // Horizontal alignment: overlap zero-cost; near-alignment small cost; far rejected.
-        const inputEnd = t.x + t.width;
-        const labelEnd = r.x + r.width;
-        const overlap = Math.max(0, Math.min(labelEnd, inputEnd) - Math.max(r.x, t.x));
-        let alignCost;
-        if (overlap > 0) {
-          alignCost = 0;
-        } else {
-          alignCost = Math.min(Math.abs(r.x - t.x), Math.abs(labelEnd - t.x));
-          if (alignCost > 100) continue;
+        if (dy >= 0 && dy <= 80) {
+          const labelEnd = r.x + r.width;
+          const overlap = Math.max(0, Math.min(labelEnd, inputEnd) - Math.max(r.x, t.x));
+          let alignCost;
+          if (overlap > 0) {
+            alignCost = 0;
+          } else {
+            alignCost = Math.min(Math.abs(r.x - t.x), Math.abs(labelEnd - t.x));
+            if (alignCost > 60) continue;
+          }
+          const score = dy + alignCost / 3;
+          if (score < bestScore) {
+            bestScore = score;
+            bestText = text;
+          }
+          continue;
         }
-        // Total score: closer above is much better than horizontally aligned.
-        const score = dy + alignCost / 3;
-        if (score < bestScore) {
-          bestScore = score;
-          bestText = text;
+
+        // Layout B: label LEFT of the input on the SAME row.
+        // Same row = label's vertical center within ±20px of input center.
+        const labelCenterY = r.y + r.height / 2;
+        const dyCenter = Math.abs(inputCenterY - labelCenterY);
+        const labelEnd2 = r.x + r.width;
+        const dxGap = t.x - labelEnd2;
+        if (dyCenter <= 20 && dxGap >= 0 && dxGap <= 200) {
+          // Score: horizontal gap. Add small same-row penalty vs ABOVE so
+          // a tight ABOVE label still wins ties.
+          const score = dxGap + 5;
+          if (score < bestScore) {
+            bestScore = score;
+            bestText = text;
+          }
         }
       }
       return bestText;

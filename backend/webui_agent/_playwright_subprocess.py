@@ -530,6 +530,49 @@ def _do_act(
     )
 
 
+def _eid_for_intent(view: dict[str, Any], role: str, name: str) -> str | None:
+    """Forward-lookup: find the eid in ``view`` whose role AND name match the
+    intent exactly. Returns the best eid or None if no match.
+
+    Critical for Phase 3.4 spatial labels: describe_page invents a name
+    for inputs without ARIA labels by reading the visible text above them.
+    Playwright's own ``get_by_role(role, name=...)`` doesn't know about
+    that spatial association, so it would either miss the textbox or
+    (worse) fall through to a same-named link/header. By scanning the
+    describe view we use the SAME naming source the inner LLM saw at
+    propose time, so collisions like
+
+        {role: textbox, name: "Prefix", required: true}   # the form input
+        {role: link,    name: "Prefix"}                   # the column header
+
+    resolve to the textbox when the planner asks for ``{role: textbox}``.
+
+    Tie-breaking when multiple elements share role+name:
+      1. Prefer ``required=True`` (form inputs that MUST be filled).
+      2. Prefer ``enabled=True`` (filter out disabled mirrors).
+      3. Otherwise return the first hit (stable across rebuilds).
+    """
+    if not isinstance(role, str) or not isinstance(name, str):
+        return None
+    candidates = [
+        el
+        for el in list(view.get("elements") or []) + list(view.get("modals") or [])
+        if el.get("role") == role and el.get("name") == name and isinstance(el.get("eid"), str)
+    ]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]["eid"]
+    # Tie-break — required first, then enabled, then first.
+    required = [c for c in candidates if c.get("required") is True]
+    if required:
+        return required[0]["eid"]
+    enabled = [c for c in candidates if c.get("enabled") is True]
+    if enabled:
+        return enabled[0]["eid"]
+    return candidates[0]["eid"]
+
+
 def _reverse_lookup_eid(target_loc: Any, locator_map: dict[str, Any]) -> str | None:
     """Find which eid in ``locator_map`` points at the same DOM element as ``target_loc``.
 
@@ -603,28 +646,48 @@ def _do_act_by_intent(
             view["view_id"],
         )
 
-    # 1. Resolve intent via the existing fuzzy walker. Three fallback
-    #    strategies — role+name, label-only, text-only — matching the
-    #    Cisco WebUI's mix of ARIA + HTML labels.
-    strategies: list[dict[str, Any]] = [
-        {"role": role, "name": name},
-        {"label": name},
-        {"text": name},
-    ]
-    chosen_loc = first_match(page, strategies)
+    # 1. PRIMARY: forward-lookup in a fresh describe view. Uses the SAME
+    #    naming source the inner LLM saw (Phase 3.4 spatial labels for
+    #    inputs without ARIA labels), so role+name collisions resolve
+    #    correctly. Required because Playwright's get_by_role doesn't
+    #    know about spatial labels — it'd fall through to text-match and
+    #    pick the wrong same-named element (e.g. a column-header link
+    #    instead of the form input).
+    view, fresh_map = describe_page(page)
+    fresh_view_id: str = view["view_id"]
+    chosen_loc: Any | None = None
+    eid: str | None = _eid_for_intent(view, role, name)
+    if eid is not None:
+        chosen_loc = fresh_map.get(eid)
+        # Belt-and-braces: if the eid is in the view but not the
+        # locator_map (shouldn't happen, but bbox edge cases exist),
+        # clear and fall through to first_match.
+        if chosen_loc is None:
+            eid = None
+
+    # 2. FALLBACK: legacy fuzzy walker for cases where describe_page
+    #    didn't surface the element under the requested role+name (e.g.
+    #    the LLM used a slightly different role than what describe_page
+    #    produced, but Playwright's accessibility tree still finds it).
     if chosen_loc is None:
-        view, new_map = describe_page(page)
-        return (
-            {
-                "ok": False,
-                "failure_reason": "unknown_eid",
-                "chosen_eid": None,
-                "view": view,
-                "attempts": 0,
-            },
-            new_map,
-            view["view_id"],
-        )
+        strategies: list[dict[str, Any]] = [
+            {"role": role, "name": name},
+            {"label": name},
+            {"text": name},
+        ]
+        chosen_loc = first_match(page, strategies)
+        if chosen_loc is None:
+            return (
+                {
+                    "ok": False,
+                    "failure_reason": "unknown_eid",
+                    "chosen_eid": None,
+                    "view": view,
+                    "attempts": 0,
+                },
+                fresh_map,
+                fresh_view_id,
+            )
 
     # 1b. Sensitive-text deny-list: refuse to act on locators whose accessible
     # name matches dangerous operations. Defends against prompt-injected intents
@@ -638,7 +701,6 @@ def _do_act_by_intent(
     name_lower = accessible_name.lower()
     matched_phrase = next((p for p in _SENSITIVE_DENY_LIST if p in name_lower), None)
     if matched_phrase is not None:
-        view, new_map = describe_page(page)
         return (
             {
                 "ok": False,
@@ -649,15 +711,14 @@ def _do_act_by_intent(
                 "view": view,
                 "attempts": 0,
             },
-            new_map,
-            view["view_id"],
+            fresh_map,
+            fresh_view_id,
         )
 
-    # 2. Re-describe to get a fresh locator_map, then reverse-lookup the
-    #    chosen locator's eid.
-    view, fresh_map = describe_page(page)
-    fresh_view_id: str = view["view_id"]
-    eid = _reverse_lookup_eid(chosen_loc, fresh_map)
+    # 2. Reverse-lookup the chosen locator's eid (only needed for the
+    # first_match fallback path — the forward path already set eid).
+    if eid is None:
+        eid = _reverse_lookup_eid(chosen_loc, fresh_map)
     if eid is None:
         return (
             {

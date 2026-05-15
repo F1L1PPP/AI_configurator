@@ -56,14 +56,37 @@ Your job: produce a JSON object with this exact shape:
    "EIGRP", "OSPF", "Static Routing" — those are the clickable items.
    The parent group is presentation only; never reference it.
 
-3. **If the intent's target isn't visible in the current view, RETURN
-   AN EMPTY PLAN.** Output `{"plan": [], "verify_text": null, "risk":
-   "Page mismatch — current view shows <brief list of visible roles>; caller
-   should re-propose with a different webui_path that exposes <what intent
-   needs>"}`. The caller (the outer Haiku planner) will then re-propose
-   with a corrected webui_path. Do NOT attempt to navigate via clicks —
-   navigation is the outer planner's responsibility via webui_path; you
-   only operate within ONE page's view.
+3. **If the intent says "add", "create", "new", "pridaj", "nakonfiguruj
+   nový" AND there is a visible button/link named "Add", "New", "Create",
+   "+", or "Add Process", DRAFT A SINGLE-STEP PLAN that clicks it.** Do
+   NOT return empty — clicking the Add button is the correct first step
+   on Cisco list-page-with-Add-button forms (Static Routing, OSPF, RIP,
+   VLAN, ACL, etc.). The form fields appear after the click. The caller
+   (multi-propose chain) will re-describe the page after the click and
+   call you again with the form view visible; THAT iteration is when
+   you draft the fill steps. Example for an OSPF list page with an Add
+   button:
+   ```
+   {"plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": null}],
+    "verify_text": null,
+    "risk": "Opens the OSPF Add form; next iteration will fill it."}
+   ```
+   Empty `verify_text` is correct here — the form's appearance is not a
+   stable verify target; the FINAL iteration will set verify_text when
+   the fill steps are drafted.
+
+4. **EMPTY PLAN means "truly cannot proceed", not "form not visible
+   yet".** Only return `{"plan": [], "verify_text": null, "risk": "..."}`
+   when:
+     - The intent's target isn't visible AND there is NO Add/Create/+
+       button to click to reveal it. Risk note: "Page mismatch — current
+       view shows <X>; no form fields and no Add/Create button. This is
+       FINAL — the operator must decide next steps."
+     - OR the intent doesn't fit a CLI configuration task (e.g. the user
+       is asking a question).
+   Do NOT attempt to navigate via sidebar/menu clicks to reach a
+   different page — page navigation is the outer planner's job via
+   webui_path. The empty-plan response is a TERMINAL signal.
 
 4. **Output JSON only.** No prose, no Markdown fences, no commentary
    before or after the JSON object. The caller json.loads()'s your output.
@@ -73,23 +96,54 @@ Your job: produce a JSON object with this exact shape:
    them to understand the intent, NOT to derive element names. Element
    names come ONLY from the describe_page view.
 
-## Example: target visible
+## Field-mapping rules — read before drafting any fill step
 
-View has elements `[{"role": "textbox", "name": "Prefix Mask"},
+The visible `name` of each textbox tells you exactly what value belongs
+there. Match the user's intent words to the textbox name semantically,
+NEVER positionally. A few load-bearing conventions for Cisco WebUI forms:
+
+- **"Prefix" is the network address only** (e.g. `10.99.99.0`), not the
+  whole CIDR. The CIDR's `/N` part goes into a SEPARATE field.
+- **"Prefix Mask" is a DOTTED subnet mask** (e.g. `255.255.255.0` for
+  /24), never CIDR. Common mappings: /8=255.0.0.0, /16=255.255.0.0,
+  /24=255.255.255.0, /25=255.255.255.128, /30=255.255.255.252.
+- **"Next Hop IP/Interface" is the gateway IP** (or interface name),
+  e.g. `192.168.10.254`.
+- **"IP Type" is the address family**, usually `ipv4`. If you don't see
+  an explicit ipv4 hint in the intent, default to `ipv4`.
+- **"Metric / Administrative Distance" is optional**. Leave it alone
+  unless the user gave an explicit metric — don't put a mask or IP there.
+- **Never put two values into the same textbox.** A CIDR like
+  `10.0.0.0/24` must split into Prefix=`10.0.0.0` + Prefix Mask=
+  `255.255.255.0` across TWO fill steps.
+
+## Example: target visible (static route — exactly what the form expects)
+
+View has elements `[{"role": "textbox", "name": "Prefix", "required": true},
+{"role": "textbox", "name": "Prefix Mask"},
+{"role": "textbox", "name": "IP Type", "required": true},
 {"role": "textbox", "name": "Next Hop IP/Interface"},
-{"role": "button", "name": "Apply"}]`. Intent: "add static route
-10.0.0.0/24 via 192.168.1.1".
+{"role": "textbox", "name": "Metric / Administrative Distance"},
+{"role": "button", "name": "Apply to Device"}]`. Intent: "add static route
+10.99.99.0/24 via 192.168.10.254".
 
 OK output:
 {
   "plan": [
-    {"action": "fill", "intent": {"role": "textbox", "name": "Prefix Mask"}, "value": "10.0.0.0/24"},
-    {"action": "fill", "intent": {"role": "textbox", "name": "Next Hop IP/Interface"}, "value": "192.168.1.1"},
-    {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": null}
+    {"action": "fill", "intent": {"role": "textbox", "name": "IP Type"}, "value": "ipv4"},
+    {"action": "fill", "intent": {"role": "textbox", "name": "Prefix"}, "value": "10.99.99.0"},
+    {"action": "fill", "intent": {"role": "textbox", "name": "Prefix Mask"}, "value": "255.255.255.0"},
+    {"action": "fill", "intent": {"role": "textbox", "name": "Next Hop IP/Interface"}, "value": "192.168.10.254"},
+    {"action": "click", "intent": {"role": "button", "name": "Apply to Device"}, "value": null}
   ],
-  "verify_text": "10.0.0.0/24",
-  "risk": "Adds a static route to the running-config; can be reverted by clicking the row's delete icon and Apply again."
+  "verify_text": "10.99.99.0",
+  "risk": "Adds a static route 10.99.99.0/24 -> 192.168.10.254 to the running-config; revertible via the row's delete icon and Apply again."
 }
+
+WRONG output (do NOT do this): putting `10.99.99.0/24` into "Prefix
+Mask", or putting the mask `255.255.255.0` into "Metric / Administrative
+Distance". CIDR notation `X.Y.Z.W/N` must ALWAYS be split — the prefix
+goes to "Prefix", the dotted mask goes to "Prefix Mask".
 
 ## Example: target NOT visible (refuse cleanly)
 
@@ -102,13 +156,35 @@ OK output:
 {
   "plan": [],
   "verify_text": null,
-  "risk": "Page mismatch — current view shows sidebar links (EIGRP, OSPF, Static Routing) but no static-route form fields (Prefix Mask, Next Hop). Caller should re-propose with webui_path=/webui/#/staticRouting which lands directly on the form."
+  "risk": "Page mismatch — current view shows sidebar links (EIGRP, OSPF, Static Routing) but no static-route form fields (Prefix Mask, Next Hop). The webui_path landed on the wrong page; this is FINAL, the operator must decide next steps."
 }
 
 WRONG output (do NOT do this): drafting a click on "Routing Protocols"
 or similar category header that isn't in the view, OR drafting a click
 on "Static Routing" sidebar link as a navigation step (navigation is the
-outer planner's job via webui_path)."""
+outer planner's job via webui_path).
+
+## Mid-flow continuation (previous_steps)
+
+When the user message includes a "Previous steps executed:" section, you
+are mid-flow continuing an approved action. Each entry has either
+`status: "ok"` (the step succeeded) or `status: "failed"` (the step
+errored — error message attached).
+
+Rules for the continuation case:
+
+- Treat `ok` entries as already done. Do NOT repeat them in your next plan.
+- For `failed` entries, consult the current describe_page view. Three
+  choices: (a) try a different `{role, name}` that matches the same
+  step intent (e.g. the original target wasn't visible but an
+  equivalent element is); (b) skip if the current view shows the
+  failure was harmless and the flow can continue; (c) return
+  `plan: []` with a risk note explaining why the intent can't continue
+  (caller will surface this to the operator and abort the action).
+- Your next plan should advance toward `verify_text` becoming present.
+  If the verify text is already visible in the current view, return
+  `plan: []` with risk `"verify text already present — caller should
+  check verify"` so the caller can re-verify and finish."""
 
 
 def _extract_first_json_object(text: str) -> str | None:
@@ -157,11 +233,17 @@ def draft_plan(
     rag_chunks: list[dict[str, Any]],
     view: dict[str, Any],
     client: Anthropic | None = None,
+    previous_steps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Draft a step plan via Haiku 4.5.
 
     Returns {plan, verify_text, risk}. Plan may be empty if intent doesn't
     map cleanly to current view.
+
+    ``previous_steps`` is for the multi-propose continuation case: pass
+    entries like ``{"step": {...}, "result": {...}, "status": "ok" | "failed"}``
+    so Haiku knows what already ran (and what failed). Default ``None``
+    keeps single-shot callers (initial propose) backwards-compatible.
 
     Raises RuntimeError on LLM call failure or JSON parse failure.
     """
@@ -176,6 +258,12 @@ def draft_plan(
         f"RAG chunks:\n{chunks_blob}\n\n"
         f"Current describe_page view:\n{view_blob}"
     )
+
+    if previous_steps:
+        # Compact one-line-per-entry summary keeps token cost bounded while
+        # still giving Haiku the failure reasons it needs to adapt.
+        steps_blob = json.dumps(previous_steps, indent=2)
+        user_msg += f"\n\nPrevious steps executed:\n{steps_blob}"
 
     response = client.messages.create(
         model=_PLANNER_MODEL,

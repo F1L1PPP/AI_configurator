@@ -154,6 +154,84 @@ def _validate_vlan_name(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLI AI configure — denylist + validators for inner-LLM-drafted commands
+# ---------------------------------------------------------------------------
+#
+# propose_cli_configure lets the inner Haiku draft raw IOS XE configuration
+# commands. Filip approves them through the normal HITL gate, but defense
+# in depth means a server-side denylist runs at propose time AND again at
+# execute time. Anything in the denylist refuses BEFORE the human sees the
+# preview — keeps the slip-of-the-thumb APPROVE-on-reload class of bug off
+# the table.
+#
+# Pattern + reason pairs; we reject on the first match. Order is for
+# readability, not priority.
+_CONFIG_CMD_DENYLIST: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^\s*reload\b", re.IGNORECASE), "reload reboots the router"),
+    (re.compile(r"^\s*erase\b", re.IGNORECASE), "erase wipes configuration or flash"),
+    (re.compile(r"^\s*delete\b", re.IGNORECASE), "delete removes filesystem objects"),
+    (re.compile(r"^\s*format\b", re.IGNORECASE), "format wipes flash"),
+    (re.compile(r"^\s*write\s+erase\b", re.IGNORECASE), "write erase wipes startup-config"),
+    (re.compile(r"^\s*boot\s+system\b", re.IGNORECASE), "boot system changes the boot image"),
+    (
+        re.compile(r"^\s*enable\s+(password|secret)\b", re.IGNORECASE),
+        "enable password/secret would let the LLM grant itself privileged access",
+    ),
+    (
+        re.compile(r"^\s*username\b.*\bprivilege\b", re.IGNORECASE),
+        "username privilege would let the LLM grant itself privileged access",
+    ),
+    (re.compile(r"[\n;]"), "embedded newline or semicolon (injection vector)"),
+]
+
+
+def _validate_config_commands(commands: object) -> None:
+    """Reject inner-LLM-drafted config commands that would brick the
+    router, escalate privilege, or smuggle multiple commands through one
+    list entry. Raises ValueError on the first offending command.
+
+    Called twice in defense-in-depth: once at propose time so the human
+    never sees a dangerous preview, and again at execute time so a
+    tampered action dict can't slip past the gate.
+    """
+    if not isinstance(commands, list) or not commands:
+        raise ValueError("config_commands must be a non-empty list of strings")
+    for i, cmd in enumerate(commands):
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise ValueError(f"config_commands[{i}] must be a non-empty string")
+        for pattern, reason in _CONFIG_CMD_DENYLIST:
+            if pattern.search(cmd):
+                raise ValueError(f"config_commands[{i}] {cmd!r} rejected: {reason}")
+
+
+def _validate_verify_command(cmd: object) -> None:
+    """verify_command runs via send_command in EXEC mode (not config
+    mode), so a malicious inner LLM could otherwise smuggle reload/erase
+    through the verify slot. Lock it to `show ...` and block injection
+    characters.
+    """
+    if not isinstance(cmd, str) or not cmd.strip():
+        raise ValueError("verify_command must be a non-empty string")
+    if not re.match(r"^\s*show\s+", cmd, re.IGNORECASE):
+        raise ValueError(f"verify_command {cmd!r} must start with 'show '")
+    if re.search(r"[\n;]", cmd):
+        raise ValueError(f"verify_command {cmd!r} contains newline or semicolon")
+
+
+def _validate_verify_pattern(pattern: object) -> None:
+    """verify_pattern must be a compilable Python regex. Catches the
+    obvious "inner LLM emitted a fenced-code-block string" failure mode
+    before runtime hits re.search.
+    """
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError("verify_pattern must be a non-empty string")
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"verify_pattern {pattern!r} not a valid regex: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -367,6 +445,140 @@ def set_access_vlan(vlan_id: int, vlan_name: str, action_id: str) -> dict:
         "tool": "set_access_vlan",
         "params": {"vlan_id": vlan_id, "vlan_name": vlan_name},
         "output": output,
+        "snapshot_pre": str(pre_dir),
+        "snapshot_post": str(post_dir),
+        "duration_ms": ms,
+    }
+
+
+def cli_configure(
+    action_id: str,
+    config_commands: list[str],
+    verify_command: str,
+    verify_pattern: str,
+) -> dict:
+    """Execute a previously-approved CLI config plan drafted by the inner Haiku.
+
+    Validators re-run server-side at execute time (defense in depth) so a
+    tampered action dict can't slip a `reload` through after approval.
+    Pushes the config block via Netmiko, runs the verify command in EXEC
+    mode, and confirms via ``re.search(verify_pattern, verify_output)``.
+
+    On verify miss: post-snapshot captured (so the diff is preserved),
+    action marked FAILED, no auto-rollback. Per CLAUDE.md §76, recovery
+    is a separate human-approved action.
+
+    Raises ValueError on validator rejection BEFORE any router contact.
+    """
+    # Re-validate at execute time — first gate runs at propose time, but
+    # a tampered action dict could otherwise slip through here.
+    _validate_config_commands(config_commands)
+    _validate_verify_command(verify_command)
+    _validate_verify_pattern(verify_pattern)
+
+    _guard(action_id)
+
+    t0 = time.monotonic()
+    pre_dir: Path = take_snapshot(action_id, "pre")
+
+    try:
+        conn = _get_conn()
+        config_output: str = conn.send_config_set(
+            config_commands,
+            read_timeout=CONFIG_READ_TIMEOUT_S,
+        )
+    except Exception as exc:
+        mark_failed(action_id)
+        log.error(
+            "write_failed",
+            tool="cli_configure",
+            action_id=action_id,
+            error=str(exc),
+        )
+        raise  # never auto-retry
+
+    # Verify in EXEC mode. send_command isn't config mode, so we don't
+    # need to drop out — Netmiko's send_config_set already exited config
+    # by the time it returned.
+    try:
+        verify_output: str = conn.send_command(verify_command, read_timeout=60)
+    except Exception as exc:
+        # The write itself succeeded but verify SSH failed. Capture the
+        # post-snapshot anyway so Filip can compare against pre, then
+        # surface the failure.
+        post_dir = take_snapshot(action_id, "post")
+        mark_failed(action_id)
+        log.error(
+            "cli_configure_verify_ssh_failed",
+            action_id=action_id,
+            verify_command=verify_command,
+            error=str(exc),
+        )
+        return {
+            "error": "verify_ssh_failed",
+            "tool": "cli_configure",
+            "config_output": config_output,
+            "snapshot_pre": str(pre_dir),
+            "snapshot_post": str(post_dir),
+            "message": str(exc),
+        }
+
+    ms = int((time.monotonic() - t0) * 1000)
+    post_dir = take_snapshot(action_id, "post")
+
+    match = re.search(verify_pattern, verify_output)
+    if match is None:
+        mark_failed(action_id)
+        # Surface any device-reported errors from the config push. IOS XE
+        # marks rejected commands with a leading '%' (e.g. "% Router-ID
+        # 10.0.0.1 in use by ospf process 2"). Pull these out so the
+        # operator sees WHY verify missed — config silently rejected is a
+        # common pattern with router-id / IP / VLAN conflicts.
+        device_errors = [
+            line.strip()
+            for line in (config_output or "").splitlines()
+            if line.strip().startswith("%")
+        ]
+        log.error(
+            "cli_configure_verify_failed",
+            action_id=action_id,
+            verify_command=verify_command,
+            verify_pattern=verify_pattern,
+            output_preview=verify_output[:300],
+            device_errors=device_errors or None,
+        )
+        return {
+            "error": "verify_failed",
+            "tool": "cli_configure",
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "verify_output_preview": verify_output[:1000],
+            "config_output": config_output,
+            "device_errors": device_errors,
+            "snapshot_pre": str(pre_dir),
+            "snapshot_post": str(post_dir),
+            "duration_ms": ms,
+        }
+
+    mark_executed(action_id)
+
+    log.info(
+        "tool_call",
+        tool="cli_configure",
+        params={"action_id": action_id, "command_count": len(config_commands)},
+        result_summary=f"applied {len(config_commands)} commands; verify matched",
+        duration_ms=ms,
+    )
+
+    return {
+        "tool": "cli_configure",
+        "params": {
+            "command_count": len(config_commands),
+            "verify_command": verify_command,
+        },
+        "config_output": config_output,
+        "verify_output_preview": verify_output[:1000],
+        "verify_matched": True,
         "snapshot_pre": str(pre_dir),
         "snapshot_post": str(post_dir),
         "duration_ms": ms,
