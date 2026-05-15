@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.orchestration.configure_planner import draft_plan
+from backend.orchestration.configure_planner import _INNER_SYSTEM_PROMPT, draft_plan
 
 
 def _make_mock_client(text: str) -> MagicMock:
@@ -98,3 +98,25 @@ def test_draft_plan_raises_on_missing_plan_key():
             view={},
             client=client,
         )
+
+
+# ---------------------------------------------------------------------------
+# Prompt-content tests (Phase 5 Sub-task C)
+# ---------------------------------------------------------------------------
+
+
+def test_inner_prompt_forbids_inventing_names():
+    """Inner prompt must enforce verbatim describe_page element names."""
+    assert "verbatim copy of an entry in the" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_has_refuse_example():
+    """Inner prompt must include both the OK-fill example and the refuse/empty-plan example."""
+    # Load-bearing phrases from each example block
+    assert "Prefix Mask" in _INNER_SYSTEM_PROMPT, "OK output example (form fill) missing"
+    assert "Page mismatch" in _INNER_SYSTEM_PROMPT, "Refuse/empty-plan example missing"
+
+
+def test_inner_prompt_forbids_navigation_in_plan():
+    """Inner prompt must state that navigation is the outer planner's responsibility."""
+    assert "navigation is the outer planner" in _INNER_SYSTEM_PROMPT
