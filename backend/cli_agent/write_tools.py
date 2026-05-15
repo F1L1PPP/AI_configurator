@@ -529,12 +529,23 @@ def cli_configure(
     match = re.search(verify_pattern, verify_output)
     if match is None:
         mark_failed(action_id)
+        # Surface any device-reported errors from the config push. IOS XE
+        # marks rejected commands with a leading '%' (e.g. "% Router-ID
+        # 10.0.0.1 in use by ospf process 2"). Pull these out so the
+        # operator sees WHY verify missed — config silently rejected is a
+        # common pattern with router-id / IP / VLAN conflicts.
+        device_errors = [
+            line.strip()
+            for line in (config_output or "").splitlines()
+            if line.strip().startswith("%")
+        ]
         log.error(
             "cli_configure_verify_failed",
             action_id=action_id,
             verify_command=verify_command,
             verify_pattern=verify_pattern,
             output_preview=verify_output[:300],
+            device_errors=device_errors or None,
         )
         return {
             "error": "verify_failed",
@@ -543,6 +554,7 @@ def cli_configure(
             "verify_pattern": verify_pattern,
             "verify_output_preview": verify_output[:1000],
             "config_output": config_output,
+            "device_errors": device_errors,
             "snapshot_pre": str(pre_dir),
             "snapshot_post": str(post_dir),
             "duration_ms": ms,

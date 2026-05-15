@@ -441,6 +441,64 @@ def test_cli_configure_verify_miss_marks_failed(_mock_pool, _mock_snapshot):
     assert "pre" in snap_phases and "post" in snap_phases
 
 
+def test_cli_configure_verify_miss_extracts_device_errors(_mock_pool, _mock_snapshot):
+    """When verify misses AND config_output has IOS XE '%' error lines
+    (e.g. duplicate router-id), surface them as device_errors so the
+    operator sees WHY verify failed. OSPF process N with router-id
+    already in use is the canonical case Filip hit on 2026-05-15."""
+    _mock_pool.send_config_set.return_value = (
+        "router ospf 5\nrouter-id 10.0.0.1\n% Router-ID 10.0.0.1 in use by ospf process 2\nexit\n"
+    )
+    _mock_pool.send_command.return_value = (
+        'Routing Process "ospf 2" with ID 10.0.0.1\n'
+        'Routing Process "ospf 100" with ID 192.168.10.1\n'
+    )
+
+    aid = _propose_and_approve_cli(
+        {
+            "config_commands": ["router ospf 5", "router-id 10.0.0.1", "exit"],
+            "verify_command": "show ip ospf | include Routing Process",
+            "verify_pattern": r'Routing Process "ospf 5"',
+        }
+    )
+
+    result = wt.cli_configure(
+        action_id=aid,
+        config_commands=["router ospf 5", "router-id 10.0.0.1", "exit"],
+        verify_command="show ip ospf | include Routing Process",
+        verify_pattern=r'Routing Process "ospf 5"',
+    )
+
+    assert result["error"] == "verify_failed"
+    assert result["device_errors"], "device_errors must surface % lines from config_output"
+    assert any("Router-ID 10.0.0.1 in use" in err for err in result["device_errors"])
+
+
+def test_cli_configure_verify_miss_empty_device_errors_when_clean(_mock_pool, _mock_snapshot):
+    """If config_output has no '%' lines, device_errors is an empty list
+    (not None / not missing). Stable contract for downstream callers."""
+    _mock_pool.send_config_set.return_value = "router ospf 7\nrouter-id 10.0.0.7\nexit\n"
+    _mock_pool.send_command.return_value = "completely unrelated output"
+
+    aid = _propose_and_approve_cli(
+        {
+            "config_commands": ["router ospf 7"],
+            "verify_command": "show ip ospf",
+            "verify_pattern": "nope",
+        }
+    )
+
+    result = wt.cli_configure(
+        action_id=aid,
+        config_commands=["router ospf 7"],
+        verify_command="show ip ospf",
+        verify_pattern="nope",
+    )
+
+    assert result["error"] == "verify_failed"
+    assert result["device_errors"] == []
+
+
 def test_cli_configure_rejects_unsafe_at_execute_time(_mock_pool, _mock_snapshot):
     """Tampered action dict containing 'reload' → validator raises before
     any Netmiko call. Defense-in-depth: even if propose was skipped or

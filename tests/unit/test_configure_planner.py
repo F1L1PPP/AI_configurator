@@ -123,12 +123,12 @@ def test_inner_prompt_has_refuse_example():
 
 
 def test_inner_prompt_forbids_navigation_in_plan():
-    """Inner prompt must forbid the inner planner from clicking sidebar links
-    or other navigation elements — navigation is the outer planner's job via
-    webui_path. Updated wording (post-retry-loop fix): 'Do NOT attempt to
-    navigate via clicks' replaces the older 'navigation is the outer planner'
-    phrasing, but the semantic guard is the same."""
-    assert "Do NOT attempt to navigate via clicks" in _INNER_SYSTEM_PROMPT
+    """Inner prompt must forbid the inner planner from clicking sidebar
+    links or other navigation elements to reach a different page —
+    navigation is the outer planner's job via webui_path. Note: clicking
+    an in-page Add/Create button to OPEN a form (Static Routing, OSPF
+    list pages) is NOT navigation and IS allowed (handled by rule 3)."""
+    assert "Do NOT attempt to navigate via sidebar/menu clicks" in _INNER_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +276,21 @@ def test_inner_prompt_documents_previous_steps_rules():
     can adapt to mid-flow failures."""
     assert "Mid-flow continuation" in _INNER_SYSTEM_PROMPT
     assert "previous_steps" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_requires_click_add_when_button_visible():
+    """Regression guard: inner prompt was returning empty plan on the
+    OSPF list page even when an 'Add' button was visible — the outer
+    Haiku then told the user 'WebUI can't click Add automatically' which
+    is wrong (the multi-propose chain handles exactly that). Prompt must
+    explicitly tell the inner planner: 'add/create' intent + 'Add' button
+    visible → draft [click Add], not empty plan."""
+    # The new rule names the click-Add-first pattern explicitly
+    assert "add" in _INNER_SYSTEM_PROMPT.lower()
+    assert "Add Process" in _INNER_SYSTEM_PROMPT
+    assert "DRAFT A SINGLE-STEP PLAN" in _INNER_SYSTEM_PROMPT
+    # The OSPF-list example is in the prompt
+    assert "Opens the OSPF Add form" in _INNER_SYSTEM_PROMPT
 
 
 def test_inner_prompt_does_not_invite_caller_to_re_propose():
