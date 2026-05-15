@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from backend.orchestration.planner import (
     MAX_ITERATIONS,
     PlannerResult,
+    _load_navigation_map,
     run_planner,
 )
 
@@ -171,3 +176,82 @@ def test_history_is_passed_through_on_followup():
     assert result.messages[1] == prior_history[1]
     assert result.messages[2]["role"] == "user"
     assert result.messages[2]["content"] == "second message"
+
+
+# ---------------------------------------------------------------------------
+# Navigation map — _load_navigation_map() unit tests
+# ---------------------------------------------------------------------------
+
+_SYNTHETIC_CATALOG = json.dumps(
+    {
+        "catalog_timestamp": "2026-01-01T00:00:00Z",
+        "pages": [
+            {
+                "url": "https://192.168.10.1/webui/#/staticRouting",
+                "title": "Static Routing",
+                "hint": "Configuration → Routing Protocols → Static Routing",
+            },
+            {
+                "url": "https://192.168.10.1/webui/#/ospf",
+                "title": "OSPF",
+                "hint": "Configuration → Routing Protocols → OSPF",
+            },
+        ],
+    }
+)
+
+
+def test_navigation_map_loads_from_catalog():
+    """Synthetic 2-page catalog produces a Markdown block with both entries."""
+    with patch.object(Path, "read_text", return_value=_SYNTHETIC_CATALOG):
+        result = _load_navigation_map()
+
+    assert "## Cisco WebUI navigation map" in result
+    assert "/webui/#/staticRouting" in result
+    assert "Static Routing" in result
+    assert "/webui/#/ospf" in result
+    assert "OSPF" in result
+    assert "Configuration → Routing Protocols → Static Routing" in result
+
+
+def test_navigation_map_empty_on_missing_file():
+    """Missing catalog file → empty string (graceful degradation)."""
+    with patch.object(Path, "read_text", side_effect=FileNotFoundError("no file")):
+        result = _load_navigation_map()
+
+    assert result == ""
+
+
+def test_navigation_map_empty_on_malformed_json():
+    """Malformed JSON → empty string (graceful degradation)."""
+    with patch.object(Path, "read_text", return_value="{ bad json"):
+        result = _load_navigation_map()
+
+    assert result == ""
+
+
+def test_system_prompt_includes_nav_map_when_loaded():
+    """SYSTEM_PROMPT must contain the nav-map heading and a real catalog URL.
+
+    Skipped when the catalog file doesn't exist on this machine.
+    """
+    catalog_path = Path("knowledge_base/webui-catalog/current.json")
+    if not catalog_path.exists():
+        pytest.skip("catalog file not present — skipping integration check")
+
+    from backend.orchestration.planner import SYSTEM_PROMPT
+
+    assert "## Cisco WebUI navigation map" in SYSTEM_PROMPT
+    assert "/webui/#/staticRouting" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Change 4 — Rule 8: errors from propose_webui_configure are FINAL
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_has_errors_final_rule():
+    """SYSTEM_PROMPT must contain Rule 8 locking down propose_webui_configure retries."""
+    from backend.orchestration.planner import SYSTEM_PROMPT
+
+    assert "Errors from propose_webui_configure are FINAL" in SYSTEM_PROMPT

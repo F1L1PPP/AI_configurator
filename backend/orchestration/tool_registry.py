@@ -28,6 +28,7 @@ from backend.cli_agent.write_tools import (
     _validate_vlan_name,
 )
 from backend.core.logging import get_logger
+from backend.orchestration.configure_planner import draft_plan
 from backend.orchestration.confirmations import (
     NotApproved,
     is_approved,
@@ -36,7 +37,7 @@ from backend.orchestration.confirmations import (
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 from backend.webui_agent.generic_driver import (
-    webui_act,
+    close_all_sessions,
     webui_act_by_intent,
     webui_describe_page,
     webui_open,
@@ -107,10 +108,11 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "set_access_vlan",
         "webui_set_hostname",
         "webui_add_access_vlan",
-        # Phase 4 slice 2 — generic AI-driven write tools. Act on whatever
-        # element the planner picked; same HITL gate as the fast paths.
-        "webui_act",
-        "webui_act_by_intent",
+        # Phase 5 — generic AI-driven WebUI configure. The outer LLM's only
+        # WebUI write path is now propose_webui_configure → APPROVE →
+        # webui_configure. webui_act / webui_act_by_intent are internal
+        # helpers only (not in TOOL_SCHEMAS).
+        "webui_configure",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -385,201 +387,57 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "webui_open",
+        "name": "propose_webui_configure",
         "description": (
-            "Phase 4 slice 1 of the AI-driven WebUI driver — DO NOT call "
-            "this directly yet. The full toolkit (act / describe_page / "
-            "verify / propose_webui_configure) arrives in slice 2 + Phase "
-            "5. Calling webui_open alone yields a semantic-DOM view of the "
-            "page but no way to act on it; for hostname / VLAN / interface "
-            "changes use the existing propose_webui_set_hostname / "
-            "propose_webui_add_access_vlan fast paths instead.\n\n"
-            "When wired (Phase 5): navigates the Cisco WebUI to a path and "
-            "returns {view, session_id}. Read-only (no router write)."
+            "Propose a generic WebUI configuration based on a natural-language intent. "
+            "Use this for anything beyond the fast-path tools (hostname / interface IP / "
+            "access VLAN add): OSPF, RIP, ACLs, DHCP, static routes, trunk VLANs, "
+            "advanced interface settings, etc. The tool grounds the plan in the Cisco "
+            "manual via search_docs and the current WebUI page via describe_page, then "
+            "returns a step plan for human approval. Two-step: always call this first, "
+            "then wait for APPROVE. Do NOT call webui_configure directly without a "
+            "prior propose_webui_configure call from the same turn."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": (
-                        "Cisco WebUI URL path (e.g. '/webui/#/general' for "
-                        "the General page). Hash-fragment routing skips the "
-                        "sidebar navigation walk."
-                    ),
-                },
-                "action_id": {
-                    "type": "string",
-                    "description": (
-                        "Planner-turn key. Reuses an existing live session "
-                        "if one is cached under this id. Auto-allocated if "
-                        "omitted."
-                    ),
-                },
-            },
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "webui_describe_page",
-        "description": (
-            "Phase 4 slice 2 read-only session op — DO NOT call standalone "
-            "until Phase 5 wires the planner. Re-describe the current page "
-            "of an existing webui_open session. Returns a fresh "
-            "{view, session_id}; the view carries a new view_id, so any "
-            "eid the caller cached from a prior view is now stale."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": ("Session id returned by a prior webui_open call."),
-                },
-            },
-            "required": ["session_id"],
-        },
-    },
-    {
-        "name": "webui_verify",
-        "description": (
-            "Phase 4 slice 2 read-only session op — DO NOT call standalone "
-            "until Phase 5 wires the planner. Check whether a substring is "
-            "present in the current page's HTML. Use after a webui_act "
-            "chain to confirm a success banner or expected value. Returns "
-            "{present, url, session_id}."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": ("Session id returned by a prior webui_open call."),
-                },
-                "text": {
-                    "type": "string",
-                    "description": ("Substring to search for in page.content() (full DOM HTML)."),
-                },
-            },
-            "required": ["session_id", "text"],
-        },
-    },
-    {
-        "name": "webui_act",
-        "description": (
-            "Phase 4 slice 2 HITL-gated write tool — DO NOT call standalone "
-            "until Phase 5 wires the planner. Acts on an element from a "
-            "previously-described view. The (session_id, view_id) pair ties "
-            "this call to a specific describe — if a re-describe has happened "
-            "in between, the eid may no longer point at the same element, and "
-            "the child returns failure_reason='stale_view'. Click on a "
-            "Timeout is NEVER retried (router-write safety per CLAUDE.md). "
-            "Soft failures (stale_view / element_*) leave the action "
-            "retryable; hard failures (subprocess crash / not_approved) "
-            "transition the action_id to FAILED."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session id from a prior webui_open call.",
-                },
-                "view_id": {
-                    "type": "string",
-                    "description": (
-                        "view_id from the describe whose eid is referenced. "
-                        "If the child's current view_id has rolled past this "
-                        "one, the call is rejected with failure_reason='stale_view'."
-                    ),
-                },
-                "eid": {
-                    "type": "string",
-                    "description": "Element id from the referenced view.",
-                },
-                "action": {
-                    "type": "string",
-                    "enum": ["click", "fill", "select", "check", "hover"],
-                    "description": (
-                        "Playwright action. 'click' is never auto-retried on "
-                        "Timeout (Cisco WebUI Apply fires via XHR — a retry "
-                        "would be a duplicate router write)."
-                    ),
-                },
-                "action_id": {
-                    "type": "string",
-                    "description": (
-                        "APPROVED action_id from the approval gate. Required; "
-                        "the dispatcher refuses without it."
-                    ),
-                },
-                "value": {
-                    "type": "string",
-                    "description": ("Value for fill/select; ignored for click/hover/check."),
-                },
-            },
-            "required": ["session_id", "view_id", "eid", "action", "action_id"],
-        },
-    },
-    {
-        "name": "webui_act_by_intent",
-        "description": (
-            "Phase 4 slice 2 HITL-gated write tool — DO NOT call standalone "
-            "until Phase 5 wires the planner. Convenience wrapper: instead "
-            "of (view_id, eid), the planner passes an intent dict "
-            "({role, name, action, value}) and the child resolves it to an "
-            "eid via login.first_match against a freshly-described view. "
-            "Useful when the planner can name the element semantically but "
-            "doesn't have a fresh view_id. Returns the same shape as "
-            "webui_act plus chosen_eid (the eid the child resolved to)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session id from a prior webui_open call.",
-                },
                 "intent": {
-                    "type": "object",
-                    "description": (
-                        "Element description + action to perform. Required "
-                        "fields: role, name, action. Optional: value (for "
-                        "fill/select)."
-                    ),
-                    "properties": {
-                        "role": {
-                            "type": "string",
-                            "description": (
-                                "ARIA role of the target element (button, "
-                                "textbox, combobox, link, ...)."
-                            ),
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": (
-                                "Accessible name to match (label text, button text, etc.)."
-                            ),
-                        },
-                        "action": {
-                            "type": "string",
-                            "enum": ["click", "fill", "select", "check", "hover"],
-                        },
-                        "value": {
-                            "type": "string",
-                            "description": (
-                                "Value for fill/select; ignored for click / hover / check."
-                            ),
-                        },
-                    },
-                    "required": ["role", "name", "action"],
-                },
-                "action_id": {
                     "type": "string",
-                    "description": "APPROVED action_id from the approval gate.",
+                    "description": (
+                        "Natural-language description of what to configure, e.g. "
+                        "'configure OSPF process 100 area 0 on GigabitEthernet0/0/1' "
+                        "or 'add static route 10.0.0.0/24 via 192.168.1.1'."
+                    ),
+                },
+                "webui_path": {
+                    "type": "string",
+                    "description": (
+                        "WebUI hash route to open before drafting the plan, e.g. "
+                        "'/webui/#/routing/ospf'. Derived from search_docs if known."
+                    ),
                 },
             },
-            "required": ["session_id", "intent", "action_id"],
+            "required": ["intent", "webui_path"],
+        },
+    },
+    {
+        "name": "webui_configure",
+        "description": (
+            "Execute a previously-approved WebUI configuration plan. Requires an "
+            "action_id from a propose_webui_configure call that has been APPROVED by "
+            "the human. Runs each plan step via the internal act-by-intent + self-heal "
+            "machinery, screenshots at every step, and verifies the success text if "
+            "specified. Marks the action EXECUTED on success or FAILED on any step error."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "Action ID from the matching propose_webui_configure call.",
+                },
+            },
+            "required": ["action_id"],
         },
     },
 ]
@@ -693,6 +551,183 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     }
 
 
+def _propose_webui_configure(**kwargs: Any) -> dict:
+    """Propose a generic WebUI configure action.
+
+    Flow: search_docs → webui_open → describe_page → draft_plan → propose_action.
+    Returns awaiting_approval with the plan, evidence, and action_id.
+    """
+    intent = kwargs.get("intent")
+    webui_path = kwargs.get("webui_path")
+    if not isinstance(intent, str) or not intent.strip():
+        return {"error": "bad_parameters", "message": "intent must be a non-empty string"}
+    if not isinstance(webui_path, str) or not webui_path.strip():
+        return {"error": "bad_parameters", "message": "webui_path must be a non-empty string"}
+
+    # 1. RAG grounding
+    rag_result = _search_docs(query=intent, top_k=3)
+    if "error" in rag_result:
+        return rag_result
+    rag_chunks = rag_result.get("results", [])
+
+    # 2. Open WebUI session (no action_id yet — propose_action runs after)
+    open_result = webui_open(path=webui_path)
+    if "error" in open_result:
+        return open_result
+    session_id = open_result["session_id"]
+
+    # 3. Fresh describe (the view from webui_open should suffice, but re-describe
+    # for the most current snapshot — Angular can paint after initial open).
+    desc_result = webui_describe_page(session_id=session_id)
+    if "error" in desc_result:
+        close_all_sessions()
+        return desc_result
+    view = desc_result["view"]
+
+    # 4. Inner LLM drafts the plan
+    try:
+        drafted = draft_plan(intent, rag_chunks, view)
+    except RuntimeError as exc:
+        log.error("propose_webui_configure_draft_failed", intent=intent, error=str(exc))
+        # Close the orphaned session — propose failed before propose_action
+        # took ownership of session_id, so nothing else will clean it up.
+        # close_all_sessions is idempotent on missing sessions.
+        close_all_sessions()
+        return {"error": "draft_failed", "message": str(exc)}
+
+    plan = drafted["plan"]
+    verify_text = drafted["verify_text"]
+    risk = drafted["risk"]
+
+    if not plan:
+        # Inner LLM said it can't map the intent. Surface to the planner.
+        close_all_sessions()
+        return {
+            "error": "intent_not_mappable",
+            "message": risk,
+            "evidence": [
+                {"source": c.get("source"), "section": c.get("section")} for c in rag_chunks
+            ],
+        }
+
+    # 5. Register the action
+    evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
+    action_id = propose_action(
+        tool="webui_configure",
+        params={
+            "intent": intent,
+            "webui_path": webui_path,
+            "plan": plan,
+            "verify_text": verify_text,
+            "risk": risk,
+            "evidence": evidence,
+            "session_id": session_id,
+        },
+    )
+
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "webui_configure",
+        "preview": {
+            "intent": intent,
+            "plan": plan,
+            "verify_text": verify_text,
+            "risk": risk,
+            "evidence": evidence,
+            "step_count": len(plan),
+        },
+        "next_step": _NEXT_STEP_WEBUI,
+    }
+
+
+def _webui_configure(**kwargs: Any) -> dict:
+    """Execute a previously-approved webui_configure plan.
+
+    Iterates each step via webui_act_by_intent, screenshots, optional final
+    verify, then mark_executed.
+    """
+    from backend.orchestration.confirmations import get_action, mark_executed, mark_failed
+
+    action_id = kwargs.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        return {"error": "bad_parameters", "message": "action_id must be a non-empty string"}
+
+    # HITL layer 2 — same gate as webui_act
+    if not is_approved(action_id):
+        return {"error": "not_approved", "message": f"action_id {action_id!r} is not APPROVED"}
+
+    try:
+        action = get_action(action_id)
+    except KeyError:
+        return {"error": "unknown_action", "message": f"no action with id {action_id!r}"}
+
+    params = action.get("params", {})
+    plan = params.get("plan", [])
+    verify_text = params.get("verify_text")
+    session_id = params.get("session_id")
+
+    if not plan or not session_id:
+        mark_failed(action_id)
+        return {"error": "bad_action_params", "message": "action missing plan or session_id"}
+
+    # Iterate steps
+    step_results = []
+    for idx, step in enumerate(plan):
+        intent_dict = {
+            "role": step.get("intent", {}).get("role", ""),
+            "name": step.get("intent", {}).get("name", ""),
+            "action": step.get("action", "click"),
+            "value": step.get("value"),
+        }
+        step_result = webui_act_by_intent(
+            session_id=session_id,
+            intent=intent_dict,
+            action_id=action_id,
+        )
+        step_results.append({"step_index": idx, "intent": step["intent"], "result": step_result})
+
+        if "error" in step_result or not step_result.get("ok"):
+            mark_failed(action_id)
+            log.error(
+                "webui_configure_step_failed",
+                action_id=action_id,
+                step_index=idx,
+                step=step,
+                failure=step_result,
+            )
+            return {
+                "error": "step_failed",
+                "step_index": idx,
+                "failure": step_result,
+                "completed_steps": step_results,
+            }
+
+    # Final verify
+    verify_result = None
+    if verify_text:
+        verify_result = webui_verify(session_id=session_id, text=verify_text)
+        if not verify_result.get("present"):
+            mark_failed(action_id)
+            return {
+                "error": "verify_failed",
+                "verify_text": verify_text,
+                "verify_result": verify_result,
+                "completed_steps": step_results,
+            }
+
+    # Success — mark_executed, close session
+    mark_executed(action_id)
+    close_all_sessions()
+
+    return {
+        "ok": True,
+        "action_id": action_id,
+        "completed_steps": step_results,
+        "verify_result": verify_result,
+    }
+
+
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "show_version": read_tools.show_version,
     "show_ip_interface_brief": read_tools.show_ip_interface_brief,
@@ -709,21 +744,11 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "webui_set_hostname": change_hostname_via_webui,
     "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,
     "webui_add_access_vlan": add_access_vlan_via_webui,
-    # Phase 4 slice 1 — generic AI-driven driver. Schema is in TOOL_SCHEMAS
-    # below but the description tells Claude to skip it until the full
-    # toolkit (act / propose_webui_configure) lands in Phase 5. Callable
-    # via execute_tool() for tests.
-    "webui_open": webui_open,
-    # Phase 4 slice 2 (commit 1) — read-only session ops on top of slice 1.
-    # Same caveat: not user-facing until Phase 5 wires the planner.
-    "webui_describe_page": webui_describe_page,
-    "webui_verify": webui_verify,
-    # Phase 4 slice 2 (commit 2) — the HITL-gated generic write tool.
-    "webui_act": webui_act,
-    # Phase 4 slice 2 (commit 3) — convenience wrapper that resolves a
-    # planner intent ({role, name, action}) to an eid child-side, then
-    # dispatches into the same _do_act self-heal machine.
-    "webui_act_by_intent": webui_act_by_intent,
+    # Phase 5 — generic AI-driven WebUI configure (two-step HITL).
+    # webui_open / webui_describe_page / webui_verify / webui_act /
+    # webui_act_by_intent are internal helpers only (not in TOOL_SCHEMAS).
+    "propose_webui_configure": _propose_webui_configure,
+    "webui_configure": _webui_configure,
 }
 
 

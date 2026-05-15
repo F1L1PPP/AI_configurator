@@ -216,6 +216,22 @@ def _resolve_target_url(page: Any, raw_path: str) -> str:
     derive ``scheme://host`` from the current page URL.
     """
     if raw_path.startswith(("http://", "https://")):
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        from backend.core.settings import get_settings  # noqa: PLC0415
+
+        parsed = urlparse(raw_path)
+        settings = get_settings()
+        # Prefer the explicit router_host field if present; fall back to
+        # parsing the hostname from router_webui_base_url.
+        expected_host = getattr(settings, "router_host", None)
+        if not expected_host:
+            expected_host = urlparse(settings.router_webui_base_url).hostname
+        if not parsed.hostname or parsed.hostname != expected_host:
+            raise RuntimeError(
+                f"_resolve_target_url refused absolute URL with host "
+                f"{parsed.hostname!r} (expected {expected_host!r})"
+            )
         return raw_path
 
     current = page.url or ""
@@ -257,6 +273,20 @@ def _relogin_if_needed(page: Any) -> None:
 
 # Actions accepted by `webui_act`. Anything else returns failure_reason="unknown_action".
 _VALID_ACTIONS = frozenset({"click", "fill", "select", "check", "hover"})
+
+# Accessible-name substrings that _do_act_by_intent must NEVER act on.
+# Defends against prompt-injected intents that resolve to destructive controls.
+_SENSITIVE_DENY_LIST = frozenset(
+    {
+        "factory reset",
+        "reboot",
+        "restart",
+        "delete user",
+        "restore configuration",
+        "disable http server",
+        "clear configuration",
+    }
+)
 
 # Per-action Playwright timeout (ms). Five seconds is plenty for a click /
 # fill against a healthy WebUI; anything longer is a real problem.
@@ -588,6 +618,33 @@ def _do_act_by_intent(
             {
                 "ok": False,
                 "failure_reason": "unknown_eid",
+                "chosen_eid": None,
+                "view": view,
+                "attempts": 0,
+            },
+            new_map,
+            view["view_id"],
+        )
+
+    # 1b. Sensitive-text deny-list: refuse to act on locators whose accessible
+    # name matches dangerous operations. Defends against prompt-injected intents
+    # that would resolve to "Factory Reset" / "Reboot" / etc.
+    try:
+        accessible_name = (chosen_loc.get_attribute("aria-label") or "").strip()
+        if not accessible_name:
+            accessible_name = (chosen_loc.text_content() or "").strip()
+    except Exception:  # noqa: BLE001
+        accessible_name = ""
+    name_lower = accessible_name.lower()
+    matched_phrase = next((p for p in _SENSITIVE_DENY_LIST if p in name_lower), None)
+    if matched_phrase is not None:
+        view, new_map = describe_page(page)
+        return (
+            {
+                "ok": False,
+                "failure_reason": "sensitive_text_denied",
+                "denied_phrase": matched_phrase,
+                "accessible_name": accessible_name,
                 "chosen_eid": None,
                 "view": view,
                 "attempts": 0,

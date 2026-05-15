@@ -39,7 +39,10 @@ def test_search_docs_returns_expected_shape(
     r0 = result["results"][0]
     assert r0["source"] == "isr1100-sw-config.pdf"
     assert r0["section"] == "Hardware Overview"
-    assert r0["text"] == "chunk one text"
+    assert r0["text"] == (
+        '<doc_chunk source="isr1100-sw-config.pdf" '
+        'section="Hardware Overview">chunk one text</doc_chunk>'
+    )
     assert r0["score"] == pytest.approx(0.88, abs=0.001)
 
 
@@ -72,3 +75,20 @@ def test_search_docs_handles_missing_metadata(
     result = rt.search_docs("q", top_k=1)
     assert result["results"][0]["source"] == ""
     assert result["results"][0]["section"] == ""
+
+
+def test_search_docs_escapes_html_in_metadata(
+    _mock_model_and_collection: tuple[MagicMock, MagicMock],
+) -> None:
+    """Metadata with HTML-special chars must be escaped in doc_chunk attributes."""
+    _, mock_coll = _mock_model_and_collection
+    mock_coll.query.return_value = {
+        "documents": [["chunk text"]],
+        "metadatas": [[{"source": 'evil"<script>', "section": "ok"}]],
+        "distances": [[0.1]],
+    }
+    result = rt.search_docs("q", top_k=1)
+    text = result["results"][0]["text"]
+    # Must contain html-escaped version, NOT raw special chars in the attribute.
+    assert "evil&quot;&lt;script&gt;" in text
+    assert '"evil"<script>"' not in text

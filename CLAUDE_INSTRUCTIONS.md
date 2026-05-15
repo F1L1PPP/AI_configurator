@@ -91,7 +91,7 @@ using the tool name correctly in context, skip the explanation for that one.
 
 - Python 3.12. Pydantic Settings for env. Ruff for lint+format. pytest + pytest-playwright for tests.
 - LLM calls go through the Anthropic SDK directly — no LangChain. Reach for LangGraph only if state graphs become genuinely unwieldy (justify first).
-- WebUI flows are **deterministic Playwright** with auto-waiting locators. Playwright MCP is for discovery/debug only — not the production execution path.
+- WebUI flows are **AI-planned, deterministically-executed Playwright**: the LLM drafts the click-path via `propose_webui_configure(intent)` grounded by RAG + semantic DOM, then each click runs through deterministic Python with HITL approval (see [`docs/plan-ai-first-webui.md`](docs/plan-ai-first-webui.md) for the execution model). Playwright MCP is for discovery/debug only — not the production execution path.
 - Embeddings are local (`sentence-transformers/all-MiniLM-L6-v2`). ChromaDB persisted. Don't add cloud embedding providers without my approval.
 - Model split: Opus 4.7 for architecture, hard debugging, release-gate review. Sonnet 4.6 for bulk implementation, page analysis, tests.
 

@@ -1,11 +1,20 @@
 import contextlib
 import logging
+import re
 import sys
 from pathlib import Path
 
 import structlog
 
 _REDACT_KEYS = frozenset({"password", "secret", "api_key", "token"})
+
+# Keys whose values contain intentional newlines (rendered tracebacks) —
+# skip control-char stripping for these so tracebacks stay readable.
+_SAFE_KEYS = frozenset({"exception"})
+
+# Strip NUL, SOH-BS, LF-US (0x00-0x08 and 0x0a-0x1f), and DEL (0x7f).
+# 0x09 (tab) is excluded so tab-delimited log lines pass through unchanged.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 # Sentinel attribute we tag onto handlers we install ourselves, so reload
 # cleanup only touches our own handlers — not anything installed by uvicorn,
@@ -17,6 +26,21 @@ def redact_secrets(logger: object, method: str, event_dict: dict) -> dict:
     for key in _REDACT_KEYS:
         if key in event_dict:
             event_dict[key] = "***REDACTED***"
+    return event_dict
+
+
+def sanitize_control_chars(logger: object, method: str, event_dict: dict) -> dict:
+    """Strip dangerous control characters from string values in the event dict.
+
+    Skips keys in _SAFE_KEYS (e.g. ``exception``) which contain intentional
+    newlines from rendered tracebacks. Tab (0x09) is also preserved so
+    tab-delimited data passes through unchanged.
+    """
+    for key, value in event_dict.items():
+        if key in _SAFE_KEYS:
+            continue
+        if isinstance(value, str):
+            event_dict[key] = _CONTROL_CHARS_RE.sub("", value)
     return event_dict
 
 
@@ -66,6 +90,7 @@ def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) ->
         # until tracebacks were rendered.
         structlog.processors.format_exc_info,
         redact_secrets,
+        sanitize_control_chars,
     ]
 
     structlog.configure(

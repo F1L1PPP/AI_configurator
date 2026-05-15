@@ -289,12 +289,106 @@ def _serialise(eid: str, cand: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _spatial_label(loc: Locator) -> str:
+    """Find a nearby visible text element above this input via spatial proximity.
+
+    Cisco's WebUI Angular forms use the pattern:
+        <a class="column-header">Prefix Mask</a>
+        ...
+        <input placeholder="xxx.xxx.xxx.xxx">
+    The label has no <label for=> link to the input — they're siblings or
+    distant cousins in the DOM. This helper queries the page for visible
+    text-bearing elements positioned above the input (within 300px vertical)
+    and horizontally overlapping or near-aligned (within ±100px), then
+    picks the closest one as the input's name.
+
+    Returns "" if no candidate found or on any error. Single ``page.evaluate``
+    call to keep the round-trip cost flat regardless of page complexity.
+    """
+    try:
+        bbox = loc.bounding_box(timeout=_PROBE_TIMEOUT_MS)
+    except Exception as exc:
+        log.debug("spatial_label_bbox_failed", error=str(exc))
+        return ""
+    if not bbox:
+        return ""
+    target = {
+        "x": bbox.get("x", 0),
+        "y": bbox.get("y", 0),
+        "width": bbox.get("width", 0),
+        "height": bbox.get("height", 0),
+    }
+    if target["width"] == 0 or target["height"] == 0:
+        return ""
+
+    # JS-side search. Self-contained algorithm; no DOM queries from Python.
+    js = """
+    (t) => {
+      const sel = 'label,span,div,a,p,td,th,h1,h2,h3,h4,h5,h6,strong,em';
+      const cs = document.querySelectorAll(sel);
+      let bestText = null;
+      let bestScore = Infinity;
+      for (const el of cs) {
+        // Skip containers that wrap form elements (they own the layout, not the label).
+        if (el.querySelector('input, textarea, select, button')) continue;
+        const text = (el.innerText || el.textContent || '').trim();
+        if (!text || text.length > 60) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        // Must be positioned above the input.
+        const dy = t.y - (r.y + r.height);
+        if (dy < 0 || dy > 300) continue;
+        // Horizontal alignment: overlap zero-cost; near-alignment small cost; far rejected.
+        const inputEnd = t.x + t.width;
+        const labelEnd = r.x + r.width;
+        const overlap = Math.max(0, Math.min(labelEnd, inputEnd) - Math.max(r.x, t.x));
+        let alignCost;
+        if (overlap > 0) {
+          alignCost = 0;
+        } else {
+          alignCost = Math.min(Math.abs(r.x - t.x), Math.abs(labelEnd - t.x));
+          if (alignCost > 100) continue;
+        }
+        // Total score: closer above is much better than horizontally aligned.
+        const score = dy + alignCost / 3;
+        if (score < bestScore) {
+          bestScore = score;
+          bestText = text;
+        }
+      }
+      return bestText;
+    }
+    """
+    try:
+        result = loc.page.evaluate(js, target)
+    except Exception as exc:
+        log.debug("spatial_label_evaluate_failed", error=str(exc))
+        return ""
+    if not isinstance(result, str) or not result.strip():
+        return ""
+    return result.strip()[:_MAX_NAME_LEN]
+
+
 def _resolve_name(loc: Locator) -> str:
-    """Walk aria-label -> aria-labelledby -> inner_text -> placeholder."""
+    """Walk the name-resolution chain for a Playwright Locator.
+
+    Steps (Phase 3.4):
+      1. aria-label
+      2. aria-labelledby
+      3. inner_text
+      4. <label for="id"> association
+      5. spatial label (Phase 3.4) — nearest text element above the input
+      6. placeholder
+      7. title
+      8. name attribute
+      9. id (skip ng-* auto-generated Angular ids)
+    """
+    # 1. aria-label
     aria_label = _safe_attr(loc, "aria-label")
     if aria_label and aria_label.strip():
         return aria_label.strip()[:_MAX_NAME_LEN]
 
+    # 2. aria-labelledby
     labelledby = _safe_attr(loc, "aria-labelledby")
     if labelledby:
         ref_id = labelledby.split()[0]
@@ -306,13 +400,52 @@ def _resolve_name(loc: Locator) -> str:
         except Exception as exc:
             log.debug("labelledby_resolve_failed", ref=ref_id, error=str(exc))
 
+    # 3. inner_text
     inner = _safe_call(lambda: loc.inner_text(timeout=_PROBE_TIMEOUT_MS), default="")
     if inner and isinstance(inner, str) and inner.strip():
         return inner.strip()[:_MAX_NAME_LEN]
 
+    # 4. <label for="id"> association: standard HTML form labeling pattern.
+    #    Cisco's Angular forms use this when aria-labelledby isn't wired.
+    input_id = _safe_attr(loc, "id")
+    if input_id:
+        try:
+            label_text = loc.page.locator(f'label[for="{input_id}"]').inner_text(
+                timeout=_PROBE_TIMEOUT_MS
+            )
+            if label_text and isinstance(label_text, str) and label_text.strip():
+                return label_text.strip()[:_MAX_NAME_LEN]
+        except Exception as exc:
+            log.debug("label_for_resolve_failed", input_id=input_id, error=str(exc))
+
+    # 5. Spatial label discovery (Phase 3.4): visually nearby text element.
+    #    Catches Cisco's table-form pattern where labels are siblings of inputs
+    #    without <label for=> association. Returns early on hit so we override
+    #    the (often uninformative) placeholder/name/id fallbacks below.
+    spatial = _spatial_label(loc)
+    if spatial:
+        return spatial
+
+    # 6. placeholder (used only when spatial returned empty).
     placeholder = _safe_attr(loc, "placeholder")
     if placeholder and placeholder.strip():
         return placeholder.strip()[:_MAX_NAME_LEN]
+
+    # 7. title attribute (tooltip on hover) — semantic but only visible on hover.
+    title = _safe_attr(loc, "title")
+    if title and title.strip():
+        return title.strip()[:_MAX_NAME_LEN]
+
+    # 8. name attribute (form-field identifier) — usually camelCase/snake_case
+    #    but readable enough as a last semantic resort.
+    name_attr = _safe_attr(loc, "name")
+    if name_attr and name_attr.strip():
+        return name_attr.strip()[:_MAX_NAME_LEN]
+
+    # 9. id attribute, BUT skip Angular-autogenerated `ng-*` IDs (e.g.
+    #    "ng-1234abc") — those carry no semantic meaning.
+    if input_id and not input_id.startswith("ng-"):
+        return input_id.strip()[:_MAX_NAME_LEN]
 
     return ""
 

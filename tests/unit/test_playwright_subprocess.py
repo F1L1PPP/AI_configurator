@@ -415,3 +415,97 @@ def test_unknown_action_short_circuits():
         )
 
     assert reply["failure_reason"] == "unknown_action"
+
+
+# ---------------------------------------------------------------------------
+# QW3 — sensitive-text deny-list in _do_act_by_intent
+# ---------------------------------------------------------------------------
+
+
+def test_act_by_intent_denies_sensitive_text():
+    """_do_act_by_intent must refuse to act on locators whose accessible name
+    matches a phrase in _SENSITIVE_DENY_LIST, without clicking/filling at all.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+
+    chosen_loc = MagicMock()
+    # Mixed case to verify case-insensitive match
+    chosen_loc.get_attribute.return_value = "Factory Reset"
+
+    post_view = {
+        "view_id": "post",
+        "url": "",
+        "title": "",
+        "elements": [],
+        "modals": [],
+        "errors": [],
+    }
+
+    with (
+        patch("backend.webui_agent.login.first_match", return_value=chosen_loc),
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page",
+            return_value=(post_view, {}),
+        ),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id=None,
+            msg={
+                "intent": {
+                    "role": "button",
+                    "name": "factory reset",
+                    "action": "click",
+                    "value": None,
+                }
+            },
+            ev=ev,
+        )
+
+    assert reply["ok"] is False
+    assert reply["failure_reason"] == "sensitive_text_denied"
+    assert reply["denied_phrase"] == "factory reset"
+    # THE CRUCIAL ASSERTIONS — action must never have executed
+    assert chosen_loc.click.call_count == 0
+    assert chosen_loc.fill.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# QW4 — URL-origin guard in _resolve_target_url
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_target_url_rejects_foreign_origin():
+    """_resolve_target_url must raise RuntimeError for absolute URLs whose
+    hostname does not match the configured router_host.
+    """
+    from unittest.mock import patch as _patch
+
+    from backend.webui_agent._playwright_subprocess import _resolve_target_url
+
+    mock_settings = MagicMock()
+    mock_settings.router_host = "192.168.10.1"
+    mock_settings.router_webui_base_url = "https://192.168.10.1/"
+
+    page = MagicMock()
+    page.url = "https://192.168.10.1/webui/#/general"
+
+    with _patch("backend.core.settings.get_settings", return_value=mock_settings):
+        # Foreign origin must raise.
+        with pytest.raises(RuntimeError, match="refused"):
+            _resolve_target_url(page, "https://evil.example/foo")
+
+        # Matching origin must pass through unchanged.
+        result = _resolve_target_url(page, "https://192.168.10.1/foo")
+        assert result == "https://192.168.10.1/foo"
+
+        # Relative path must still work without raising.
+        result = _resolve_target_url(page, "/general")
+        assert "evil.example" not in result
+        assert not result.startswith("http://evil")
+        assert not result.startswith("https://evil")
