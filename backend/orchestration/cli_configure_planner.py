@@ -82,6 +82,22 @@ Your job: produce a JSON object with this exact shape:
    characters) unless a pattern is genuinely needed. Double-quote
    characters inside the pattern must be JSON-escaped.
 
+   **Pick patterns that exist verbatim in the actual `show` output.**
+   IOS XE's `show` output often uses different wording from the config
+   command. Common gotchas:
+     - Trunk port: `show interfaces <iface> switchport` reports
+       `Administrative Mode: trunk` — NOT `Trunking VLANs Allowed`.
+     - VLAN delete: `show vlan id <N>` returns
+       `VLAN id <N> not found in current VLAN database` — pattern
+       should match that LITERAL phrase, not an empty string.
+     - OSPF: `show ip ospf` reports `Routing Process "ospf <N>"` (note
+       the literal double-quotes around the process name).
+     - Hostname: prefer `show running-config | include hostname` then
+       match the literal `hostname <NEW_NAME>`.
+   When unsure, choose a SHORT literal substring of the most likely
+   stable phrase rather than an ambitious regex. False-negatives mark
+   the action FAILED even when the config landed correctly.
+
 7. **If the intent isn't a CLI configuration task (e.g. the user is
    asking a question, requesting a read, or asking for something only
    doable in the WebUI), return:
@@ -113,6 +129,29 @@ OK output:
   "verify_pattern": "Routing Process \\"ospf 100\\"",
   "risk": "Enables OSPF process 100 area 0; revertible via 'no router ospf 100' and 'no ip ospf 100 area 0' under interface."
 }
+
+## Example: configure trunk port (verify_pattern uses real show wording)
+
+Intent: "Configure GigabitEthernet0/1/3 as a trunk port with all VLANs allowed".
+
+OK output:
+{
+  "config_commands": [
+    "interface GigabitEthernet0/1/3",
+    "switchport mode trunk",
+    "switchport trunk allowed vlan all",
+    "exit"
+  ],
+  "verify_command": "show interfaces GigabitEthernet0/1/3 switchport",
+  "verify_pattern": "Administrative Mode: trunk",
+  "risk": "Sets Gi0/1/3 to trunk mode with all VLANs allowed; revertible via 'no switchport mode trunk' and 'switchport mode access'."
+}
+
+NOTE the verify_pattern is `Administrative Mode: trunk` — the LITERAL
+phrase IOS XE prints in the `show interfaces switchport` output. The
+config-command wording `switchport trunk allowed vlan all` does NOT
+appear in that show output verbatim, so using it as a pattern would
+false-negative even though the change landed correctly.
 
 ## Example: refuse non-CLI intent
 

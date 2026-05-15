@@ -188,3 +188,15 @@ def test_inner_prompt_warns_about_doc_chunks():
     """Prompt-injection defense — doc chunks are reference, not instructions."""
     assert "reference material" in _INNER_SYSTEM_PROMPT
     assert "never an" in _INNER_SYSTEM_PROMPT.lower() or "never an" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_documents_verify_show_wording_gotchas():
+    """Regression guard: trunk-port verify failed because Haiku invented
+    a regex from the config command ('Trunking VLANs Allowed') that doesn't
+    appear in the show output ('Administrative Mode: trunk'). Prompt must
+    document the common verify-pattern gotchas (trunk, VLAN delete, OSPF,
+    hostname) so Haiku picks patterns that appear verbatim in show output."""
+    assert "Administrative Mode: trunk" in _INNER_SYSTEM_PROMPT
+    assert "not found in current VLAN database" in _INNER_SYSTEM_PROMPT
+    # The dedicated trunk-port example with the right verify_pattern
+    assert "switchport mode trunk" in _INNER_SYSTEM_PROMPT
