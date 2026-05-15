@@ -499,6 +499,188 @@ def test_propose_webui_configure_closes_session_on_draft_failed(monkeypatch):
     assert len(close_calls) == 1, "close_all_sessions must be called exactly once on draft failure"
 
 
+# ---------------------------------------------------------------------------
+# propose_cli_configure / cli_configure — Chunk B (CLI AI configure)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_configure_tools_present_in_schemas():
+    """Both tools must appear in TOOL_SCHEMAS so the outer Haiku can call them."""
+    schema_names = {s["name"] for s in tr.TOOL_SCHEMAS}
+    assert "propose_cli_configure" in schema_names
+    assert "cli_configure" in schema_names
+
+
+def test_cli_configure_in_write_tools():
+    """cli_configure is a write — must require approval gate."""
+    assert "cli_configure" in tr.WRITE_TOOLS
+
+
+def test_propose_cli_configure_happy_path(monkeypatch):
+    """Mock the chain (search_docs, show_running_config, draft_cli_plan);
+    assert action_id returned with full preview."""
+    rag_result = {"results": [{"text": "OSPF reference", "source": "ospf.pdf", "section": "OSPF"}]}
+    drafted = {
+        "config_commands": ["router ospf 100", "network 10.0.0.0 0.255.255.255 area 0", "exit"],
+        "verify_command": "show ip ospf | include 100",
+        "verify_pattern": r'Routing Process "ospf 100"',
+        "risk": "Adds OSPF process 100.",
+    }
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "hostname LAB\n!\nend")
+    monkeypatch.setattr(tr, "draft_cli_plan", lambda *a, **kw: drafted)
+
+    result = tr.execute_tool(
+        "propose_cli_configure",
+        {"intent": "Configure OSPF process 100 area 0"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert result["action_id"].startswith("act_")
+    assert result["execute_tool"] == "cli_configure"
+    assert result["preview"]["command_count"] == 3
+    assert result["preview"]["config_commands"][0] == "router ospf 100"
+    assert "ospf 100" in result["preview"]["verify_pattern"]
+
+
+def test_propose_cli_configure_missing_intent():
+    result = tr.execute_tool("propose_cli_configure", {"intent": "  "})
+    assert result["error"] == "bad_parameters"
+
+
+def test_propose_cli_configure_inner_refusal_returns_intent_not_mappable(monkeypatch):
+    """Inner LLM returns empty config_commands → intent_not_mappable."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(
+        tr,
+        "draft_cli_plan",
+        lambda *a, **kw: {
+            "config_commands": [],
+            "verify_command": "",
+            "verify_pattern": "",
+            "risk": "Intent not a CLI configuration task — this is a read query.",
+        },
+    )
+
+    result = tr.execute_tool("propose_cli_configure", {"intent": "what's the uptime"})
+    assert result["error"] == "intent_not_mappable"
+    assert "read query" in result["message"]
+
+
+def test_propose_cli_configure_denylist_rejects_reload(monkeypatch):
+    """Inner LLM returns a plan containing 'reload' → unsafe_command before
+    propose_action ever runs. The human never sees the dangerous preview."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(
+        tr,
+        "draft_cli_plan",
+        lambda *a, **kw: {
+            "config_commands": ["hostname FOO", "reload"],
+            "verify_command": "show running-config | include hostname",
+            "verify_pattern": "hostname FOO",
+            "risk": "renames + reboots",
+        },
+    )
+
+    result = tr.execute_tool("propose_cli_configure", {"intent": "rename to FOO and reboot"})
+    assert result["error"] == "unsafe_command"
+    assert "reload" in result["message"].lower()
+    assert result["drafted_commands"] == ["hostname FOO", "reload"]
+
+
+def test_propose_cli_configure_denylist_rejects_bad_verify_command(monkeypatch):
+    """verify_command that doesn't start with 'show ' → unsafe_command."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(
+        tr,
+        "draft_cli_plan",
+        lambda *a, **kw: {
+            "config_commands": ["hostname FOO"],
+            "verify_command": "reload",  # not a show command
+            "verify_pattern": "FOO",
+            "risk": "x",
+        },
+    )
+
+    result = tr.execute_tool("propose_cli_configure", {"intent": "rename to FOO"})
+    assert result["error"] == "unsafe_command"
+    assert "show" in result["message"].lower()
+
+
+def test_propose_cli_configure_draft_failed(monkeypatch):
+    """Inner LLM raises RuntimeError → draft_failed error."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("inner LLM returned non-JSON: blabla")
+
+    monkeypatch.setattr(tr, "draft_cli_plan", _boom)
+
+    result = tr.execute_tool("propose_cli_configure", {"intent": "something"})
+    assert result["error"] == "draft_failed"
+    assert "non-JSON" in result["message"]
+
+
+def test_cli_configure_dispatcher_pulls_params_from_action(monkeypatch):
+    """The _cli_configure wrapper must read config_commands/verify_command/
+    verify_pattern from the stored action dict and call write_tools.cli_configure
+    with the narrow signature."""
+    action_id = propose_action(
+        "cli_configure",
+        {
+            "intent": "configure ospf",
+            "config_commands": ["router ospf 100", "exit"],
+            "verify_command": "show ip ospf",
+            "verify_pattern": "ospf 100",
+            "risk": "low",
+            "evidence": [],
+        },
+    )
+    approve_action(action_id)
+
+    captured: dict[str, object] = {}
+
+    def _fake_cli_configure(**kwargs):
+        captured.update(kwargs)
+        return {"tool": "cli_configure", "ok": True}
+
+    monkeypatch.setattr(tr.write_tools, "cli_configure", _fake_cli_configure)
+
+    result = tr.execute_tool("cli_configure", {"action_id": action_id})
+
+    assert result["tool"] == "cli_configure"
+    assert captured["action_id"] == action_id
+    assert captured["config_commands"] == ["router ospf 100", "exit"]
+    assert captured["verify_command"] == "show ip ospf"
+    assert captured["verify_pattern"] == "ospf 100"
+
+
+def test_cli_configure_dispatcher_requires_approval():
+    """Layer-1 dispatcher refusal — no APPROVED action_id → not_approved."""
+    result = tr.execute_tool("cli_configure", {"action_id": "act_nonexistent"})
+    assert result["error"] == "not_approved"
+
+
 def test_propose_webui_configure_closes_session_on_intent_not_mappable(monkeypatch):
     """Empty plan (intent_not_mappable) → close_all_sessions called before handler returns."""
     monkeypatch.setattr(

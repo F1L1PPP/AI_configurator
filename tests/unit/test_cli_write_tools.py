@@ -280,3 +280,227 @@ def test_set_access_vlan_accepts_valid_names(_mock_pool, _mock_snapshot):
     approve_action(aid)
     for ok in ("OFFICE", "lab-vlan-1", "DMZ_INTERNAL", "v" * 32):
         wt._validate_vlan_name(ok)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# CLI AI configure — validators
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_commands_accepts_safe_block():
+    wt._validate_config_commands(
+        [
+            "router ospf 100",
+            "network 10.0.0.0 0.255.255.255 area 0",
+            "exit",
+            "interface Vlan1",
+            "ip ospf 100 area 0",
+            "exit",
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_cmd,fragment",
+    [
+        ("reload", "reload reboots"),
+        ("reload in 5", "reload reboots"),
+        ("erase startup-config", "erase wipes"),
+        ("delete flash:running-backup", "delete removes"),
+        ("format flash:", "format wipes"),
+        ("write erase", "write erase"),
+        ("boot system flash:c1100-universalk9.bin", "boot system"),
+        ("enable secret 0 hunter2", "privileged access"),
+        ("enable password cisco", "privileged access"),
+        ("username badguy privilege 15 password x", "privileged access"),
+        ("router ospf 100\nreload", "newline or semicolon"),
+        ("router ospf 100; reload", "newline or semicolon"),
+    ],
+)
+def test_validate_config_commands_rejects_unsafe(bad_cmd, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        wt._validate_config_commands([bad_cmd])
+
+
+def test_validate_config_commands_rejects_empty_list():
+    with pytest.raises(ValueError, match="non-empty list"):
+        wt._validate_config_commands([])
+
+
+def test_validate_config_commands_rejects_non_list():
+    with pytest.raises(ValueError, match="non-empty list"):
+        wt._validate_config_commands("router ospf 100")  # type: ignore[arg-type]
+
+
+def test_validate_config_commands_rejects_non_string_entry():
+    with pytest.raises(ValueError, match="non-empty string"):
+        wt._validate_config_commands([42])  # type: ignore[list-item]
+
+
+def test_validate_verify_command_accepts_show():
+    wt._validate_verify_command("show ip ospf")
+    wt._validate_verify_command("show ip ospf | include 100")
+    wt._validate_verify_command("SHOW running-config | section router ospf")
+
+
+@pytest.mark.parametrize(
+    "bad_cmd,fragment",
+    [
+        ("reload", "must start with 'show '"),
+        ("ping 8.8.8.8", "must start with 'show '"),
+        ("show ip ospf\nreload", "newline or semicolon"),
+        ("show ip ospf; reload", "newline or semicolon"),
+        ("", "non-empty string"),
+    ],
+)
+def test_validate_verify_command_rejects_unsafe(bad_cmd, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        wt._validate_verify_command(bad_cmd)
+
+
+def test_validate_verify_pattern_accepts_compilable():
+    wt._validate_verify_pattern(r"Routing Process \"ospf 100\"")
+    wt._validate_verify_pattern(r"^\s*ip ospf 100 area 0$")
+
+
+def test_validate_verify_pattern_rejects_bad_regex():
+    with pytest.raises(ValueError, match="not a valid regex"):
+        wt._validate_verify_pattern("(unclosed")
+
+
+def test_validate_verify_pattern_rejects_empty():
+    with pytest.raises(ValueError, match="non-empty string"):
+        wt._validate_verify_pattern("")
+
+
+# ---------------------------------------------------------------------------
+# CLI AI configure — cli_configure executor
+# ---------------------------------------------------------------------------
+
+
+def _propose_and_approve_cli(action_params: dict) -> str:
+    aid = propose_action("cli_configure", action_params)
+    approve_action(aid)
+    return aid
+
+
+def test_cli_configure_happy_path(_mock_pool, _mock_snapshot):
+    """Approved action → send_config_set runs → verify matches → mark_executed."""
+    _mock_pool.send_config_set.return_value = "OSPF 100 enabled"
+    _mock_pool.send_command.return_value = (
+        'Routing Process "ospf 100" with ID 192.168.10.1\nDomain ID 0.0.0.0 (0x00000000)'
+    )
+
+    aid = _propose_and_approve_cli(
+        {
+            "config_commands": ["router ospf 100", "exit"],
+            "verify_command": "show ip ospf",
+            "verify_pattern": r'Routing Process "ospf 100"',
+        }
+    )
+
+    result = wt.cli_configure(
+        action_id=aid,
+        config_commands=["router ospf 100", "exit"],
+        verify_command="show ip ospf",
+        verify_pattern=r'Routing Process "ospf 100"',
+    )
+
+    assert result["tool"] == "cli_configure"
+    assert result["verify_matched"] is True
+    assert result["params"]["command_count"] == 2
+    assert "Routing Process" in result["verify_output_preview"]
+    _mock_pool.send_config_set.assert_called_once()
+    _mock_pool.send_command.assert_called_once_with("show ip ospf", read_timeout=60)
+
+
+def test_cli_configure_verify_miss_marks_failed(_mock_pool, _mock_snapshot):
+    """Regex misses → mark_failed + verify_failed error + post-snapshot taken."""
+    _mock_pool.send_config_set.return_value = "applied"
+    _mock_pool.send_command.return_value = "no OSPF running on this device"
+
+    aid = _propose_and_approve_cli(
+        {
+            "config_commands": ["router ospf 100"],
+            "verify_command": "show ip ospf",
+            "verify_pattern": r'Routing Process "ospf 100"',
+        }
+    )
+
+    result = wt.cli_configure(
+        action_id=aid,
+        config_commands=["router ospf 100"],
+        verify_command="show ip ospf",
+        verify_pattern=r'Routing Process "ospf 100"',
+    )
+
+    assert result["error"] == "verify_failed"
+    assert "no OSPF" in result["verify_output_preview"]
+    # Both pre and post snapshots fired (so diff is preserved)
+    snap_phases = [c.args[1] for c in _mock_snapshot.call_args_list]
+    assert "pre" in snap_phases and "post" in snap_phases
+
+
+def test_cli_configure_rejects_unsafe_at_execute_time(_mock_pool, _mock_snapshot):
+    """Tampered action dict containing 'reload' → validator raises before
+    any Netmiko call. Defense-in-depth: even if propose was skipped or
+    the params were rewritten between approve and execute."""
+    aid = _propose_and_approve_cli({})  # params don't matter — validator runs on the args
+
+    with pytest.raises(ValueError, match="reload reboots"):
+        wt.cli_configure(
+            action_id=aid,
+            config_commands=["router ospf 100", "reload"],
+            verify_command="show ip ospf",
+            verify_pattern=r"x",
+        )
+    _mock_pool.send_config_set.assert_not_called()
+
+
+def test_cli_configure_refuses_without_approval(_mock_pool, _mock_snapshot):
+    aid = propose_action("cli_configure", {})  # NOT approved
+    with pytest.raises(NotApproved):
+        wt.cli_configure(
+            action_id=aid,
+            config_commands=["router ospf 100"],
+            verify_command="show ip ospf",
+            verify_pattern=r"ospf",
+        )
+    _mock_pool.send_config_set.assert_not_called()
+
+
+def test_cli_configure_send_config_failure_marks_failed(_mock_pool, _mock_snapshot):
+    """Netmiko raises during send_config_set → mark_failed, exception
+    propagates (CLAUDE.md §76: 'never auto-retry')."""
+    _mock_pool.send_config_set.side_effect = RuntimeError("SSH timeout")
+
+    aid = _propose_and_approve_cli({})
+
+    with pytest.raises(RuntimeError, match="SSH timeout"):
+        wt.cli_configure(
+            action_id=aid,
+            config_commands=["router ospf 100"],
+            verify_command="show ip ospf",
+            verify_pattern=r"ospf",
+        )
+
+
+def test_cli_configure_verify_ssh_failure_returns_structured(_mock_pool, _mock_snapshot):
+    """Netmiko raises during verify send_command → action FAILED but the
+    write itself succeeded. Return verify_ssh_failed with both snapshot
+    paths so Filip can compare."""
+    _mock_pool.send_config_set.return_value = "applied"
+    _mock_pool.send_command.side_effect = RuntimeError("read timeout")
+
+    aid = _propose_and_approve_cli({})
+
+    result = wt.cli_configure(
+        action_id=aid,
+        config_commands=["router ospf 100"],
+        verify_command="show ip ospf",
+        verify_pattern=r"ospf",
+    )
+
+    assert result["error"] == "verify_ssh_failed"
+    assert "read timeout" in result["message"]
+    assert "snapshot_pre" in result and "snapshot_post" in result

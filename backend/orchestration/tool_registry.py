@@ -23,13 +23,17 @@ from typing import Any
 
 from backend.cli_agent import read_tools, write_tools
 from backend.cli_agent.write_tools import (
+    _validate_config_commands,
     _validate_hostname,
     _validate_interface,
     _validate_interface_ip_and_mask,
+    _validate_verify_command,
+    _validate_verify_pattern,
     _validate_vlan_id,
     _validate_vlan_name,
 )
 from backend.core.logging import get_logger
+from backend.orchestration.cli_configure_planner import draft_cli_plan
 from backend.orchestration.configure_planner import draft_plan
 from backend.orchestration.confirmations import (
     NotApproved,
@@ -115,6 +119,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         # webui_configure. webui_act / webui_act_by_intent are internal
         # helpers only (not in TOOL_SCHEMAS).
         "webui_configure",
+        # CLI AI configure — Haiku drafts IOS XE commands, denylist + human
+        # approval gate, Netmiko applies, regex-verifies post-state.
+        "cli_configure",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -442,6 +449,55 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["action_id"],
         },
     },
+    {
+        "name": "propose_cli_configure",
+        "description": (
+            "Propose an AI-drafted IOS XE configuration over SSH. Use this for CLI "
+            "configuration tasks that DON'T match a narrow tool (set_hostname, "
+            "set_interface_ip, set_access_vlan) — e.g. OSPF, BGP, route-maps, ACLs, "
+            "debug commands. The inner Haiku planner drafts a list of config-mode "
+            "commands + a 'show' verify command + a regex pattern, grounded in RAG "
+            "manual chunks and the current running-config. Returns an action_id; the "
+            "human must APPROVE before cli_configure will run. Prefer the narrow "
+            "tools when intent is unambiguous — they're cheaper and more strictly "
+            "validated. Does NOT touch the router."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of the CLI configuration "
+                        "task, e.g. 'Configure OSPF process 100 area 0 on Vlan1' or "
+                        "'Add ACL 10 permitting only 192.168.10.0/24'."
+                    ),
+                },
+            },
+            "required": ["intent"],
+        },
+    },
+    {
+        "name": "cli_configure",
+        "description": (
+            "Execute a previously-approved CLI configuration plan. Requires an "
+            "action_id from a propose_cli_configure call that has been APPROVED by "
+            "the human. Server-side denylist validators re-run before any router "
+            "contact. Pushes commands via Netmiko, runs the verify command in EXEC "
+            "mode, regex-matches the verify pattern. Marks the action EXECUTED on "
+            "verify match or FAILED on any error. No auto-rollback."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "Action ID from the matching propose_cli_configure call.",
+                },
+            },
+            "required": ["action_id"],
+        },
+    },
 ]
 
 
@@ -551,6 +607,144 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
         },
         "next_step": _NEXT_STEP_WEBUI,
     }
+
+
+def _propose_cli_configure(**kwargs: Any) -> dict:
+    """Propose an AI-drafted IOS XE configuration action.
+
+    Flow: search_docs → show_running_config → draft_cli_plan → denylist
+    + verify-command/pattern validators → propose_action. Returns
+    awaiting_approval with the full command preview. Does NOT touch the
+    router for writes.
+    """
+    intent = kwargs.get("intent")
+    if not isinstance(intent, str) or not intent.strip():
+        return {"error": "bad_parameters", "message": "intent must be a non-empty string"}
+
+    # 1. RAG grounding — small top_k (3) keeps tokens tight; CLI syntax
+    # tends to live in a single section per feature.
+    rag_result = _search_docs(query=intent, top_k=3)
+    if "error" in rag_result:
+        return rag_result
+    rag_chunks = rag_result.get("results", [])
+
+    # 2. Snapshot current running-config for the inner planner. We do this
+    # via read_tools (not take_snapshot, which is execute-time) so a
+    # propose call doesn't litter the snapshots directory.
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.error("propose_cli_configure_show_running_failed", error=str(exc))
+        return {
+            "error": "show_running_failed",
+            "message": f"could not fetch running-config: {exc}",
+        }
+
+    # 3. Inner Haiku drafts the plan
+    try:
+        drafted = draft_cli_plan(intent, rag_chunks, running_config)
+    except RuntimeError as exc:
+        log.error("propose_cli_configure_draft_failed", intent=intent, error=str(exc))
+        return {"error": "draft_failed", "message": str(exc)}
+
+    config_commands = drafted.get("config_commands") or []
+    verify_command = drafted.get("verify_command", "")
+    verify_pattern = drafted.get("verify_pattern", "")
+    risk = drafted.get("risk", "")
+
+    if not config_commands:
+        # Inner LLM refused (non-CLI intent or unmappable). Surface to the
+        # outer planner so it can re-prompt the user or fall back.
+        return {
+            "error": "intent_not_mappable",
+            "message": risk or "Inner LLM did not produce a config plan.",
+            "evidence": [
+                {"source": c.get("source"), "section": c.get("section")} for c in rag_chunks
+            ],
+        }
+
+    # 4. Server-side denylist + verify gate. Runs BEFORE propose_action so
+    # the human never sees a preview containing a banned command. Same
+    # validators re-run at execute time inside write_tools.cli_configure
+    # (defense in depth — a tampered action dict still gets caught).
+    try:
+        _validate_config_commands(config_commands)
+        _validate_verify_command(verify_command)
+        _validate_verify_pattern(verify_pattern)
+    except ValueError as exc:
+        log.warning(
+            "propose_cli_configure_unsafe",
+            intent=intent,
+            error=str(exc),
+            drafted_commands=config_commands,
+        )
+        return {
+            "error": "unsafe_command",
+            "message": str(exc),
+            "drafted_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "evidence": [
+                {"source": c.get("source"), "section": c.get("section")} for c in rag_chunks
+            ],
+        }
+
+    evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
+    action_id = propose_action(
+        tool="cli_configure",
+        params={
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+        },
+    )
+
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "cli_configure",
+        "preview": {
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+            "command_count": len(config_commands),
+        },
+        "next_step": _NEXT_STEP_INLINE,
+    }
+
+
+def _cli_configure(**kwargs: Any) -> dict:
+    """Dispatcher wrapper that pulls executable params out of the stored
+    action and calls the actual ``write_tools.cli_configure`` executor.
+
+    The stored action dict includes preview-only fields (intent, risk,
+    evidence) that the executor doesn't need; this wrapper keeps the
+    executor's signature narrow while letting the preview be rich.
+    """
+    from backend.orchestration.confirmations import get_action
+
+    action_id = kwargs.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        return {"error": "bad_parameters", "message": "action_id must be a non-empty string"}
+
+    try:
+        action = get_action(action_id)
+    except KeyError:
+        return {"error": "unknown_action", "message": f"no action with id {action_id!r}"}
+
+    params = action.get("params", {})
+    return write_tools.cli_configure(
+        action_id=action_id,
+        config_commands=params.get("config_commands", []),
+        verify_command=params.get("verify_command", ""),
+        verify_pattern=params.get("verify_pattern", ""),
+    )
 
 
 def _propose_webui_configure(**kwargs: Any) -> dict:
@@ -951,6 +1145,11 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     # webui_act_by_intent are internal helpers only (not in TOOL_SCHEMAS).
     "propose_webui_configure": _propose_webui_configure,
     "webui_configure": _webui_configure,
+    # CLI AI configure — same propose/execute split. Inner Haiku drafts
+    # IOS XE commands grounded in RAG + running-config; denylist filters
+    # at propose AND execute time.
+    "propose_cli_configure": _propose_cli_configure,
+    "cli_configure": _cli_configure,
 }
 
 

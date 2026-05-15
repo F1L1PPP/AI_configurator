@@ -251,7 +251,16 @@ def test_system_prompt_includes_nav_map_when_loaded():
 
 
 def test_system_prompt_has_errors_final_rule():
-    """SYSTEM_PROMPT must contain Rule 8 locking down propose_webui_configure retries."""
+    """SYSTEM_PROMPT must contain Rule 8 locking down both propose_webui_configure
+    AND propose_cli_configure retries."""
     from backend.orchestration.planner import SYSTEM_PROMPT
 
-    assert "Errors from propose_webui_configure are FINAL" in SYSTEM_PROMPT
+    assert "propose_webui_configure" in SYSTEM_PROMPT
+    assert "propose_cli_configure" in SYSTEM_PROMPT
+    assert "FINAL" in SYSTEM_PROMPT
+    # Both tools must appear together in the rule preamble, not in unrelated
+    # tool listings. Loose check: the FINAL keyword sits near both names.
+    final_idx = SYSTEM_PROMPT.index("FINAL")
+    window = SYSTEM_PROMPT[max(0, final_idx - 200) : final_idx + 200]
+    assert "propose_webui_configure" in window
+    assert "propose_cli_configure" in window
