@@ -268,3 +268,81 @@ def test_webui_configure_stops_on_step_failure(monkeypatch):
     assert result["step_index"] == 1
     assert len(failed_ids) == 1
     assert failed_ids[0] == action_id
+
+
+# ---------------------------------------------------------------------------
+# Change 3 — session cleanup on propose error paths
+# ---------------------------------------------------------------------------
+
+
+def test_propose_webui_configure_closes_session_on_draft_failed(monkeypatch):
+    """draft_plan raises → close_all_sessions called before handler returns."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(
+        tr, "webui_open", lambda **kw: {"session_id": "sess_draft_fail", "view": {}}
+    )
+    monkeypatch.setattr(
+        tr,
+        "webui_describe_page",
+        lambda **kw: {"session_id": "sess_draft_fail", "view": {"elements": []}},
+    )
+    monkeypatch.setattr(
+        tr,
+        "draft_plan",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("inner LLM returned non-JSON: ...")),
+    )
+
+    close_calls: list[int] = []
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {
+            "intent": "add static route 10.0.0.0/24 via 192.168.1.1",
+            "webui_path": "/webui/#/staticRouting",
+        },
+    )
+
+    assert result["error"] == "draft_failed"
+    assert len(close_calls) == 1, "close_all_sessions must be called exactly once on draft failure"
+
+
+def test_propose_webui_configure_closes_session_on_intent_not_mappable(monkeypatch):
+    """Empty plan (intent_not_mappable) → close_all_sessions called before handler returns."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_no_map", "view": {}})
+    monkeypatch.setattr(
+        tr,
+        "webui_describe_page",
+        lambda **kw: {"session_id": "sess_no_map", "view": {"elements": []}},
+    )
+    monkeypatch.setattr(
+        tr,
+        "draft_plan",
+        lambda *a, **kw: {
+            "plan": [],
+            "verify_text": None,
+            "risk": "Page mismatch — target not visible",
+        },
+    )
+
+    close_calls: list[int] = []
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "configure OSPF", "webui_path": "/webui/#/routing/ospf"},
+    )
+
+    assert result["error"] == "intent_not_mappable"
+    assert len(close_calls) == 1, (
+        "close_all_sessions must be called exactly once on intent_not_mappable"
+    )

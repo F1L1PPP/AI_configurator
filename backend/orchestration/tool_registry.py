@@ -580,6 +580,7 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     # for the most current snapshot — Angular can paint after initial open).
     desc_result = webui_describe_page(session_id=session_id)
     if "error" in desc_result:
+        close_all_sessions()
         return desc_result
     view = desc_result["view"]
 
@@ -588,6 +589,10 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         drafted = draft_plan(intent, rag_chunks, view)
     except RuntimeError as exc:
         log.error("propose_webui_configure_draft_failed", intent=intent, error=str(exc))
+        # Close the orphaned session — propose failed before propose_action
+        # took ownership of session_id, so nothing else will clean it up.
+        # close_all_sessions is idempotent on missing sessions.
+        close_all_sessions()
         return {"error": "draft_failed", "message": str(exc)}
 
     plan = drafted["plan"]
@@ -596,6 +601,7 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
 
     if not plan:
         # Inner LLM said it can't map the intent. Surface to the planner.
+        close_all_sessions()
         return {
             "error": "intent_not_mappable",
             "message": risk,

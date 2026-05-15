@@ -222,6 +222,15 @@ and mention that WebUI is also available for visible evidence.
 7. If a tool returns an error, surface it to the user clearly. Never retry
    a write operation automatically.
 
+8. **Errors from propose_webui_configure are FINAL.** If the tool returns
+   `{{"error": ...}}` (e.g. `draft_failed`, `intent_not_mappable`,
+   `webui_open_failed`), output the error message to the user — in Slovak
+   if the conversation is Slovak — and STOP. Do NOT call propose_webui_configure
+   again in the same turn with a rephrased intent. The error message is for
+   the human to read and decide what to do (open a different page in the
+   WebUI manually, narrow the intent, or skip this approach). Retrying
+   blindly opens Chromium windows that don't get cleaned up.
+
 {nav_map_block}
 
 ## Response style

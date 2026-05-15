@@ -243,3 +243,15 @@ def test_system_prompt_includes_nav_map_when_loaded():
 
     assert "## Cisco WebUI navigation map" in SYSTEM_PROMPT
     assert "/webui/#/staticRouting" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Change 4 — Rule 8: errors from propose_webui_configure are FINAL
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_has_errors_final_rule():
+    """SYSTEM_PROMPT must contain Rule 8 locking down propose_webui_configure retries."""
+    from backend.orchestration.planner import SYSTEM_PROMPT
+
+    assert "Errors from propose_webui_configure are FINAL" in SYSTEM_PROMPT
