@@ -66,7 +66,61 @@ MAX_ITERATIONS = 8
 _CACHE_EPHEMERAL = {"type": "ephemeral"}
 
 
-SYSTEM_PROMPT = """\
+def _load_navigation_map() -> str:
+    """Read knowledge_base/webui-catalog/current.json and format as Markdown.
+
+    Returns a Markdown block listing each catalog page (url, title, hint).
+    Returns empty string if the file is missing or malformed — graceful
+    degradation lets the planner still work, just without the nav map
+    grounding (Haiku falls back to guessing webui_path, which is fine for
+    fast-path tools that don't use propose_webui_configure).
+    """
+    import json
+    from pathlib import Path
+
+    catalog_path = Path("knowledge_base/webui-catalog/current.json")
+    try:
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        log.warning("navigation_map_load_failed", path=str(catalog_path), error=str(exc))
+        return ""
+
+    pages = data.get("pages", [])
+    if not pages:
+        return ""
+
+    lines = [
+        "## Cisco WebUI navigation map",
+        "",
+        "When calling `propose_webui_configure(intent, webui_path)`, use the EXACT `webui_path`",
+        "value from this map. Each entry: `URL` — Title — Hint about what the page contains.",
+        "",
+    ]
+    for p in pages:
+        url = p.get("url", "")
+        title = p.get("title", "")
+        hint = p.get("hint", "")
+        # Extract just the path part — Haiku passes /webui/#/foo, not the full URL
+        path = url.split("/webui", 1)
+        webui_path = "/webui" + path[1] if len(path) == 2 else url
+        if hint:
+            lines.append(f"- `{webui_path}` — **{title}** — {hint}")
+        else:
+            lines.append(f"- `{webui_path}` — **{title}**")
+    lines.append("")
+    lines.append(
+        "If the intent doesn't match any entry above, the WebUI doesn't expose "
+        "that feature. Either explain that to the user OR refuse cleanly — "
+        "do NOT guess a webui_path that isn't in this list."
+    )
+    return "\n".join(lines)
+
+
+# Loaded once at module import (Phase 1 prompt caching depends on stable
+# system prompt content — recomputing per turn defeats the cache).
+_NAVIGATION_MAP = _load_navigation_map()
+
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are a Cisco network configuration assistant for a single Cisco C1111 \
 router. Speak Slovak by default; switch to English if the user writes in \
 English or asks for it.
@@ -168,11 +222,15 @@ and mention that WebUI is also available for visible evidence.
 7. If a tool returns an error, surface it to the user clearly. Never retry
    a write operation automatically.
 
+{nav_map_block}
+
 ## Response style
 
 Concise. Use Markdown sparingly. When you've shown the user data from a
 read tool, summarize the key fact (e.g. "Vlan1 is up at 192.168.10.1") \
 rather than dumping the raw output."""
+
+SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.format(nav_map_block=_NAVIGATION_MAP)
 
 
 @dataclass
