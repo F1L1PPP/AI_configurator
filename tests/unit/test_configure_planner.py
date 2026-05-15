@@ -272,3 +272,19 @@ def test_inner_prompt_documents_previous_steps_rules():
     can adapt to mid-flow failures."""
     assert "Mid-flow continuation" in _INNER_SYSTEM_PROMPT
     assert "previous_steps" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_documents_cidr_splitting():
+    """Regression guard: the previous example mis-mapped 10.0.0.0/24 into
+    the 'Prefix Mask' textbox. The corrected example must teach Haiku to
+    split CIDR into Prefix + dotted mask across separate fields, and the
+    rule must explicitly forbid the broken pattern."""
+    # Field-mapping rules section present
+    assert "Field-mapping rules" in _INNER_SYSTEM_PROMPT
+    # Dotted mask hint for the common /24 case
+    assert "255.255.255.0" in _INNER_SYSTEM_PROMPT
+    # Explicit instruction to split CIDR across two fields
+    assert "split" in _INNER_SYSTEM_PROMPT.lower()
+    # Negative example warns against putting CIDR in Prefix Mask
+    assert "WRONG" in _INNER_SYSTEM_PROMPT
+    assert "Prefix Mask" in _INNER_SYSTEM_PROMPT

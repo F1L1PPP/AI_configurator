@@ -73,23 +73,54 @@ Your job: produce a JSON object with this exact shape:
    them to understand the intent, NOT to derive element names. Element
    names come ONLY from the describe_page view.
 
-## Example: target visible
+## Field-mapping rules — read before drafting any fill step
 
-View has elements `[{"role": "textbox", "name": "Prefix Mask"},
+The visible `name` of each textbox tells you exactly what value belongs
+there. Match the user's intent words to the textbox name semantically,
+NEVER positionally. A few load-bearing conventions for Cisco WebUI forms:
+
+- **"Prefix" is the network address only** (e.g. `10.99.99.0`), not the
+  whole CIDR. The CIDR's `/N` part goes into a SEPARATE field.
+- **"Prefix Mask" is a DOTTED subnet mask** (e.g. `255.255.255.0` for
+  /24), never CIDR. Common mappings: /8=255.0.0.0, /16=255.255.0.0,
+  /24=255.255.255.0, /25=255.255.255.128, /30=255.255.255.252.
+- **"Next Hop IP/Interface" is the gateway IP** (or interface name),
+  e.g. `192.168.10.254`.
+- **"IP Type" is the address family**, usually `ipv4`. If you don't see
+  an explicit ipv4 hint in the intent, default to `ipv4`.
+- **"Metric / Administrative Distance" is optional**. Leave it alone
+  unless the user gave an explicit metric — don't put a mask or IP there.
+- **Never put two values into the same textbox.** A CIDR like
+  `10.0.0.0/24` must split into Prefix=`10.0.0.0` + Prefix Mask=
+  `255.255.255.0` across TWO fill steps.
+
+## Example: target visible (static route — exactly what the form expects)
+
+View has elements `[{"role": "textbox", "name": "Prefix", "required": true},
+{"role": "textbox", "name": "Prefix Mask"},
+{"role": "textbox", "name": "IP Type", "required": true},
 {"role": "textbox", "name": "Next Hop IP/Interface"},
-{"role": "button", "name": "Apply"}]`. Intent: "add static route
-10.0.0.0/24 via 192.168.1.1".
+{"role": "textbox", "name": "Metric / Administrative Distance"},
+{"role": "button", "name": "Apply to Device"}]`. Intent: "add static route
+10.99.99.0/24 via 192.168.10.254".
 
 OK output:
 {
   "plan": [
-    {"action": "fill", "intent": {"role": "textbox", "name": "Prefix Mask"}, "value": "10.0.0.0/24"},
-    {"action": "fill", "intent": {"role": "textbox", "name": "Next Hop IP/Interface"}, "value": "192.168.1.1"},
-    {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": null}
+    {"action": "fill", "intent": {"role": "textbox", "name": "IP Type"}, "value": "ipv4"},
+    {"action": "fill", "intent": {"role": "textbox", "name": "Prefix"}, "value": "10.99.99.0"},
+    {"action": "fill", "intent": {"role": "textbox", "name": "Prefix Mask"}, "value": "255.255.255.0"},
+    {"action": "fill", "intent": {"role": "textbox", "name": "Next Hop IP/Interface"}, "value": "192.168.10.254"},
+    {"action": "click", "intent": {"role": "button", "name": "Apply to Device"}, "value": null}
   ],
-  "verify_text": "10.0.0.0/24",
-  "risk": "Adds a static route to the running-config; can be reverted by clicking the row's delete icon and Apply again."
+  "verify_text": "10.99.99.0",
+  "risk": "Adds a static route 10.99.99.0/24 -> 192.168.10.254 to the running-config; revertible via the row's delete icon and Apply again."
 }
+
+WRONG output (do NOT do this): putting `10.99.99.0/24` into "Prefix
+Mask", or putting the mask `255.255.255.0` into "Metric / Administrative
+Distance". CIDR notation `X.Y.Z.W/N` must ALWAYS be split — the prefix
+goes to "Prefix", the dotted mask goes to "Prefix Mask".
 
 ## Example: target NOT visible (refuse cleanly)
 
