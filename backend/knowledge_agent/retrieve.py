@@ -12,6 +12,7 @@ and for any worker that doesn't use RAG.
 
 from __future__ import annotations
 
+import html
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -76,6 +77,8 @@ def search_docs(query: str, top_k: int = 5) -> dict[str, Any]:
         }
 
     score = 1 - cosine_distance (higher = more relevant).
+    The text field is wrapped in <doc_chunk source="..." section="...">...</doc_chunk>
+    tags so the LLM treats chunk content as reference data, not directives.
     """
     t0 = time.perf_counter()
     _ensure_loaded()
@@ -102,11 +105,16 @@ def search_docs(query: str, top_k: int = 5) -> dict[str, Any]:
 
     results = []
     for doc, meta, dist in zip(documents, metadatas, distances, strict=False):
+        source = (meta or {}).get("source", "")
+        section = (meta or {}).get("section", "")
+        source_attr = html.escape(source, quote=True)
+        section_attr = html.escape(section, quote=True)
+        wrapped = f'<doc_chunk source="{source_attr}" section="{section_attr}">{doc}</doc_chunk>'
         results.append(
             {
-                "source": (meta or {}).get("source", ""),
-                "section": (meta or {}).get("section", ""),
-                "text": doc,
+                "source": source,
+                "section": section,
+                "text": wrapped,
                 "score": round(1.0 - float(dist), 4),
             }
         )

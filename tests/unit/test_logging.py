@@ -108,3 +108,39 @@ def test_configure_logging_does_not_touch_foreign_handlers(fresh_root_logger, tm
         "configure_logging() removed a handler it didn't install — should only "
         "clean up handlers carrying our sentinel attribute"
     )
+
+
+# ---------------------------------------------------------------------------
+# QW1 — sanitize_control_chars processor tests
+# ---------------------------------------------------------------------------
+
+
+from backend.core.logging import sanitize_control_chars  # noqa: E402
+
+
+def test_sanitize_strips_dangerous_chars() -> None:
+    result = sanitize_control_chars(None, "info", {"msg": "hello\x00\x07world"})
+    assert result == {"msg": "helloworld"}
+
+
+def test_sanitize_preserves_tab() -> None:
+    result = sanitize_control_chars(None, "info", {"tab": "a\tb"})
+    assert result == {"tab": "a\tb"}
+
+
+def test_sanitize_strips_newline_from_user_fields() -> None:
+    result = sanitize_control_chars(None, "info", {"query": "a\nb"})
+    assert result == {"query": "ab"}
+
+
+def test_sanitize_preserves_exception_key() -> None:
+    tb = "Traceback (most recent call last):\n  File foo.py, line 1\nValueError: x"
+    result = sanitize_control_chars(None, "info", {"exception": tb})
+    assert "\n" in result["exception"], "exception key must preserve newlines"
+    assert result["exception"] == tb
+
+
+def test_sanitize_passes_non_strings_through() -> None:
+    data: dict = {"count": 42, "ok": True, "items": [1, 2]}
+    result = sanitize_control_chars(None, "info", dict(data))
+    assert result == data

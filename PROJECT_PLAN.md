@@ -61,7 +61,7 @@ If any of these fail, fix them on Day 1. Don't start Day 2 with a half-configure
 ## 4. Architecture (the decision)
 
 ### 4.1 The principle
-**LLM plans. Python executes.** The model picks the tool, extracts parameters, and summarizes — but the actual clicks, commands, and verifications run as deterministic Python functions. Pure autonomous browser agents are too risky for a 14-day project.
+**LLM plans. Python executes.** The model picks the tool, extracts parameters, drafts the click-path from RAG + semantic DOM grounding, and summarizes — but each individual click, command, and verification runs through deterministic Python functions with HITL approval per the propose/execute pattern. The full execution model is documented in [`docs/plan-ai-first-webui.md`](docs/plan-ai-first-webui.md). Pure autonomous browser agents — no approval gate, no propose step — remain out of scope.
 
 ### 4.2 Stack
 
