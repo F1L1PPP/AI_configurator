@@ -48,8 +48,9 @@ on `awaiting_approval` WebSocket event. Smoke harness auto-approves via
 - `device-snapshots/<session>/pre.cfg` — running-config before
 - `device-snapshots/<session>/post.cfg` — running-config after
 - `reports/<session>.json` with the approval timestamp + verification result
-- Rollback runs at end of smoke: `restore_config(pre.cfg)` returns the device to
-  its prior state.
+- Rollback runs at end of smoke: the test re-applies the original value via
+  the standard write tool (e.g. `set_hostname(original)`) so the router ends
+  in the same state it started.
 
 ---
 
