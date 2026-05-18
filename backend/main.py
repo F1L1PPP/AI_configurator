@@ -46,5 +46,5 @@ async def healthz():
 
 
 # IMPORTANT: keep this LAST. StaticFiles at "/" shadows any route declared after it.
-_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend-new"
-app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend_new")
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")

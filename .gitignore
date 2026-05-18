@@ -42,7 +42,7 @@ node_modules/
 next-env.d.ts
 
 # Designer reference materials — large binary inputs, not runtime assets
-frontend-new/uploads/
+frontend/uploads/
 
 # OS
 .DS_Store
