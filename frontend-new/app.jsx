@@ -43,7 +43,10 @@ function App() {
     setRoute("preview");
   };
 
-  const deviceCount = MOCK_DEVICES.length;
+  const [deviceCount, setDeviceCount] = React.useState(0);
+  React.useEffect(() => {
+    window.api.fetchDevices().then(d => setDeviceCount(d.length));
+  }, []);
 
   return (
     <>

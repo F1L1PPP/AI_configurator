@@ -139,6 +139,11 @@ function DashboardScreen({ onGotoChat, onGotoDevices }) {
 // ---------- Devices screen ----------
 
 function DevicesScreen() {
+  const [devices, setDevices] = React.useState([]);
+  React.useEffect(() => {
+    window.api.fetchDevices().then(setDevices);
+  }, []);
+
   const [form, setForm] = React.useState({ ip: "192.168.1.4", user: "admin", pass: "", port: "443" });
   const [connecting, setConnecting] = React.useState(false);
   const [connected, setConnected] = React.useState(false);
@@ -227,7 +232,11 @@ function DevicesScreen() {
             </tr>
           </thead>
           <tbody>
-            {MOCK_DEVICES.map((d) => (
+            {!devices.length ? (
+              <tr>
+                <td colSpan={7} className="muted">Loading devices…</td>
+              </tr>
+            ) : devices.map((d) => (
               <tr key={d.id}>
                 <td>
                   <div className="dev-cell">
