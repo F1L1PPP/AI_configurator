@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from backend.api import routes_approvals, routes_chat, routes_logs, routes_ws
+from backend.api import routes_approvals, routes_chat, routes_devices, routes_logs, routes_ws
 from backend.core.logging import configure_logging, get_logger
 from backend.core.settings import get_settings
 
@@ -33,8 +37,14 @@ app.include_router(routes_logs.router)
 app.include_router(routes_approvals.router)
 app.include_router(routes_chat.router)
 app.include_router(routes_ws.router)
+app.include_router(routes_devices.router)
 
 
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+# IMPORTANT: keep this LAST. StaticFiles at "/" shadows any route declared after it.
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend-new"
+app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend_new")
