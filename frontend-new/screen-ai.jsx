@@ -55,6 +55,31 @@ function synthesizeProposal(reply) {
   return { actionId, summary, risk, transport, commands, verify, affects, note };
 }
 
+// Maps a backend WebSocket event ({type, ts, data}) to the {line, kind} shape
+// the stream column renders. All 7 backend event types handled; unknown types
+// get a defensive "info" fallback so one unknown event never crashes the render.
+function adapterEventToStreamLine(ev) {
+  const d = ev.data || {};
+  switch (ev.type) {
+    case "agent_thinking":
+      return { line: "thinking · iter " + (d.iteration ?? "?"), kind: "think" };
+    case "tool_call":
+      return { line: "→ " + (d.name ?? ""), kind: "tool" };
+    case "tool_result":
+      return { line: "✓ " + (d.name ?? ""), kind: "ok" };
+    case "awaiting_approval":
+      return { line: "⏸ awaiting · " + (d.action_id ?? ""), kind: "pause" };
+    case "applied":
+      return { line: "✓ applied · " + (d.tool ?? ""), kind: "ok" };
+    case "verified":
+      return { line: "✓ verified", kind: "verify" };
+    case "error":
+      return { line: "✗ " + (d.message ?? ""), kind: "fail" };
+    default:
+      return { line: "· " + (ev.type || "unknown"), kind: "info" };
+  }
+}
+
 function ChatScreen({ pushPreview }) {
   const [messages, setMessages] = React.useState(INITIAL_CHAT);
   const [input, setInput] = React.useState("");
@@ -62,7 +87,8 @@ function ChatScreen({ pushPreview }) {
   const [pending, setPending] = React.useState(null); // current awaiting-approval proposal
   const [stream, setStream] = React.useState([]); // live event stream lines
   const [phase, setPhase] = React.useState("idle"); // idle | thinking | awaiting | executing | done
-  const [history, setHistory] = React.useState([]);
+  const [history, setHistory] = React.useState([]); // completed-actions log (pre-existing prototype semantic)
+  const [chatHistory, setChatHistory] = React.useState([]); // multi-turn context passed to POST /api/chat
   const scrollRef = React.useRef(null);
 
   React.useEffect(() => {
@@ -70,6 +96,15 @@ function ChatScreen({ pushPreview }) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, typing]);
+
+  // WebSocket subscription — connect once for the screen lifetime.
+  // WS drives the live event stream column; cleanup closes on unmount.
+  React.useEffect(() => {
+    const handle = window.api.connectAgentWs(
+      (ev) => setStream(s => [...s, adapterEventToStreamLine(ev)])
+    );
+    return () => handle.close();
+  }, []);
 
   // Auto-grow stream during certain phases
   async function send(text) {
@@ -79,8 +114,8 @@ function ChatScreen({ pushPreview }) {
     setTyping(true);
     setPhase("thinking");
     try {
-      const reply = await window.api.sendChat(text, history);
-      setHistory(reply.history);
+      const reply = await window.api.sendChat(text, chatHistory);
+      setChatHistory(reply.history);
       if (reply.awaiting_approval) {
         // Synthesize a proposal from reply.events for the existing proposal-bubble UI.
         const proposal = synthesizeProposal(reply);
@@ -114,28 +149,23 @@ function ChatScreen({ pushPreview }) {
   const onExecute = () => {
     if (!pending) return;
     setPhase("executing");
-    const events = buildExecuteStream(pending);
-    events.forEach((e) =>
-      setTimeout(() => setStream((p) => [...p, { line: e.line, kind: e.kind }]), e.t)
-    );
-    const totalDur = events[events.length - 1].t + 300;
-    setTimeout(() => {
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          kind: "result",
-          ok: true,
-          actionId: pending.actionId,
-          summary: pending.summary,
-          verify: pending.verify,
-        },
-      ]);
-      setHistory((h) => [{ ...pending, doneAt: new Date() }, ...h]);
-      setPending(null);
-      setPhase("done");
-      setTimeout(() => setPhase("idle"), 1200);
-    }, totalDur);
+    // buildExecuteStream synthetic forEach removed — WS drives the live column now.
+    // Commit 7 wraps the block below in await window.api.executeAction(pending.actionId).
+    setMessages((m) => [
+      ...m,
+      {
+        role: "assistant",
+        kind: "result",
+        ok: true,
+        actionId: pending.actionId,
+        summary: pending.summary,
+        verify: pending.verify,
+      },
+    ]);
+    setHistory((h) => [{ ...pending, doneAt: new Date() }, ...h]);
+    setPending(null);
+    setPhase("done");
+    setTimeout(() => setPhase("idle"), 1200);
   };
 
   const onPushPreview = () => {
