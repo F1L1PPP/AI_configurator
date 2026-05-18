@@ -30,7 +30,11 @@ class Settings(BaseSettings):
     # policy, so /ws/agent has to enforce the same origin check itself —
     # share the same list to avoid drift.
     allowed_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://localhost:3001"],
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://localhost:8000",
+        ],
         alias="ALLOWED_ORIGINS",
     )
 
