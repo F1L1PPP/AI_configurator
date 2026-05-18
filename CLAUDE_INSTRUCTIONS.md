@@ -69,13 +69,13 @@ using the tool name correctly in context, skip the explanation for that one.
 
 ## Hard rules — never violate these
 
-1. **Scope lock.** The alpha is the 6 scenarios in `PROJECT_PLAN.md` §2. Do not implement anything else before `v0.4.0-alpha.1` is tagged.
+1. **Scope lock.** New feature work outside what's currently in flight needs explicit approval before implementation. The current chunk list lives in [`docs/next-session-kickoff.md`](docs/next-session-kickoff.md) — confirm a chunk is on it (or get a sign-off from me) before starting.
 2. **No writes without approval.** Every router write tool requires a matching server-side `action_id` approved via `/api/approve/{action_id}`. The prompt cannot override this — the gate is enforced in Python, not in the model.
 3. **Snapshot before write.** Before any router write, capture `show running-config`, `show version`, `show ip interface brief`. Store under `artifacts/device-snapshots/`. No exceptions.
 4. **Screenshot every WebUI step.** Before and after each Playwright click, save a PNG under `artifacts/screenshots/<session>/`. On error, also save a DOM dump and Playwright trace.
 5. **Never auto-retry a write.** If a WebUI or CLI write fails, stop, log evidence, surface to me. Do not retry until I decide.
 6. **Never commit secrets.** `.env`, real credentials, API keys, `artifacts/`, `logs/`, `vectorstore/`, `screenshots/`, `backups/`, `__pycache__/`, `node_modules/`, `.venv/` stay out of git. `.env.example` is the only template that gets committed.
-7. **Never touch tags or `release/alpha-1-freeze`.** That branch is the safe-rollback floor. New tags are created on milestones only, by me.
+7. **Never touch tags.** The alpha.* tag chain (`v0.4.0-alpha.1-*` through `alpha.4-*`) is the safe-rollback floor — each tag is the rollback point for the work that followed it. Never create, move, or delete tags without explicit approval; new tags are cut on milestones only, by me.
 8. **Direct commits to `main` are forbidden.** Always work on `feature/*` branches and merge through `develop`.
 
 ## Workflow rules
@@ -91,9 +91,9 @@ using the tool name correctly in context, skip the explanation for that one.
 
 - Python 3.12. Pydantic Settings for env. Ruff for lint+format. pytest + pytest-playwright for tests.
 - LLM calls go through the Anthropic SDK directly — no LangChain. Reach for LangGraph only if state graphs become genuinely unwieldy (justify first).
-- WebUI flows are **AI-planned, deterministically-executed Playwright**: the LLM drafts the click-path via `propose_webui_configure(intent)` grounded by RAG + semantic DOM, then each click runs through deterministic Python with HITL approval (see [`docs/plan-ai-first-webui.md`](docs/plan-ai-first-webui.md) for the execution model). Playwright MCP is for discovery/debug only — not the production execution path.
+- WebUI flows are **AI-planned, deterministically-executed Playwright subprocess**: the LLM drafts the click-path via `propose_webui_configure(intent)` grounded by RAG + semantic DOM, then each click runs through deterministic Python with HITL approval (see [`docs/plan-ai-first-webui.md`](docs/plan-ai-first-webui.md) for the execution model). Playwright MCP is for discovery/debug only — not the production execution path.
 - Embeddings are local (`sentence-transformers/all-MiniLM-L6-v2`). ChromaDB persisted. Don't add cloud embedding providers without my approval.
-- Model split: Opus 4.7 for architecture, hard debugging, release-gate review. Sonnet 4.6 for bulk implementation, page analysis, tests.
+- Model split: **Production backend is Haiku 4.5 only** — every backend Anthropic call (outer planner, inner CLI planner, inner WebUI planner) uses `claude-haiku-4-5-20251001`. Opus 4.7 for architecture, hard debugging, release-gate review. Sonnet 4.6 for bulk implementation, page analysis, tests. Opus/Sonnet are dev-time roles for THIS Claude Code session, not the runtime LLM — never silently bump production for "better quality" (fix the prompt instead).
 
 ## Communication rules
 

@@ -3,9 +3,10 @@
 **Repo:** https://github.com/F1L1PPP/AI_configurator
 **Owner:** Filip
 **Mode:** Solo, with Claude Code (Max plan)
-**Timeline:** 10 working days × 6h/day = 60h (parallel GUI track)
+**Original timeline:** 10 working days × 6h/day (parallel GUI track); compressed in reality — see §7.
 **Target device:** Real Cisco C1111 (WebUI + console cable available)
 **Source assignment:** `uploads/zadanie_projektu_cisco_ai_agent (1).docx`
+**Status as of 2026-05-18:** rolling-alpha; current head is the `v0.4.0-alpha.4-pre-redesign` tag. Live state lives in [docs/next-session-kickoff.md](docs/next-session-kickoff.md) and [docs/today-2026-05-18-summary.md](docs/today-2026-05-18-summary.md) — this file is the design baseline, not the day-to-day journal.
 
 > This plan is the result of comparing four independent AI-generated plans (Claude Sonnet 4.6, Gemini 3.1 Pro, ChatGPT 5.5 Deep Search, Perplexity) against the actual assignment. Section 11 lists where each plan was right, where it was wrong, and what I chose.
 
@@ -85,16 +86,16 @@ If any of these fail, fix them on Day 1. Don't start Day 2 with a half-configure
 | CI | **GitHub Actions** | Lint+test on push, nightly backup, release artifact bundle |
 
 ### 4.3 Hybrid execution model (per scenario)
-1. User types: "Configure VLAN 30 named OFFICE on Gi0/0/1"
-2. **Orchestrator (Claude tool-use)** picks: `webui_add_access_vlan(id=30, name="OFFICE", interface="Gi0/0/1")`
-3. **Knowledge agent** retrieves doc chunks for context, attaches to the plan as evidence
-4. **Pre-flight snapshot** runs: `show running-config`, `show ip interface brief`, screenshot of current VLAN list
-5. **Preview** is broadcast over the WebSocket → GUI shows planned actions + risk level + affected resource
-6. User clicks **APPROVE** in the GUI → POST `/api/approve/{action_id}`
-7. **WebUI agent** (Playwright) runs the deterministic flow with auto-waiting locators, screenshots between clicks
-8. **Verification**: CLI agent runs `show vlan brief`, parses with TextFSM, confirms VLAN 30 exists
-9. **Post-snapshot**: screenshot + show running-config + diff + structured report saved to `artifacts/`
-10. Result + sources surfaced in the GUI; event stream finalizes with `verified`
+1. User types: "Configure VLAN 30 named OFFICE on Gi0/0/1 in the WebUI"
+2. **Outer planner** ([`backend/orchestration/planner.py`](backend/orchestration/planner.py), Haiku 4.5 tool-use loop) picks `propose_webui_configure(intent="…", webui_path="/webui/#/vlan")`
+3. Backend starts a Playwright session (subprocess-isolated via [`backend/webui_agent/_subprocess.py`](backend/webui_agent/_subprocess.py)), navigates to `webui_path`, and calls `describe_page()` ([`semantic_dom.py`](backend/webui_agent/semantic_dom.py)) → token-bounded JSON snapshot of visible interactive elements + locator_map
+4. **Inner Haiku** ([`configure_planner.draft_plan`](backend/orchestration/configure_planner.py)) drafts an intent-based step plan (e.g. `{action: "click", intent: "Add", value: null}`) grounded by RAG chunks + the `describe_page` view
+5. Plan + risk note returned to frontend as an inline APPROVE control
+6. User clicks **APPROVE** → `POST /api/approve/{action_id}` (atomic APPROVED → EXECUTING transition closes the TOCTOU window)
+7. `POST /api/execute/{action_id}` runs each step via `webui_act_by_intent` ([`generic_driver.py`](backend/webui_agent/generic_driver.py)): resolve intent against current view, deterministic Python click, `_settle_page()` waits for Angular to stabilise (networkidle ≤1.5s + 500ms fallback), re-describe, repeat
+8. **Verification**: CLI `show vlan brief` parsed for confirmation text (`verify.verify_vlan_exists`)
+9. **Post-snapshot**: running-config + structured execution report saved to `artifacts/`
+10. Result + sources surfaced in chat; event stream finalises with `verified`
 
 ### 4.4 Safety guarantees (server-enforced, not prompt-enforced)
 - Write tools refuse to execute without a matching `action_id` that has been explicitly approved via the REST endpoint
@@ -109,130 +110,125 @@ If any of these fail, fix them on Day 1. Don't start Day 2 with a half-configure
 
 ## 5. Repository layout
 
+Reflects the actual tree as of 2026-05-18 (post AI-first shift). Some files listed in the original plan were removed during the alpha-1 chunks; others were added.
+
 ```
 AI_configurator/
 ├── README.md
 ├── PROJECT_PLAN.md            ← this file
 ├── CLAUDE.md                  ← short, concrete rules for Claude Code
-├── .env.example
-├── .gitignore
+├── CLAUDE_INSTRUCTIONS.md     ← long-form companion to CLAUDE.md
 ├── pyproject.toml             ← ruff + pytest + project config
 ├── requirements.txt
 │
-├── .claude/                   ← project-scoped Claude Code skills
-│   ├── settings.json
+├── .claude/
 │   └── skills/
-│       ├── checkpoint/SKILL.md         ← /checkpoint: lint+test+commit+push+daily tag
-│       ├── release-alpha/SKILL.md      ← /release-alpha: tag v0.x + freeze branch + GH release
-│       └── bugbash/SKILL.md            ← /bugbash: run 5x smoke loop, report failures
+│       └── checkpoint/SKILL.md         ← /checkpoint: lint+test+commit+push+daily tag
 │
 ├── .github/workflows/
 │   ├── ci.yml                 ← ruff + pytest on push/PR
-│   ├── nightly-backup.yml     ← tag backup-YYYYMMDD on schedule, upload artifacts
-│   └── release-artifacts.yml  ← on tag: build ZIP, attach to GitHub Release
+│   └── nightly-backup.yml     ← scheduled artifact upload
 │
 ├── backend/
 │   ├── main.py                ← FastAPI entrypoint
 │   ├── core/
 │   │   ├── settings.py        ← Pydantic Settings (loads .env)
 │   │   ├── logging.py         ← structlog JSONL config
-│   │   ├── models.py          ← Pydantic data models (Plan, Action, Snapshot, …)
-│   │   ├── redaction.py       ← strip secrets from logs
 │   │   └── eventbus.py        ← async pub/sub for WS broadcasting
 │   ├── api/
-│   │   ├── routes_chat.py     ← POST /chat, WS /ws/agent
-│   │   ├── routes_devices.py
-│   │   ├── routes_approvals.py
-│   │   ├── routes_sessions.py
-│   │   └── routes_backups.py
+│   │   ├── routes_chat.py     ← POST /api/chat
+│   │   ├── routes_approvals.py  ← POST /api/approve/{id}, /api/execute/{id}
+│   │   ├── routes_ws.py       ← GET /ws/agent
+│   │   └── routes_logs.py     ← GET /api/logs/recent
 │   ├── orchestration/
-│   │   ├── planner.py         ← Claude tool-use loop
-│   │   ├── tool_registry.py   ← Anthropic-format tool schemas
-│   │   ├── confirmations.py   ← approval gate state machine
-│   │   └── execution_report.py
+│   │   ├── planner.py                  ← outer Haiku 4.5 tool-use loop
+│   │   ├── tool_registry.py            ← Anthropic-format tool schemas + dispatch + approval gate
+│   │   ├── confirmations.py            ← propose/approve/execute state machine (TOCTOU-safe)
+│   │   ├── configure_planner.py        ← inner Haiku — WebUI step planning from describe_page
+│   │   └── cli_configure_planner.py    ← inner Haiku — CLI command planning
 │   ├── cli_agent/
 │   │   ├── connection.py      ← Netmiko pool
 │   │   ├── read_tools.py      ← show_* commands
-│   │   ├── write_tools.py     ← set_hostname, set_interface_ip
+│   │   ├── write_tools.py     ← set_hostname, set_interface_ip, set_access_vlan
 │   │   ├── parsers.py         ← TextFSM/Genie wrappers
-│   │   ├── snapshots.py       ← pre/post running-config dumps
-│   │   └── verify.py
+│   │   └── snapshots.py       ← pre/post running-config dumps
 │   ├── webui_agent/
-│   │   ├── browser.py         ← Playwright launcher (ignore_https_errors=True)
+│   │   ├── browser.py                  ← Playwright launcher (ignore_https_errors=True)
 │   │   ├── login.py
-│   │   ├── selectors/
-│   │   │   └── iosxe_default.yaml  ← versioned selector maps
-│   │   ├── pages/             ← Page Object Model per WebUI section
-│   │   │   ├── dashboard_page.py
+│   │   ├── _subprocess.py              ← subprocess-isolated Playwright session host
+│   │   ├── _playwright_subprocess.py   ← worker process — `_settle_page` lives here
+│   │   ├── semantic_dom.py             ← describe_page() — token-bounded JSON view + locator_map
+│   │   ├── generic_driver.py           ← intent-resolution + per-step click loop + self-heal
+│   │   ├── verify.py                   ← verify_hostname / verify_vlan_exists
+│   │   ├── evidence.py                 ← screenshot + DOM dump on error
+│   │   ├── selectors/iosxe_default.yaml  ← legacy fast-path selectors
+│   │   ├── pages/                      ← legacy POM (still wired for fast paths)
 │   │   │   ├── hostname_page.py
 │   │   │   └── vlan_page.py
-│   │   ├── flows/             ← high-level user flows
-│   │   │   ├── change_hostname.py
-│   │   │   └── add_access_vlan.py
-│   │   ├── evidence.py        ← screenshot + DOM dump on error
-│   │   └── verify.py
-│   ├── knowledge_agent/
-│   │   ├── ingest.py          ← docs → chunks → ChromaDB
-│   │   ├── chunking.py
-│   │   ├── retrieve.py
-│   │   └── citations.py
-│   ├── services/
-│   │   ├── backup.py
-│   │   └── screenshot.py
-│   └── db/
-│       ├── models.py          ← SQLAlchemy
-│       └── migrations/
+│   │   └── flows/                      ← legacy flow wrappers (still wired for fast paths)
+│   │       ├── change_hostname.py
+│   │       └── add_access_vlan.py
+│   └── knowledge_agent/
+│       ├── ingest.py          ← docs → chunks → ChromaDB
+│       ├── chunking.py
+│       └── retrieve.py        ← ChromaDB + sentence-transformers/all-MiniLM-L6-v2 (913 chunks)
 │
 ├── frontend/                  ← Next.js 14 + TypeScript + Tailwind
-│   ├── app/(routes)/...
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx           ← dashboard
+│   │   ├── chat/page.tsx
+│   │   ├── preview/page.tsx
+│   │   ├── webui-live/page.tsx
+│   │   └── actions/{page.tsx,change-hostname,set-interface-ip,add-vlan}
 │   ├── components/
+│   │   ├── LiveEventStream.tsx
 │   │   ├── layout/{Sidebar,TopBar}.tsx
-│   │   ├── mesh/{MeshSphere,EthernetLogo}.tsx   ← decorative SVG mesh per design spec
-│   │   ├── chat/MessageStream.tsx
-│   │   ├── agent/ActionTimeline.tsx
-│   │   ├── preview/ConfigDiff.tsx
-│   │   └── webui-agent/BrowserFrame.tsx
-│   ├── lib/{api,ws}.ts
-│   ├── styles/globals.css     ← Tailwind + design tokens (black/white/gray + JetBrains Mono)
+│   │   ├── dashboard/{ActionsCount,RecentActions}.tsx
+│   │   ├── status/BackendStatus.tsx
+│   │   ├── preview/ApprovalButtons.tsx
+│   │   ├── actions/{ScenarioCard,ScenarioForm}.tsx
+│   │   ├── webui-agent/{ActionTimeline,PhaseProgress}.tsx
+│   │   └── mesh/{MeshSphere,EthernetLogo}.tsx
+│   ├── lib/{api,ws,errors}.ts
 │   └── tailwind.config.ts
 │
 ├── knowledge_base/
-│   ├── docs/                  ← raw Cisco PDF/HTML (gitignored — large)
-│   └── vectorstore/           ← ChromaDB persistent (gitignored)
+│   ├── docs/                  ← raw Cisco PDFs (C1100 HIG, WebUI guide, ISR1100 SW config)
+│   ├── vectorstore/           ← ChromaDB persistent (gitignored)
+│   └── webui-catalog/
+│       └── current.json       ← recorder snapshot of WebUI nav + page elements
 │
 ├── artifacts/                 ← runtime, gitignored
 │   ├── screenshots/<session>/
-│   ├── traces/                ← Playwright traces
-│   ├── cli-logs/              ← Netmiko session logs (redacted)
-│   ├── device-snapshots/      ← pre/post running-config + show outputs
-│   └── reports/               ← per-execution structured reports
+│   ├── cli-logs/
+│   └── device-snapshots/
 │
-├── logs/                      ← gitignored
-│   └── actions.log            ← structlog JSONL
-│
+├── logs/                      ← gitignored — structlog JSONL
 ├── backups/                   ← gitignored — local rollback configs
+├── playwright_playground/     ← exploratory scripts (kept for reference)
 │
 ├── scripts/
-│   ├── checkpoint.sh          ← invoked by /checkpoint skill
+│   ├── checkpoint.sh
 │   ├── checkpoint.ps1
-│   ├── export_device_snapshot.py
-│   ├── seed_vectorstore.py
 │   ├── run_smoke_tests.py
-│   └── create_release_bundle.py
+│   ├── catalog_webui_elements.py    ← static catalog walker
+│   └── record_webui_catalog.py      ← interactive recorder for WebUI nav map
 │
 ├── tests/
-│   ├── unit/
-│   ├── integration/
-│   ├── smoke/                 ← 6 end-to-end scenarios from §2
-│   └── fixtures/
+│   ├── unit/                  ← ~50 modules; planner, configure_planner, semantic_dom, …
+│   ├── integration/           ← routes_execute, ws_agent
+│   └── smoke/scenarios/       ← 6 end-to-end scenarios from §2
 │
 └── docs/
-    ├── architecture.md
-    ├── backup-policy.md
+    ├── plan-ai-first-webui.md       ← v0.4.0 phase plan (load-bearing)
+    ├── next-session-kickoff.md      ← live state pointer
+    ├── today-2026-05-*.md           ← daily journals
+    ├── design-handoff.md            ← parallel-track redesign brief
     ├── router-prerequisites.md
-    ├── selector-map.md        ← every WebUI selector + how to re-derive it
-    ├── smoke-scenarios.md     ← the 6 scenarios from §2
-    ├── release-checklist.md
+    ├── smoke-scenarios.md
+    ├── how-it-works.md
+    ├── clean-config-walkthrough.md
     └── technical_report.md    ← source for the PDF deliverable
 ```
 
@@ -252,15 +248,23 @@ AI_configurator/
 ### 6.2 Tag sequence
 | Tag | Created on | What it contains |
 |---|---|---|
-| `v0.0.1-bootstrap` | **Day 1 ✓ (2026-05-11)** | Repo skeleton, CI, Pydantic settings, logging (idempotent + stderr-safe), GUI foundation, Playwright training ground, prerequisites verified on real Cisco C1111. |
-| `v0.1.0-cli-core` | **Day 3 ✓ (2026-05-12, banked 1 day)** | CLI read + safe write + HITL + pre/post snapshots + restore round-trip + WebUI cert/login probe (script 05) + Chat/Preview GUI skeletons. |
-| `v0.2.0-agent-core` | Day 6 (was Day 7 — banked 1 day) | Tool registry + RAG + Sources display + WebSocket events wired to Chat. **Orchestrator/planner already shipped 2026-05-12 (Haiku 4.5 tool-use loop).** |
-| `v0.3.0-webui-core` | Day 7 (was Day 8) | Playwright login + hostname flow + VLAN flow + screenshots + verify + GUI polish. |
-| `v0.4.0-alpha.1` | **Day 8 (was Day 9)** | **First fully working end-to-end build → cut `release/alpha-1-freeze` immediately.** |
-| `v0.5.0-rc.1` | Day 9 | RC1: tech report draft + demo b-roll + final GUI polish. |
-| `v1.0.0-demo` | Day 10 | Final submission tag (tech report PDF + demo video + submission ZIP). |
+| `v0.0.1-bootstrap` | 2026-05-11 | Repo skeleton, CI, Pydantic settings, logging (idempotent + stderr-safe), GUI foundation, Playwright training ground, prerequisites verified on real Cisco C1111. |
+| `v0.1.0-cli-core` | 2026-05-12 | CLI read + safe write + HITL + pre/post snapshots + restore round-trip + WebUI cert/login probe + Chat/Preview GUI skeletons. |
+| `v0.2.0-agent-core` | 2026-05-13 | Tool registry + RAG + Sources display + WebSocket events wired to Chat. Outer Haiku 4.5 tool-use loop already shipped 2026-05-12. |
+| `v0.3.0-webui-core` | 2026-05-13 | Playwright login + hand-coded hostname flow + VLAN flow + screenshots + verify + GUI polish. |
+| `v0.3.1-audit-fixes` … `v0.3.6-security-review` | 2026-05-13 → 14 | Pre-pivot hardening — audit fixes, POM stabilisation, AI-first foundations laid, catalog recorder shipped, security review. |
+| `v0.4.0-alpha.1` | *to be cut* | Formal milestone — to be cut once chunks 2-4 of next session land (ISIS + OSPF hardware retest + router-id pre-check). See [docs/next-session-kickoff.md](docs/next-session-kickoff.md). |
+| `v0.4.0-alpha.1-ai-configure` | 2026-05-15 | First hardware-validated AI-first cut: multi-propose chain + generic CLI configure + spatial-label fix + CIDR splitting + null-verify loop continuation. |
+| `v0.4.0-alpha.2-retry-guard` | 2026-05-15 | Per-turn propose quota + OSPF `\| section` → `\| include` parser fix. |
+| `v0.4.0-alpha.3-add-button` | 2026-05-15 | Inner planner clicks Add when intent says add; `device_errors` field surfaces `%` lines from Cisco. |
+| `v0.4.0-alpha.4-settle-wait` | 2026-05-18 | `_settle_page()` between every action and re-describe — survives Cisco's Angular auto-dismiss modal race (ISIS class of bug). |
+| `v0.4.0-alpha.4-pre-redesign` | 2026-05-18 | Freeze marker before the frontend redesign track starts. 521 tests green; backend stable. |
 
-The frontend GUI is built **in parallel** with the backend, ~2h/day from Day 1 onwards — instructor requires it as a core graded deliverable, not bonus. If a given day's backend work overruns, the GUI work for that day is dropped (not vice versa). At alpha freeze (Day 9), all six §2 scenarios pass end-to-end AND the GUI consumes the real WebSocket event stream.
+#### Future tags
+- Next session will add `v0.4.0-alpha.5-overload-retry` for Anthropic 529 hardening, then cut the formal un-suffixed `v0.4.0-alpha.1` once chunks 2-4 are hardware-validated.
+- The original `v0.5.0-rc.1` and `v1.0.0-demo` placeholders are deferred — the rolling-alpha approach has replaced the fixed Day 9/10 cadence. Demo cut + submission tag will land once the frontend redesign + tech report are in.
+
+The frontend GUI is built **in parallel** with the backend — instructor requires it as a core graded deliverable, not bonus. At the formal alpha milestone all six §2 scenarios must pass end-to-end AND the GUI must consume the real WebSocket event stream.
 
 ### 6.3 Mechanical backup rhythm (not "by feel")
 - Every 60–90 min OR after each logical task → commit to feature branch
@@ -284,162 +288,57 @@ The frontend GUI is built **in parallel** with the backend, ~2h/day from Day 1 o
 
 ---
 
-## 7. Day-by-day plan (10 working days × 6h, parallel GUI track)
+## 7. Milestone summary (the original 10-day plan, compressed + pivoted)
 
-Each day allocates roughly **3.5h backend + 1.5h GUI + 1h test/commit/push**. Hard rule: **backend on the §2 critical path comes first; if backend slips on a given day, that day's GUI work is dropped, not vice versa.**
+The original §7 was a Day 1–10 schedule (2026-05-11 to ~2026-05-20). Reality compressed it into a few calendar days, then a major architecture shift (AI-first WebUI) replaced the back half of the schedule with a rolling-alpha track. The day-by-day receipts live in [docs/today-*.md](docs/) journals; this section keeps only the milestone shape.
 
-> **Schedule status as of 2026-05-12 evening:** Days 1, 2, 3, 4, 5 all done in 2 calendar days (Day 1 yesterday, Days 2–5 today). **WebUI hostname round-trip proven on real Cisco C1111 at 12:26 today** — see Day 5 below for the run log. The orchestrator/planner/chat-API portion of Day 6 also already shipped (Days 4 commits `e5c4414` + `684ead8`). **3 calendar days banked** against the 10-day schedule. Day 6 (next, RAG + WebSocket) is the v0.2.0-agent-core tag.
+### Days 1–5 (2026-05-11 → 2026-05-12) — DONE
 
----
+- **Day 1 — Bootstrap + router pre-flight.** Repo skeleton, CI, Pydantic Settings, structlog, FastAPI healthz, GUI scaffolds, C1111 prerequisites verified. Tag: `v0.0.1-bootstrap`.
+- **Day 2 — CLI read.** Netmiko pool + `show_*` tools + ntc-templates parsers + JSONL action log; Dashboard wired to real `/api/logs/recent`.
+- **Day 3 — CLI write + HITL + WebUI probe.** `set_hostname` / `set_interface_ip` gated on `is_approved`; propose/approve/execute state machine; full hostname round-trip on the real C1111. Tag: `v0.1.0-cli-core`.
+- **Day 4 — Orchestrator + WebUI discovery.** Outer Haiku 4.5 tool-use loop, SK/EN prompt, 8 Anthropic-format tool schemas with two-layer approval gate; Playwright browser/login/evidence scaffolds.
+- **Day 5 — WebUI hostname flow + verify.** Hand-coded POM + flow, `verify_hostname()`, SSH-pool-invalidation fix for stale prompts. End-to-end WebUI hostname round-trip proven on the real router in 23 s on 2026-05-12.
 
-### ✓ Day 1 — Bootstrap + GUI foundation + router pre-flight (DONE 2026-05-11)
+### Days 6–7 — RAG + WebSocket + hand-coded WebUI flows (DONE 2026-05-13)
 
-- Backend: repo skeleton, `.gitignore`, `.env.example`, `pyproject.toml`, `requirements.txt`, Pydantic Settings, structlog (idempotent + stderr-safe), FastAPI healthz, CI workflows, `/checkpoint` skill, unit tests
-- GUI: Tailwind design tokens, Sidebar + TopBar + Dashboard + Chat + Preview + WebUI Live screen skeletons
-- Router pre-flight: priv-15 user, `ip http server`, 30 VTY lines, SSHv2, 192.168.10.1 reachable, WebUI walks, USB known-good config exported
-- **Tag:** `v0.0.1-bootstrap` (force-moved forward Day 2 morning after cabled session closed)
+- RAG: heading-aware chunking, sentence-transformers/all-MiniLM-L6-v2 embeddings, ChromaDB persisted; `search_docs` tool with source + section. 913 chunks from the C1100 HIG, WebUI guide, and ISR1100 SW config.
+- WebSocket: `core/eventbus.py` + `GET /ws/agent`; planner publishes `agent_thinking` / `tool_call` / `awaiting_approval` / `applied` / `verified` events; frontend `lib/ws.ts` consumes them.
+- WebUI VLAN flow: hand-coded POM + flow with screenshots and CLI cross-verify.
+- Smoke harness: all 6 §2 scenarios runnable via `scripts/run_smoke_tests.py`.
+- Tags: `v0.2.0-agent-core`, `v0.3.0-webui-core`.
 
-### ✓ Day 2 — CLI read + Dashboard wired (DONE 2026-05-12, commit `0ffad60`)
+### Day 8 — original `v0.4.0-alpha.1` cut + AI-first decision (DONE 2026-05-14)
 
-- Backend: `cli_agent/connection.py` (Netmiko pool, retry-only-on-connect, host-key error guidance), `read_tools.py` (4 `show_*` tools), `parsers.py` (ntc-templates 9.1.0 with raw-string fallback), action logger JSONL
-- GUI: `BackendStatus` polls real `/healthz`, `RecentActions` polls real `GET /api/logs/recent` every 3 s
-- Smoke verified on real C1111: 7 interfaces parsed, Vlan1 at 192.168.10.1 up/up
-- **Committed + pushed**
+- Pre-pivot hardening tags landed: `v0.3.1-audit-fixes` → `v0.3.6-security-review`, including POM stabilisation, AI-first foundations, and the WebUI element recorder.
+- **The pivot:** hand-coded Playwright POMs scaled poorly to every new Cisco WebUI page. Decision recorded in [docs/plan-ai-first-webui.md](docs/plan-ai-first-webui.md): replace flow-per-feature with a generic intent path — inner Haiku drafts steps from `describe_page()` snapshots; deterministic Python clicks and waits.
+- New modules introduced: `semantic_dom.describe_page()`, `generic_driver.webui_act_by_intent()`, `_subprocess.py` + `_playwright_subprocess.py`, `configure_planner.draft_plan()`, `cli_configure_planner.draft_plan()`. Legacy POMs + flows stay in the repo for fast-path features.
 
-### ✓ Day 3 — CLI write + HITL + WebUI probe (DONE 2026-05-12, commits `8580b7d` + `3220a96` + script 05/06)
+### Alpha-1 chunks (2026-05-14 → 2026-05-18)
 
-- Backend: `cli_agent/write_tools.py` (`set_hostname`, `set_interface_ip` both gate on `is_approved`), `snapshots.py`, `orchestration/confirmations.py` (ActionState enum + propose/approve/reject), `restore_config(path)`, `routes_approvals.py`
-- Backend: WebUI cert/login probe (`playwright_playground/scripts/05_real_router_probe.py`) + VLAN add programmatic Playwright (`06_real_router_vlan_add.py`)
-- GUI: `ApprovalButtons.tsx` POSTs to real `/api/approve/{id}`; `/preview` reads `?action_id=` from URL
-- Bug fix during smoke: Netmiko `base_prompt` stale after hostname change → `pool.invalidate()` + `conn.find_prompt()` in restore
-- Full round-trip proven on real router: hostname `c1111-lab` → `LAB-R1` → restored
-- **Tag:** `v0.1.0-cli-core` (created 2026-05-12)
+Iterative tags after the AI-first pivot, each fixing a specific class of bug surfaced by hardware testing:
 
-### ✓ Day 4 — Orchestrator + WebUI discovery (DONE 2026-05-12)
+| Tag | Date | Fix |
+|---|---|---|
+| `v0.4.0-alpha.1-ai-configure` | 2026-05-15 | First hardware-validated cut: multi-propose chain + generic CLI configure + spatial-label fix + CIDR splitting + null-verify loop continuation. |
+| `v0.4.0-alpha.2-retry-guard` | 2026-05-15 | Per-turn propose quota; OSPF `\| section` → `\| include` parser fix. |
+| `v0.4.0-alpha.3-add-button` | 2026-05-15 | Inner planner clicks Add when intent says add; `device_errors` surfaces Cisco `%` lines. |
+| `v0.4.0-alpha.4-settle-wait` | 2026-05-18 | `_settle_page()` (networkidle ≤1.5 s + 500 ms fallback) between every action and re-describe; survives Cisco Angular auto-dismiss modal race (ISIS class of bug). |
 
-**Orchestrator (commits `e5c4414` + `684ead8`):**
-- `orchestration/tool_registry.py` — 8 Anthropic-format schemas (4 read + 2 propose + 2 execute) with two-layer defense-in-depth approval gate (PR review fix in `809cdf0`)
-- `orchestration/planner.py` — Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) tool-use loop, SK/EN bilingual prompt, hard cap 8 iterations, structured events, model_dump fallback for unknown content blocks
-- `api/routes_chat.py` — `POST /api/chat` with `run_in_threadpool` to keep the FastAPI loop responsive while planner does blocking I/O
-- Full natural-language round-trip proven: "ukáž mi rozhrania" parsed in Slovak; "zmeň hostname na LAB-R1" → propose → approve → execute in 1.29 s
+### Pre-redesign freeze (2026-05-18)
 
-**WebUI discovery scaffolds (commit `5c048b0`):**
-- `backend/webui_agent/browser.py` — `webui_browser()` context manager, viewport-pinned, cert-bypassed, console+pageerror → structlog, networkidle suppression helper
-- `backend/webui_agent/login.py` — `first_match()` yaml-driven strategy walker, `login()`/`ensure_logged_in()`/`start_keepalive()` for 5-min idle timeout
-- `backend/webui_agent/evidence.py` — `EvidenceCollector` with auto-numbered screenshots + DOM dump
-- `backend/webui_agent/selectors/iosxe_default.yaml` — role/label/text/css fallback chains for login, top nav, VLAN form, hostname form, session-expired detection
-- `frontend/components/webui-agent/PhaseProgress.tsx` + `ActionTimeline.tsx` — extracted from `/webui-live` page, prop-driven so Day 5 swaps mocks for real events with zero page changes
-- `docs/codegen-howto.md` — step-by-step for running `playwright codegen` against the real C1111
-- **Deferred (Filip-driven):** Playwright codegen capture against the real router; not blocking — scripts 05/06 seeded the yaml fallbacks well enough that Day 5 flows should work; refinement when needed.
-- 97 unit tests passing
+Tag `v0.4.0-alpha.4-pre-redesign` marks the current state: 521 tests green, backend stable, frontend redesign about to start as a parallel track. Designer has [docs/design-handoff.md](docs/design-handoff.md); no mockups yet.
 
-### ✓ Day 5 — WebUI hostname flow + verify (DONE 2026-05-12)
+### Next
 
-**Shipped:**
-- `backend/webui_agent/pages/hostname_page.py` — Page Object Model.
-  Direct hash-route navigation to `/webui/#/general` bypasses the sidebar
-  (sidebar renders flakily under Playwright). `get_current_hostname()`,
-  `set_hostname()` (focus + fill — `Locator.triple_click()` isn't on the
-  Locator class in Playwright 1.49.1 sync; `fill()` clears+focuses+types
-  in one call), `apply()`. On failure dumps `input_inventory` (every
-  `<input>` attribute) for next-iteration debugging.
-- `backend/webui_agent/flows/change_hostname.py` — composes browser +
-  login + POM + verify + snapshots. Hard rules: HITL gate, pre-snapshot
-  before the UI is touched, screenshots at every step, SSH pool
-  invalidated after success (hostname change makes Netmiko's
-  `base_prompt` stale — same bug we patched on Day 3 fires here too),
-  CLI verify is the ground truth, no auto-retry on error.
-- `backend/webui_agent/verify.py` — `verify_hostname()` regex-anchored
-  whole-line match against `show running-config`, `verify_vlan_exists()`
-  for Day 7.
-- `backend/orchestration/tool_registry.py` — `propose_webui_set_hostname` →
-  `webui_set_hostname` schemas + dispatch + `_REQUIRES_APPROVAL` gate.
-- `backend/orchestration/planner.py` — system prompt teaches Claude when
-  to pick CLI vs WebUI ("v prehliadači" / "demo" / "ukáž mi ako" →
-  WebUI; otherwise CLI). Added rule for action_id reference: when the
-  user says "execute act_X", find the matching propose in history and
-  call the execute tool from its `execute_tool` hint — don't propose
-  again or swap CLI↔WebUI.
-- Selector ground truth captured in `selectors/iosxe_default.yaml`:
-  hostname input is `name="switchName"` (the form is shared between
-  switches and routers), `data-ng-model="jsonData.general.name"`. Apply
-  button is `kendo-button="saveBtn"` with `ng-click="apply('General')"`
-  — initially disabled, enabled by `ng-change` after fill.
+Per [docs/next-session-kickoff.md](docs/next-session-kickoff.md), the next session covers in order:
+1. **Anthropic 529 retry hardening** — bump `max_retries=5` at every `Anthropic()` client; wrap `OverloadedError` in `_webui_configure` / `_cli_configure` and the matching propose tools. Tag `v0.4.0-alpha.5-overload-retry`.
+2. **ISIS WebUI hardware retest** — confirm `_settle_page` actually keeps the Add modal open long enough for `describe_page` to capture the form.
+3. **OSPF WebUI hardware retest** — alpha.3's click-Add rule validated on hardware for OSPF specifically.
+4. **router-id conflict pre-check** — refuse at propose time when the operator picks a router-id already in use (inner planner pre-flight grep over running-config).
+5. **Consolidate to `v0.4.0-alpha.1`** — formal milestone tag, no suffix, once chunks 1–4 are validated on the C1111.
 
-**Bug fix during the smoke session:**
-After the previous-conversation `set_hostname` fix, the same Netmiko
-prompt-staleness bug fires when the WebUI changes the hostname too.
-`change_hostname_via_webui` invalidates the SSH pool right before the
-CLI verify call — the fresh connection re-detects the new prompt.
-
-**Real-router round-trip proven 2026-05-12 12:26:**
-
-```
-12:26:20  propose_action + approve_action
-12:26:22  pre-snapshot via SSH (hostname = LAB-R3)
-12:26:23  Chromium launched, screenshot 01
-12:26:25  WebUI login complete
-12:26:26  → direct nav https://192.168.10.1/webui/#/general
-12:26:39  form loaded (screenshot 03), read current = LAB-R3
-12:26:40  fill new = LAB-R4 (screenshot 04)
-12:26:41  Apply clicked (screenshot 05), browser closes
-12:26:41  SSH pool invalidated (hostname change → stale prompt)
-12:26:42  show running-config → verify_hostname found=True
-12:26:43  post-snapshot via SSH (hostname = LAB-R4)
-          DONE — total 23 seconds end-to-end
-```
-
-Evidence on disk at `artifacts/screenshots/change_hostname_act_…/` (5
-PNGs) and `artifacts/device-snapshots/act_…/{pre,post}/*.txt` (6 files).
-
-**Deferred to Day 6** (originally Day 5 scope, moved because it's
-naturally bundled with the orchestrator/RAG WebSocket work):
-- `backend/core/eventbus.py` + `GET /ws/agent` WebSocket route
-- Refactor planner to publish events through the bus
-- Frontend `lib/ws.ts` + `/chat` + `/webui-live` consume real events
-  instead of mocks
-
-Day 6's `v0.2.0-agent-core` tag will include both the WebSocket wiring
-and the RAG pieces.
-
-### Day 6 — RAG + WebSocket events + Sources display
-
-- Backend: `knowledge_agent/ingest.py` — curated ~10 MB C1111 + IOS XE 17.x guides (VLANs, hostname, WebUI nav, interfaces only per `docs/rag-sources.md`); heading-aware chunking ~500 tok with 50-tok overlap (`chunking.py`); embeddings via `sentence-transformers/all-MiniLM-L6-v2` persisted to ChromaDB
-- Backend: `knowledge_agent/retrieve.py` — `search_docs(query, top_k=5)` returns chunks with source + section; register as new tool in `tool_registry.py`; orchestrator prompt updated to call `search_docs` before unfamiliar configs; responses include "Sources" section
-- Backend (pulled forward from Day 5): `core/eventbus.py` async pub/sub + `GET /ws/agent` WebSocket route; refactor planner to publish `agent_thinking` / `tool_call` / `tool_result` / `awaiting_approval` / `applied` / `verified` / `error` events through the bus; keep sync `POST /api/chat` working as before
-- GUI: `lib/ws.ts` WebSocket client; `/chat` consumes message events; `/preview` shows live action timeline; `/webui-live` consumes WS-pushed screenshot events (replaces mocked timeline); citation badges on Chat replies
-- Smoke: 10 hand-graded relevance queries, target ≥ 7/10
-- **Tag:** `v0.2.0-agent-core`
-
-### Day 7 — WebUI VLAN flow + smoke harness
-
-- Backend: `webui_agent/pages/vlan_page.py` (POM) + `webui_agent/flows/add_access_vlan.py`, screenshots, verify VLAN appears via WebUI list AND CLI `show vlan brief`; register `propose_webui_add_vlan` + `webui_add_vlan` in registry; orchestrator prompt: prefer WebUI tool for VLAN add (WebUI work is 30 pts on the rubric)
-- Backend: `tests/smoke/` — all 6 §2 scenarios wired as runnable scripts; `scripts/run_smoke_tests.py` runs them and reports
-- GUI: bug fixes + polish (loading states, error toasts, empty states, mesh sphere decoration where time permits)
-- **Tag:** `v0.3.0-webui-core`
-
-### Day 8 — Alpha freeze + GUI page completion
-
-- Backend: `scripts/run_smoke_tests.py` runs all 6 scenarios **5× in a row** clean; HITL approval gate proven for every write
-- GUI: Logs page (real `/api/logs/recent` + filters), Backups page (lists snapshot folders + lets you restore from one with confirmation), Devices page (the single C1111 with live status + reachability check)
-- **Tag:** `v0.4.0-alpha.1` + cut `release/alpha-1-freeze` branch + GitHub Release
-- 🎯 At this point the project passes the grading floor. Everything beyond is upside.
-
-### Day 9 — RC1: tech report draft + demo b-roll
-
-- Docs: `docs/technical_report.md` ≥ 8 page draft covering assignment goals, architecture, hybrid execution principle, HITL gate, evidence per write, RAG citations, demo screenshots
-- Docs: README polish — Windows install from clean checkout, env setup, supported commands, example I/O for each of the 6 scenarios
-- Video: record 10–15 min b-roll of the agent doing each scenario through the GUI (saves Day 10 video time)
-- **Tag:** `v0.5.0-rc.1`
-
-### Day 10 — Final polish + submission
-
-- No new features. Only P0/P1 fixes
-- Finalize `docs/technical_report.md` → PDF (via `anthropic-skills:pdf` or `pandoc`)
-- Edit demo video from Day 9 b-roll into 10–15 min final cut (or rehearse for live presentation)
-- Final GUI polish based on video review
-- Build submission ZIP via `scripts/create_release_bundle.py` (excludes `.git`, `.venv`, `node_modules`, `vectorstore/`, `screenshots/`, `backups/`, `.env`)
-- **Tag:** `v1.0.0-demo` — final submission
+Demo cut + tech report + submission ZIP are deferred until after the frontend redesign lands.
 
 ---
 
