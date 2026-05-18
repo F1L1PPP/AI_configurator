@@ -292,6 +292,53 @@ _SENSITIVE_DENY_LIST = frozenset(
 # fill against a healthy WebUI; anything longer is a real problem.
 _ACT_TIMEOUT_MS = 5000
 
+# Settle budget after a successful action — Playwright tries networkidle first
+# (covers Cisco's chatty Angular XHR bursts), and if the page never reaches
+# idle within the window, falls back to a small fixed sleep (covers pages with
+# polling timers that prevent networkidle from ever firing).
+_SETTLE_NETWORKIDLE_MS = 1500
+_SETTLE_FALLBACK_MS = 500
+
+
+def _settle_page(page: Any) -> None:
+    """Wait for the page to stabilise after a click/fill/etc.
+
+    The ISIS Add form surfaced a race: a click opens a modal, the modal
+    renders asynchronously, and Cisco's Angular dismiss-on-blur sometimes
+    closes it before describe_page snapshots the elements. By the time we
+    iterate locators in describe_page, the modal can be gone — and the
+    inner LLM sees a blank view and returns empty plan.
+
+    Strategy:
+      1. Try ``page.wait_for_load_state("networkidle", timeout=1500)`` —
+         Cisco's Angular modals usually finish their open animation when
+         network is quiet. Fast-out path: most healthy pages return in
+         well under 1.5s.
+      2. If networkidle never fires (some Cisco pages have polling timers
+         that keep the network busy indefinitely), sleep 500ms as a
+         fixed fallback. That's enough for the typical Angular fade-in
+         (~300ms) to complete.
+
+    Cost: ~500ms-1.5s per successful action. On a 5-step static-route
+    flow that's ~3-7s extra — acceptable given the correctness win.
+    Best-effort: any exception is swallowed; we still try to describe
+    and let the planner decide.
+    """
+    import time as _time  # noqa: PLC0415
+
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: PLC0415
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=_SETTLE_NETWORKIDLE_MS)
+    except PlaywrightTimeoutError:
+        # Page never reached networkidle in the window — fall back to a
+        # fixed sleep for animation completion.
+        _time.sleep(_SETTLE_FALLBACK_MS / 1000.0)
+    except Exception:  # noqa: BLE001
+        # Anything else (page closed, navigation in flight, etc.) — swallow
+        # and let the describe_page that follows surface a real error.
+        pass
+
 
 def _invoke_action(locator: Any, action: str, value: str | None) -> None:
     """Dispatch one Playwright action against ``locator``.
@@ -403,6 +450,13 @@ def _do_act(
     for attempt_idx in range(max_attempts):
         try:
             _invoke_action(locator, action, value)
+
+            # Settle: networkidle (≤1.5s) then 500ms fallback. Critical for
+            # Cisco's Angular modals that render/dismiss faster than
+            # describe_page can iterate locators. ISIS Add form was the
+            # canonical case — modal opened then auto-dismissed before
+            # the post-action describe captured it.
+            _settle_page(page)
 
             # Success — re-describe so the planner sees the post-action view.
             ev.step(f"act-{eid}-{action}", page)

@@ -607,3 +607,102 @@ def test_eid_for_intent_rejects_non_string_inputs():
     assert _eid_for_intent(view, None, "Prefix") is None  # type: ignore[arg-type]
     assert _eid_for_intent(view, "textbox", None) is None  # type: ignore[arg-type]
     assert _eid_for_intent(view, 123, "Prefix") is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _settle_page — networkidle-with-fallback wait after each successful action
+# ---------------------------------------------------------------------------
+
+
+def test_settle_page_returns_when_networkidle_fires():
+    """Healthy page reaches networkidle → no fallback sleep, fast return."""
+    from backend.webui_agent._playwright_subprocess import _settle_page
+
+    page = MagicMock()
+    # wait_for_load_state returns normally (no exception) — simulates idle.
+    page.wait_for_load_state.return_value = None
+
+    with patch("time.sleep") as mock_sleep:
+        _settle_page(page)
+
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=1500)
+    mock_sleep.assert_not_called()  # idle fired → no fallback
+
+
+def test_settle_page_falls_back_to_sleep_on_networkidle_timeout():
+    """Cisco pages with polling timers never reach networkidle → fallback to
+    500ms sleep. Without this, modal-rendering races make describe_page
+    snapshot a transient state (the ISIS Add bug)."""
+    from backend.webui_agent._playwright_subprocess import _settle_page
+
+    page = MagicMock()
+    page.wait_for_load_state.side_effect = PlaywrightTimeoutError("never idle")
+
+    with patch("time.sleep") as mock_sleep:
+        _settle_page(page)
+
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=1500)
+    mock_sleep.assert_called_once_with(0.5)  # 500ms fallback
+
+
+def test_settle_page_swallows_other_exceptions():
+    """If wait_for_load_state raises something other than TimeoutError (page
+    closed, navigation mid-flight), _settle_page must NOT raise — the
+    describe_page that follows will surface a real error if there is one.
+    """
+    from backend.webui_agent._playwright_subprocess import _settle_page
+
+    page = MagicMock()
+    page.wait_for_load_state.side_effect = RuntimeError("page closed")
+
+    # Should not raise
+    _settle_page(page)
+
+
+def test_do_act_calls_settle_on_success_path(monkeypatch):
+    """Regression guard: every successful _do_act invocation must call
+    _settle_page between the action and the post-action describe. Without
+    this, the ISIS Add modal closes before describe captures it and the
+    inner planner sees a blank view."""
+    from backend.webui_agent import _playwright_subprocess as sub
+
+    settle_calls: list[object] = []
+
+    def fake_settle(page: object) -> None:
+        settle_calls.append(page)
+
+    monkeypatch.setattr(sub, "_settle_page", fake_settle)
+
+    page = MagicMock()
+    loc = _make_locator_for_act()
+    locator_map = {"e_001": loc}
+    ev = MagicMock()
+    ev.session_dir = "/tmp/x"
+
+    # describe_page is imported lazily inside _do_act — patch at the module
+    # of origin (semantic_dom) to intercept the import-time lookup.
+    with patch(
+        "backend.webui_agent.semantic_dom.describe_page",
+        return_value=(
+            {
+                "view_id": "post",
+                "url": "x",
+                "title": "t",
+                "elements": [],
+                "modals": [],
+                "errors": [],
+            },
+            {},
+        ),
+    ):
+        reply, _new_map, _new_vid = sub._do_act(
+            page=page,
+            locator_map=locator_map,
+            current_view_id="pre",
+            msg={"view_id": "pre", "eid": "e_001", "action": "click", "value": None},
+            ev=ev,
+        )
+
+    assert reply["ok"] is True
+    assert len(settle_calls) == 1, "must settle exactly once on the success path"
+    assert settle_calls[0] is page
