@@ -134,38 +134,52 @@ function ChatScreen({ pushPreview }) {
     }
   }
 
-  const onApprove = () => {
+  const onApprove = async () => {
     if (!pending) return;
-    setStream((p) => [...p, { line: "✓ APPROVED · " + pending.actionId, kind: "ok" }]);
-    setMessages((m) => [...m, { role: "system", text: "Approved " + pending.actionId + ". Click EXECUTE NOW to apply." }]);
+    try {
+      await window.api.approveAction(pending.actionId);
+      setMessages(m => [...m, { role: "system", text: "Approved · " + pending.actionId }]);
+      // Phase stays "awaiting" — user clicks Execute next.
+    } catch (err) {
+      setMessages(m => [...m, { role: "system", text: "Approve failed: " + (err?.message || String(err)) }]);
+    }
   };
-  const onReject = () => {
+  const onReject = async () => {
     if (!pending) return;
-    setStream((p) => [...p, { line: "✗ REJECTED · " + pending.actionId, kind: "fail" }]);
-    setMessages((m) => [...m, { role: "system", text: "Rejected " + pending.actionId + ". No router contact." }]);
-    setPending(null);
-    setPhase("idle");
+    try {
+      await window.api.rejectAction(pending.actionId);
+      setMessages(m => [...m, { role: "system", text: "Rejected · " + pending.actionId }]);
+    } catch (err) {
+      setMessages(m => [...m, { role: "system", text: "Reject failed: " + (err?.message || String(err)) }]);
+    } finally {
+      setPending(null);
+      setPhase("idle");
+    }
   };
-  const onExecute = () => {
+  const onExecute = async () => {
     if (!pending) return;
     setPhase("executing");
-    // buildExecuteStream synthetic forEach removed — WS drives the live column now.
-    // Commit 7 wraps the block below in await window.api.executeAction(pending.actionId).
-    setMessages((m) => [
-      ...m,
-      {
-        role: "assistant",
-        kind: "result",
-        ok: true,
-        actionId: pending.actionId,
-        summary: pending.summary,
-        verify: pending.verify,
-      },
-    ]);
-    setHistory((h) => [{ ...pending, doneAt: new Date() }, ...h]);
-    setPending(null);
-    setPhase("done");
-    setTimeout(() => setPhase("idle"), 1200);
+    try {
+      await window.api.executeAction(pending.actionId);
+      setMessages(m => [
+        ...m,
+        {
+          role: "assistant",
+          kind: "result",
+          ok: true,
+          actionId: pending.actionId,
+          summary: pending.summary,
+          verify: pending.verify,
+        },
+      ]);
+      setHistory(h => [{ ...pending, doneAt: new Date() }, ...h]);
+      setPending(null);
+      setPhase("done");
+      setTimeout(() => setPhase("idle"), 1200);
+    } catch (err) {
+      setMessages(m => [...m, { role: "system", text: "Execute failed: " + (err?.message || String(err)) }]);
+      setPhase("idle");
+    }
   };
 
   const onPushPreview = () => {
