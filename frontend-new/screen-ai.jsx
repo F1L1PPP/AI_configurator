@@ -1,5 +1,60 @@
 // AI Configuration screen — chat + live event stream + sticky approve bar.
 
+// Builds a proposal object from a chat reply that has awaiting_approval set.
+// Finds the last tool_call event whose name starts with "propose_" to extract
+// commands, risk, transport, verify, affects, note, and params.
+// Falls back gracefully if no matching tool_call is found in events.
+function synthesizeProposal(reply) {
+  const actionId = reply.awaiting_approval;
+  const events = Array.isArray(reply.events) ? reply.events : [];
+
+  // Find the last tool_call event whose name starts with "propose_"
+  let lastToolCall = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type === "tool_call" && ev.data && typeof ev.data.name === "string" && ev.data.name.startsWith("propose_")) {
+      lastToolCall = ev.data;
+      break;
+    }
+  }
+
+  // Defensive fallback — no matching tool_call found
+  if (!lastToolCall) {
+    return {
+      actionId,
+      summary: reply.final_text,
+      risk: "low",
+      transport: "cli",
+      commands: [],
+      verify: "",
+      affects: "",
+      note: "",
+    };
+  }
+
+  const toolName = lastToolCall.name || "";
+  const transport = toolName.includes("webui") ? "webui" : "cli";
+  const input = lastToolCall.input || {};
+
+  // summary: prefer last awaiting_approval event's data.preview, else final_text
+  let summary = reply.final_text;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type === "awaiting_approval" && ev.data && ev.data.preview) {
+      summary = ev.data.preview;
+      break;
+    }
+  }
+
+  const commands = input.commands || (input.params && input.params.commands) || [];
+  const risk = input.risk || "low";
+  const verify = input.verify_pattern || "";
+  const affects = input.affects || "";
+  const note = input.note || "";
+
+  return { actionId, summary, risk, transport, commands, verify, affects, note };
+}
+
 function ChatScreen({ pushPreview }) {
   const [messages, setMessages] = React.useState(INITIAL_CHAT);
   const [input, setInput] = React.useState("");
@@ -17,71 +72,32 @@ function ChatScreen({ pushPreview }) {
   }, [messages, typing]);
 
   // Auto-grow stream during certain phases
-  const send = (text) => {
+  async function send(text) {
     if (!text.trim()) return;
-    const userMsg = { role: "user", text };
-    setMessages((m) => [...m, userMsg]);
+    setMessages(m => [...m, { role: "user", text }]);
     setInput("");
     setTyping(true);
     setPhase("thinking");
-
-    // Pre-stream "thinking" lines
-    const thinkingStream = [
-      { line: "thinking · iter 0", kind: "think" },
-      { line: "→ classify intent", kind: "tool" },
-      { line: "→ search_docs", kind: "tool" },
-      { line: "✓ search_docs", kind: "ok" },
-      { line: "thinking · iter 1", kind: "think" },
-    ];
-    thinkingStream.forEach((s, i) =>
-      setTimeout(() => setStream((p) => [...p, s]), 300 + i * 280)
-    );
-
-    const script = matchScript(text);
-    const delay = script ? script.delay : 1400;
-
-    setTimeout(() => {
+    try {
+      const reply = await window.api.sendChat(text, history);
+      setHistory(reply.history);
+      if (reply.awaiting_approval) {
+        // Synthesize a proposal from reply.events for the existing proposal-bubble UI.
+        const proposal = synthesizeProposal(reply);
+        setMessages(m => [...m, { role: "assistant", kind: "proposal", proposal }]);
+        setPending(proposal);
+        setPhase("awaiting");
+      } else {
+        setMessages(m => [...m, { role: "assistant", kind: "answer", text: reply.final_text }]);
+        setPhase("idle");
+      }
+    } catch (err) {
+      setMessages(m => [...m, { role: "system", text: "Chat failed: " + (err?.message || String(err)) }]);
+      setPhase("idle");
+    } finally {
       setTyping(false);
-      if (!script) {
-        setMessages((m) => [
-          ...m,
-          {
-            role: "assistant",
-            kind: "answer",
-            text:
-              "I'm not sure how to action that yet. Try one of these:\n\n- `add VLAN 30 named OFFICE`\n- `change hostname to LAB-R1`\n- `set GigabitEthernet0/1 to 192.168.10.1/24`\n- `add static route 10.99.99.0/24 via 192.168.10.254 via WebUI`\n- `how do I configure a trunk port?`",
-          },
-        ]);
-        setStream((p) => [...p, { line: "✓ replied — no action proposed", kind: "ok" }]);
-        setPhase("idle");
-        return;
-      }
-      if (script.reply.kind === "answer") {
-        setMessages((m) => [...m, { role: "assistant", kind: "answer", text: script.reply.text }]);
-        setStream((p) => [...p, { line: "✓ replied — sources cited", kind: "ok" }]);
-        setPhase("idle");
-        return;
-      }
-      // proposal
-      const proposal = script.reply;
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          kind: "proposal",
-          proposal,
-        },
-      ]);
-      setStream((p) => [
-        ...p,
-        { line: "→ propose_" + proposal.transport + "_configure", kind: "tool" },
-        { line: "✓ propose_" + proposal.transport + "_configure", kind: "ok" },
-        { line: "⏸ awaiting_approval · " + proposal.actionId, kind: "pause" },
-      ]);
-      setPending(proposal);
-      setPhase("awaiting");
-    }, delay);
-  };
+    }
+  }
 
   const onApprove = () => {
     if (!pending) return;
