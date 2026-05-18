@@ -12,38 +12,83 @@ function PreviewScreen({ preview }) {
     note: "Adds a new L2 VLAN. Existing traffic is not affected until an interface is moved into this VLAN.",
   };
 
-  // Synthesize a fake before/after running-config diff
-  const before = [
-    "!",
-    "vlan 10",
-    " name MANAGEMENT",
-    "!",
-    "vlan 20",
-    " name USERS",
-    "!",
-    "interface GigabitEthernet0/1",
-    " ip address 192.168.1.1 255.255.255.0",
-    " no shutdown",
-    "!",
-  ];
-  const after = [
-    "!",
-    "vlan 10",
-    " name MANAGEMENT",
-    "!",
-    "vlan 20",
-    " name USERS",
-    "!",
-    "vlan 30",
-    " name OFFICE",
-    "!",
-    "interface GigabitEthernet0/1",
-    " ip address 192.168.1.1 255.255.255.0",
-    " no shutdown",
-    "!",
-  ];
-  // Mark added lines
-  const addedSet = new Set(["vlan 30", " name OFFICE"]);
+  const [action, setAction] = React.useState(null);
+
+  React.useEffect(() => {
+    setAction(null);
+    if (preview?.actionId) {
+      window.api.fetchPreview(preview.actionId).then(setAction);
+    }
+  }, [preview?.actionId]);
+
+  // Branch A: preview exists but action not loaded yet — loading state
+  // Branch B: action loaded AND before/after populated — real diff (post-execute)
+  // Branch C: action loaded but no snapshots yet — pre-execute fallback
+
+  const hasDiff = action && action.before && action.before.length > 0 && action.after && action.after.length > 0;
+  const isLoading = !action && preview?.actionId;
+
+  function renderBeforeCard() {
+    if (isLoading) {
+      return (
+        <Card title="Running config — before" className="card--diff">
+          <div className="muted">Loading…</div>
+        </Card>
+      );
+    }
+    if (hasDiff) {
+      return (
+        <Card title="Running config — before" className="card--diff">
+          <pre className="diff diff--before">
+            {action.before.map((ln, i) => (
+              <div key={i} className="diff-line"><span className="diff-num">{i + 1}</span><span>{ln}</span></div>
+            ))}
+          </pre>
+        </Card>
+      );
+    }
+    // Branch C — no snapshot yet
+    return (
+      <Card title="Running config — before" className="card--diff">
+        <div className="muted">No diff snapshot available — execute to see before/after.</div>
+      </Card>
+    );
+  }
+
+  function renderAfterCard() {
+    if (isLoading) {
+      return (
+        <Card title="Running config — after" className="card--diff">
+          <div className="muted">Loading…</div>
+        </Card>
+      );
+    }
+    if (hasDiff) {
+      const addedSet = action.addedSet instanceof Set ? action.addedSet : new Set(action.addedSet || []);
+      return (
+        <Card title="Running config — after" className="card--diff">
+          <pre className="diff diff--after">
+            {action.after.map((ln, i) => {
+              const added = addedSet.has(ln);
+              return (
+                <div key={i} className={"diff-line" + (added ? " diff-add" : "")}>
+                  <span className="diff-num">{i + 1}</span>
+                  <span className="diff-sign">{added ? "+" : " "}</span>
+                  <span>{ln}</span>
+                </div>
+              );
+            })}
+          </pre>
+        </Card>
+      );
+    }
+    // Branch C — no snapshot yet
+    return (
+      <Card title="Running config — after" className="card--diff">
+        <div className="muted">No diff snapshot available — execute to see before/after.</div>
+      </Card>
+    );
+  }
 
   return (
     <div className="screen screen--preview">
@@ -65,28 +110,8 @@ function PreviewScreen({ preview }) {
       </div>
 
       <div className="preview-grid">
-        <Card title="Running config — before" className="card--diff">
-          <pre className="diff diff--before">
-            {before.map((ln, i) => (
-              <div key={i} className="diff-line"><span className="diff-num">{i + 1}</span><span>{ln}</span></div>
-            ))}
-          </pre>
-        </Card>
-
-        <Card title="Running config — after" className="card--diff">
-          <pre className="diff diff--after">
-            {after.map((ln, i) => {
-              const added = addedSet.has(ln);
-              return (
-                <div key={i} className={"diff-line" + (added ? " diff-add" : "")}>
-                  <span className="diff-num">{i + 1}</span>
-                  <span className="diff-sign">{added ? "+" : " "}</span>
-                  <span>{ln}</span>
-                </div>
-              );
-            })}
-          </pre>
-        </Card>
+        {renderBeforeCard()}
+        {renderAfterCard()}
       </div>
 
       <div className="preview-grid">
