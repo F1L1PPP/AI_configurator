@@ -2,7 +2,7 @@
 
 A reference for anyone who wants to understand what this project does and
 how each piece fits together — without reading every file. Mirrors what's
-actually shipped as of end-of-day 2026-05-12.
+actually shipped as of 2026-05-18 (post `v0.4.0-alpha.4-settle-wait`).
 
 ---
 
@@ -25,6 +25,14 @@ There are **two ways** the agent can change the router:
    browser, logs into the router's web interface, navigates to the right
    form, fills the field, and clicks the blue **Apply** button. You can
    watch it happen.
+
+Beyond the few hand-coded operations (hostname, interface IP, VLAN), the
+agent can also generically configure things it has **never seen before** —
+e.g. "set up OSPF area 0 on Gi0/0/0" or "add a static route to 10.0.0.0/24
+via the web UI". These flow through `propose_cli_configure` /
+`propose_webui_configure`, where an inner Haiku call drafts the plan
+(CLI commands or click steps) and the human still approves before anything
+touches the router. See §7.4 and §7.5 for the details.
 
 Every change leaves an evidence trail on disk: SSH transcripts, screenshots
 before and after, and a snapshot of `show running-config` from before and
@@ -57,9 +65,10 @@ after the change.
 │                          │                                   │
 │           ┌──────────────┼──────────────────────┐           │
 │           ▼              ▼                      ▼            │
-│      read_tools     write_tools (CLI)       webui_agent     │
-│      (SSH)          (SSH, HITL-gated)       (Playwright,    │
-│                                              HITL-gated)    │
+│      read_tools     propose_* (draft plan)  execute pair    │
+│      (SSH)          inner Haiku drafts CLI  (run on approve)│
+│                     cmds or click steps     webui_act,      │
+│                     — no router writes      cli_configure   │
 │           │              │                      │            │
 └───────────┼──────────────┼──────────────────────┼───────────┘
             │              │                      │
@@ -78,18 +87,21 @@ after the change.
 
 | Tool | What it is | What we use it for |
 |---|---|---|
-| **Python 3.13** | The language | Everything backend |
+| **Python 3.12** | The language | Everything backend |
 | **FastAPI** | A Python library that builds web APIs | The backend at `localhost:8000` with `/api/chat`, `/api/approve`, etc. |
-| **Anthropic SDK** | The official Python client for Claude | Send the user's message to Claude and get back which tool to call |
-| **Claude Haiku 4.5** | The AI model that picks tools | Reads natural language, picks the right tool, extracts parameters |
+| **Anthropic SDK** | The official Python client for Claude | Outer planner: pick which tool to call. Inner planner (`configure_planner`, `cli_configure_planner`): draft the actual click steps / CLI commands when the outer planner picks `propose_webui_configure` / `propose_cli_configure` |
+| **Claude Haiku 4.5** | The AI model that picks tools and drafts plans | `claude-haiku-4-5-20251001` — runs both outer and inner planners. Production-only model (no Opus/Sonnet at runtime) |
 | **Netmiko** | A Python library for SSH'ing into network devices | Sends Cisco CLI commands like `hostname LAB-R4` and reads `show` output |
 | **ntc-templates** | A library of TextFSM parsers for Cisco CLI output | Turns raw `show ip interface brief` text into a clean Python list of dicts |
-| **Playwright** | A library that drives a real Chrome browser from Python | Logs into the router's web UI and clicks the buttons |
+| **Playwright** | A library that drives a real Chrome browser from Python | Logs into the router's web UI and clicks the buttons. Runs in a Windows subprocess (load-bearing — see [`backend/webui_agent/_subprocess.py`](../backend/webui_agent/_subprocess.py)) |
 | **Chromium** | The actual browser binary Playwright launches | What you see open on your screen during the WebUI demo |
 | **Pydantic Settings** | A library that loads typed config from `.env` | Loads `ROUTER_HOST`, `ROUTER_SSH_USER`, etc. with type safety |
 | **structlog** | A library that produces structured JSON log lines | Writes one JSON line per tool call to `logs/actions.log` |
 | **Next.js 14 + Tailwind** | The frontend framework + CSS | The web GUI you see at `localhost:3000` |
-| **ChromaDB** | A local vector database | Stores Cisco doc chunks for RAG retrieval (Day 6: shipped; 692 chunks from ISR1100 SW Config Guide) |
+| **ChromaDB** | A local vector database | Stores Cisco doc chunks for RAG retrieval — 913 chunks from the Cisco IOS XE WebUI guide + companion docs |
+| **sentence-transformers/all-MiniLM-L6-v2** | A small embedding model | Turns each Cisco doc chunk + each search query into a 384-dim vector so ChromaDB can do similarity search |
+| **`semantic_dom.describe_page`** | Our token-bounded DOM walker | Walks the current Cisco WebUI page and emits ~500-800 tokens of JSON: visible interactive elements + a `locator_map`. The inner planner reads this view to draft click steps. Eids renumber per call; a `view_id` closes the staleness window |
+| **`_settle_page`** | Our Angular-modal stabiliser | After every Playwright action, waits for `networkidle` (≤1.5s) then a 500ms fallback before re-describing. Without this, AngularJS modals on the Cisco WebUI race against the next click (alpha.4 fix) |
 
 ---
 
@@ -122,9 +134,27 @@ a string like `act_20260512_441f6c`. The state machine lives in
 2. The write function itself ALSO checks `is_approved(action_id)`. So
    even if a future bug bypasses layer 1, layer 2 stops the write.
 
+**Same gate for the new generic configure tools.** When the outer planner
+picks `propose_cli_configure(intent)` or `propose_webui_configure(intent,
+webui_path)`, an inner Haiku call drafts the plan — a list of CLI commands
++ a `verify_pattern`, or a list of intent-based click steps like
+`{action: "click", intent: "Add", value: null}`. That AI-drafted plan is
+what the operator sees in `/preview`. Nothing touches the router until
+`APPROVED`. The two-layer check is identical; only the *contents* of the
+plan are AI-generated instead of hand-coded.
+
+The APPROVED → EXECUTING transition is atomic so a double-click on
+Approve can't race two executes through the gate (TOCTOU-safe).
+
 ---
 
 ## 5. Scenario A — hostname change via CLI (the fast path)
+
+This is the **hand-coded fast path**: hostname is one of the few operations
+where the CLI commands are baked into Python ([`backend/cli_agent/write_tools.py`](../backend/cli_agent/write_tools.py)
+`set_hostname`). It's cheap (no inner LLM call) and deterministic. For
+anything *not* in the fast-path catalog — OSPF, ISIS, static routes, etc.
+— the agent uses the generic `propose_cli_configure` path described in §7.5.
 
 ### What the user does
 
@@ -167,6 +197,15 @@ end
 ---
 
 ## 6. Scenario B — hostname change via WebUI (the visual path)
+
+This is the **hand-coded WebUI fast path**: a hard-wired Page Object Model
+in [`backend/webui_agent/pages/hostname_page.py`](../backend/webui_agent/pages/hostname_page.py)
++ a flow wrapper in [`backend/webui_agent/flows/change_hostname.py`](../backend/webui_agent/flows/change_hostname.py).
+Every selector and click is written by hand — no AI in the loop once the
+tool is chosen. For anything *not* in the fast-path catalog — adding a
+DHCP pool, configuring SNMP, etc. — the agent uses the generic
+`propose_webui_configure` path described in §7.4, where an inner Haiku
+call drafts the click steps from a JSON view of the page.
 
 ### What the user does
 
@@ -321,45 +360,175 @@ def execute_tool(name, params):
     return result if isinstance(result, dict) else {"result": result}
 ```
 
+### 7.4 The generic WebUI configure path ([`backend/orchestration/tool_registry.py`](../backend/orchestration/tool_registry.py), [`backend/orchestration/configure_planner.py`](../backend/orchestration/configure_planner.py))
+
+When the user asks for something **not** in the WebUI fast-path catalog
+(e.g. "add a static route 10.0.0.0/24 via 192.168.10.254 in the web UI"),
+the outer planner picks `propose_webui_configure(intent, webui_path)`. Here's
+what happens:
+
+```python
+# tool_registry.py — _propose_webui_configure (sketch)
+def _propose_webui_configure(*, intent, webui_path, action_id=None, ...):
+    # 1. RAG: pull doc chunks relevant to the intent
+    rag_chunks = retrieve(intent, k=4)
+
+    # 2. Spin up (or reuse) a Playwright session — runs in a Windows
+    #    subprocess so chromium doesn't blow up our asyncio loop
+    session = webui_open(webui_path=webui_path, action_id=action_id)
+
+    # 3. Ask the page to describe itself in JSON — visible interactive
+    #    elements + locator_map, capped at ~500-800 tokens
+    view = webui_describe_page(session["session_id"])
+
+    # 4. Inner Haiku call: given the intent + RAG snippets + the JSON
+    #    view of the page, draft a list of intent-based steps like:
+    #      [{"action": "click", "intent": "Add", "value": null},
+    #       {"action": "fill",  "intent": "Network", "value": "10.0.0.0"},
+    #       ...]
+    drafted = draft_plan(intent, rag_chunks, view)   # configure_planner.py
+
+    # 5. Stash the plan against an action_id and return it for /preview
+    return propose_action("webui_configure", {"steps": drafted, ...})
+```
+
+After the operator clicks Approve, the planner calls `webui_configure`:
+
+```python
+# tool_registry.py — _webui_configure (sketch)
+def _webui_configure(*, action_id, ...):
+    plan = get_approved_plan(action_id)
+    for step in plan["steps"]:
+        # Resolve the intent against the CURRENT view: the inner LLM picks
+        # the eid, then deterministic Python clicks via _invoke_action.
+        step_result = webui_act_by_intent(
+            session_id=session_id, action_id=action_id,
+            action=step["action"], intent=step["intent"], value=step["value"],
+        )
+        # _do_act_by_intent runs _settle_page() between every action —
+        # networkidle ≤1.5s + 500ms fallback — so Cisco's AngularJS modals
+        # have time to open/close before we re-describe.
+        if not _step_ok(step_result):
+            # bounded self-heal: re-describe + ask the inner LLM to redraft
+            # the remaining steps. Capped iterations to avoid infinite loops.
+            ...
+```
+
+Key files to read:
+
+- [`backend/orchestration/configure_planner.py`](../backend/orchestration/configure_planner.py) — `draft_plan()` is the inner Haiku call. Builds the system prompt around the view + RAG chunks.
+- [`backend/webui_agent/semantic_dom.py`](../backend/webui_agent/semantic_dom.py) — `describe_page()` is the token-bounded DOM walker.
+- [`backend/webui_agent/generic_driver.py`](../backend/webui_agent/generic_driver.py) — `webui_act_by_intent()` is the wrapper that talks to the Playwright subprocess.
+- [`backend/webui_agent/_playwright_subprocess.py`](../backend/webui_agent/_playwright_subprocess.py) — `_do_act_by_intent()` resolves the intent against the live view, `_invoke_action()` does the click, `_settle_page()` waits for Angular before we re-describe.
+
+### 7.5 The generic CLI configure path ([`backend/orchestration/cli_configure_planner.py`](../backend/orchestration/cli_configure_planner.py))
+
+Mirror of §7.4 but for CLI: when the user asks for something not in the
+CLI fast-path catalog (e.g. "configure OSPF area 0 on Gi0/0/0"), the outer
+planner picks `propose_cli_configure(intent)`. The inner Haiku call drafts
+a list of IOS commands + a regex `verify_pattern` to confirm afterwards:
+
+```python
+# tool_registry.py — _propose_cli_configure (sketch)
+def _propose_cli_configure(*, intent, ...):
+    # 1. Pull the current running-config so the inner LLM doesn't
+    #    duplicate existing config or assume the wrong starting state.
+    running = show_running_config()
+    rag_chunks = retrieve(intent, k=4)
+
+    # 2. Inner Haiku call: draft IOS commands + a verify regex.
+    drafted = draft_cli_plan(intent, running, rag_chunks)
+    # drafted == {
+    #   "commands": ["router ospf 1", " network 10.0.0.0 0.0.0.255 area 0"],
+    #   "verify_pattern": r"^router ospf 1\b",
+    #   ...
+    # }
+
+    # 3. Validate every command against the denylist (no `erase`, no
+    #    `reload`, no `write erase`, etc.) — refuse if anything matches.
+    enforce_denylist(drafted["commands"])
+
+    # 4. Stash the plan against an action_id and return it for /preview.
+    return propose_action("cli_configure", {"plan": drafted, ...})
+```
+
+After the operator clicks Approve, the planner calls `cli_configure`:
+
+```python
+# tool_registry.py — _cli_configure (sketch)
+def _cli_configure(*, action_id, ...):
+    plan = get_approved_plan(action_id)
+    pre_dir = take_snapshot(action_id, "pre")
+
+    # Netmiko sends the commands. Output gets captured into the action log.
+    output = send_config_set(plan["commands"])
+
+    # Verify by re-running `show running-config` and regex-matching the
+    # verify_pattern from the inner planner.
+    if not re.search(plan["verify_pattern"], show_running_config(), re.M):
+        raise VerifyError(...)
+
+    post_dir = take_snapshot(action_id, "post")
+    mark_executed(action_id)
+    return {...}
+```
+
+The whole point of this path is: **all the safety machinery (denylist,
+pre/post snapshots, HITL gate, verify) is hand-coded Python; only the
+*content* of the command list is AI-drafted.**
+
 ---
 
-## 8. What works today (end of Day 5, 2026-05-12)
+## 8. What works today (as of 2026-05-18)
 
-All six §2 demo scenarios from `PROJECT_PLAN.md`:
+Most recent deployed tag: **`v0.4.0-alpha.4-settle-wait`** (the `_settle_page`
+fix for the Cisco AngularJS modal race). Pre-redesign freeze tag:
+**`v0.4.0-alpha.4-pre-redesign`**.
+
+The six original demo scenarios from `PROJECT_PLAN.md`:
 
 | # | Scenario | Tool | Status |
 |---|---|---|---|
-| 1 | CLI: show interfaces | `show_ip_interface_brief` | ✓ proven on real router |
-| 2 | CLI: show running-config | `show_running_config` | ✓ proven |
-| 3 | CLI: change hostname | `set_hostname` | ✓ proven (1.29 s end-to-end) |
+| 1 | CLI: show interfaces | `show_ip_interface_brief` | working on real router |
+| 2 | CLI: show running-config | `show_running_config` | working |
+| 3 | CLI: change hostname | `set_hostname` | working (1.29 s end-to-end) |
 | 4 | CLI: change interface IP | `set_interface_ip` | built + unit-tested (live smoke deferred to avoid breaking `Gi0/1/0` management) |
-| 5 | **WebUI: change hostname** | `webui_set_hostname` | ✓ **proven on real router today, 23 s end-to-end** |
-| 6 | **WebUI: add VLAN** | `webui_add_access_vlan` | ✓ shipped Day 7; POM + flow + 26 unit tests; smoke harness runnable |
-| 7 | **RAG: query Cisco docs with citations** | `search_docs` | ✓ shipped Day 6; 772 chunks (2 of 7 PDFs); chat shows Sources badges |
+| 5 | WebUI: change hostname | `webui_set_hostname` | working on real router (~23 s end-to-end) |
+| 6 | WebUI: add VLAN | `webui_add_access_vlan` | working; POM + flow + unit tests |
+| 7 | RAG: query Cisco docs with citations | `search_docs` | working; 913 chunks indexed; chat shows Sources badges |
+
+**Generic propose_*_configure path** (the AI-first shift, late 2026-05-14 → alpha.4):
+
+| Scenario | Tool | Status |
+|---|---|---|
+| Generic CLI configure (any IOS feature) | `propose_cli_configure` / `cli_configure` | working; exercised end-to-end against OSPF + static-route flows |
+| Generic WebUI configure (any WebUI form) | `propose_webui_configure` / `webui_configure` | working on OSPF and static-route flows; alpha.4 `_settle_page` fix deployed but the ISIS retest is **blocked by transient Anthropic 529s** — end-to-end re-verification of the modal-race fix is pending |
 
 **Plus everything around it:**
 
-- HITL approval gate (server-enforced, two layers)
+- HITL approval gate (server-enforced, two layers; APPROVED→EXECUTING is atomic / TOCTOU-safe)
 - Pre/post device snapshots on every write
 - Screenshot evidence on every WebUI step
 - structlog JSONL log of every tool call (visible live in the Dashboard)
-- Real-time Slovak chat with Claude Haiku 4.5
-- The 4 GUI pages all wired to real data (Dashboard, Preview, /chat,
-  WebUI Live — /chat does sync POST for the reply + live WS event
-  stream from `/ws/agent` for the planner's tool_call / applied /
-  awaiting_approval activity)
+- Slovak/English chat with Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) — production-only model for both outer and inner planners
+- The 4 GUI pages all wired to real data (Dashboard, Preview, /chat, WebUI Live)
 
-**Test coverage:** 183 tests passing (157 baseline + 26 from Day 7:
-VlanPage POM, add_access_vlan flow, VLAN tool registry), ruff clean.
-Plus a smoke harness at `scripts/run_smoke_tests.py` that runs the
-6 §2 scenarios with explicit `SMOKE_ALLOW_WRITES` gate.
+**Test coverage:** **521 tests passing**, ruff clean. Plus the smoke harness
+at `scripts/run_smoke_tests.py` that runs the original §2 scenarios with
+an explicit `SMOKE_ALLOW_WRITES` gate.
 
 ---
 
-## 9. Proof: actual end-to-end run log from today (2026-05-12 12:26)
+## 9. Historical: 2026-05-12 fast-path run log
 
-This is the real terminal output from running the WebUI hostname change
-against the cabled Cisco C1111 — copy/paste, no edits:
+Kept here as the canonical proof of the **WebUI hostname fast path** (§6)
+running end-to-end against the cabled Cisco C1111 on the day it first
+shipped. For the latest run logs — including the generic
+`propose_webui_configure` / `propose_cli_configure` paths from §7.4–7.5 —
+see [`docs/today-2026-05-18-summary.md`](today-2026-05-18-summary.md) and
+the daily wrap-ups under `docs/`.
+
+The terminal output below is copy/paste, no edits:
 
 ```
 >>> aid = propose_action("webui_set_hostname", {"name": "LAB-R4"})
@@ -424,18 +593,25 @@ artifacts/screenshots/change_hostname_act_20260512_441f6c/
 
 | Want to understand… | Look at |
 |---|---|
-| How natural language becomes tool calls | `backend/orchestration/planner.py` |
-| The tool catalog Claude sees | `backend/orchestration/tool_registry.py` (`TOOL_SCHEMAS`) |
-| The HITL state machine | `backend/orchestration/confirmations.py` |
-| How `show` commands work | `backend/cli_agent/read_tools.py`, `parsers.py` |
-| How CLI writes work | `backend/cli_agent/write_tools.py`, `snapshots.py` |
-| The Playwright browser config | `backend/webui_agent/browser.py` |
-| The login flow | `backend/webui_agent/login.py` |
-| The hostname form clicks | `backend/webui_agent/pages/hostname_page.py` |
-| The full WebUI hostname flow | `backend/webui_agent/flows/change_hostname.py` |
+| How natural language becomes tool calls (outer planner) | [`backend/orchestration/planner.py`](../backend/orchestration/planner.py) |
+| The tool catalog Claude sees | [`backend/orchestration/tool_registry.py`](../backend/orchestration/tool_registry.py) (`TOOL_SCHEMAS`) |
+| The HITL state machine | [`backend/orchestration/confirmations.py`](../backend/orchestration/confirmations.py) |
+| How the AI drafts WebUI steps (inner planner) | [`backend/orchestration/configure_planner.py`](../backend/orchestration/configure_planner.py) (`draft_plan`) |
+| How the AI drafts CLI commands (inner planner) | [`backend/orchestration/cli_configure_planner.py`](../backend/orchestration/cli_configure_planner.py) (`draft_cli_plan`) |
+| How the agent sees a Cisco WebUI page | [`backend/webui_agent/semantic_dom.py`](../backend/webui_agent/semantic_dom.py) (`describe_page`) |
+| The per-step click executor with self-heal | [`backend/webui_agent/generic_driver.py`](../backend/webui_agent/generic_driver.py) (`webui_act_by_intent`) |
+| The Angular-modal stabilizer | [`backend/webui_agent/_playwright_subprocess.py`](../backend/webui_agent/_playwright_subprocess.py) (`_settle_page`) |
+| How `show` commands work | [`backend/cli_agent/read_tools.py`](../backend/cli_agent/read_tools.py), [`parsers.py`](../backend/cli_agent/parsers.py) |
+| How CLI writes work (fast path) | [`backend/cli_agent/write_tools.py`](../backend/cli_agent/write_tools.py), `snapshots.py` |
+| The Playwright browser config | [`backend/webui_agent/browser.py`](../backend/webui_agent/browser.py) |
+| The Windows subprocess shim (load-bearing) | [`backend/webui_agent/_subprocess.py`](../backend/webui_agent/_subprocess.py) |
+| The login flow | [`backend/webui_agent/login.py`](../backend/webui_agent/login.py) |
+| The hostname form clicks (fast path) | [`backend/webui_agent/pages/hostname_page.py`](../backend/webui_agent/pages/hostname_page.py) |
+| The full WebUI hostname flow (fast path) | [`backend/webui_agent/flows/change_hostname.py`](../backend/webui_agent/flows/change_hostname.py) |
 | Selector strategies (role/label/text/css) | `backend/webui_agent/selectors/iosxe_default.yaml` |
-| Screenshot + DOM dump helper | `backend/webui_agent/evidence.py` |
+| Screenshot + DOM dump helper | [`backend/webui_agent/evidence.py`](../backend/webui_agent/evidence.py) |
 | The frontend Preview screen | `frontend/components/preview/ApprovalButtons.tsx` |
 | The Live Agent screen | `frontend/components/webui-agent/{PhaseProgress,ActionTimeline}.tsx` |
 | The full plan | `PROJECT_PLAN.md` (§7 day-by-day) |
+| Today's wrap + next-session kickoff | [`docs/today-2026-05-18-summary.md`](today-2026-05-18-summary.md), [`docs/next-session-kickoff.md`](next-session-kickoff.md) |
 | Per-day shipped reports | `docs/day1-summary.md`, `docs/day2-5-summary.md` |

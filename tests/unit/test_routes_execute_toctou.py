@@ -31,18 +31,6 @@ def client():
     return TestClient(app)
 
 
-@pytest.fixture
-def stub_show_version(monkeypatch):
-    """Replace show_version with a deterministic stub so the test doesn't
-    need a real router. Returns a stub controllable mid-test."""
-
-    def _stub(**_kwargs):
-        return {"version": "stub"}
-
-    monkeypatch.setitem(tr._TOOL_FUNCS, "show_version", _stub)
-    return _stub
-
-
 # ---------------------------------------------------------------------------
 # Happy path — /api/execute against an approved action works
 # ---------------------------------------------------------------------------

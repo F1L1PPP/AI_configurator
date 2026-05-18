@@ -1,5 +1,11 @@
 # Plan — AI-First WebUI Configuration (v0.4.0)
 
+> **Status (as of 2026-05-18):** Plan was authored 2026-05-14; Phases 0-5 shipped
+> through the `v0.4.0-alpha.1-ai-configure` → `alpha.4-settle-wait` tag chain by
+> 2026-05-18; Phases 6-7 deferred to post-`v0.4.0-alpha.1` consolidation per
+> [docs/next-session-kickoff.md](next-session-kickoff.md). Section-level ✅ / ⏳
+> markers below.
+
 ## Context
 
 Today (2026-05-14) we proved the full WebUI write path end-to-end: VLAN 46 'IOT'
@@ -43,7 +49,11 @@ Sources panel in chat already renders citations. No further work needed.
 The main work. Seven phases, sequenced so cost discipline lands before any
 LLM call grows in size.
 
-### Phase 0 — Mark the milestone + backup (gate, ~10 min)
+### Phase 0 — Mark the milestone + backup (gate, ~10 min) ✅ DONE (2026-05-14)
+
+**Shipped:** tag `v0.3.2-webui-flows-working` cut from HEAD `b084088` plus the
+autonomous daily `backup-20260514-*` tag. Rollback point established before the
+AI-first work began.
 
 Filip's explicit ask: "mark this version that it works, also do backup before
 that big change."
@@ -58,7 +68,14 @@ that big change."
 Nothing else changes in this phase. The tags are the rollback point if the
 AI-first work goes sideways.
 
-### Phase 1 — Cost discipline (foundation, ~1 day)
+### Phase 1 — Cost discipline (foundation, ~1 day) ✅ DONE (early alpha, before 2026-05-15)
+
+**Shipped:** prompt caching wired via `cache_control: ephemeral` on the system
+prompt + last tool in [backend/orchestration/planner.py](../backend/orchestration/planner.py);
+`planner_iteration_usage` telemetry emitted after every `messages.create`
+(visible in this session's logs); RAG `top_k` override exposed on the
+`search_docs` tool, threaded through
+[backend/knowledge_agent/retrieve.py](../backend/knowledge_agent/retrieve.py).
 
 Three changes to the planner before any new tool is added. Without these, the
 AI-driven phases would balloon token usage with the bigger tool schema +
@@ -95,7 +112,11 @@ not five. Add a `top_k` override on the agent's `search_docs` tool call
 (allow the planner to pass `top_k=3` for narrow lookups) and document
 `top_k=3` as the new default in the system prompt.
 
-### Phase 2 — Decide what stays, what moves to history
+### Phase 2 — Decide what stays, what moves to history ✅ DONE (2026-05-14)
+
+**Shipped:** keep/archive matrix below has held through the alpha.1-4 chain.
+Fast paths remain (hostname / interface-IP / VLAN add); new features (OSPF, ISIS,
+static route) all route through the generic `propose_webui_configure` path.
 
 | Component | Decision | Why |
 |---|---|---|
@@ -115,7 +136,14 @@ The principle: the safety, audit, and fast-path infrastructure stays. What
 goes away is **the assumption that every new feature needs a hand-coded page
 object**. New features now route through the AI-driven generic.
 
-### Phase 3 — Semantic DOM driver (~1–2 days)
+### Phase 3 — Semantic DOM driver (~1–2 days) ✅ DONE (alpha.1)
+
+**Shipped:** [backend/webui_agent/semantic_dom.py::describe_page](../backend/webui_agent/semantic_dom.py)
+returns `{view_id, elements, modals, errors}` with stable per-call `eid` →
+locator map, role+name resolution (aria-label → labelled-by → text →
+placeholder), spatial-label fallback for unlabelled inputs, modals separated
+from elements, alert errors surfaced, capped at 30 elements by
+visibility/centrality. Token budget verified against the live router.
 
 New module: `backend/webui_agent/semantic_dom.py`
 
@@ -147,7 +175,13 @@ Page and returns:
 Unit tests: snapshot tests against canned HTML in `tests/unit/test_semantic_dom.py`
 (no real browser needed; mock `page.query_selector_all` etc.).
 
-### Phase 4 — Resilient action tools + self-heal (~1 day)
+### Phase 4 — Resilient action tools + self-heal (~1 day) ✅ DONE (alpha.1)
+
+**Shipped:** [backend/webui_agent/generic_driver.py](../backend/webui_agent/generic_driver.py)
+exposes `webui_open`, `webui_describe_page`, `webui_act`, `webui_act_by_intent`,
+`webui_verify`. Bounded self-heal in `webui_act_by_intent`: re-describe on
+intercept / missing / disabled, max 2 attempts, never auto-retries a router
+write (`alpha.2-retry-guard` later hardened the guard).
 
 New module: `backend/webui_agent/generic_driver.py`
 
@@ -176,7 +210,18 @@ Per CLAUDE.md: "never auto-retry on writes" — that rule applies to the
 *router-side* config write. Re-trying which DOM element to click is upstream
 of the write and is fine.
 
-### Phase 5 — The high-level configure tool (~1 day)
+### Phase 5 — The high-level configure tool (~1 day) ✅ DONE (alpha.1, 2026-05-15)
+
+**Shipped:** tag `v0.4.0-alpha.1-ai-configure`. `propose_webui_configure` +
+`webui_configure` registered in
+[backend/orchestration/tool_registry.py](../backend/orchestration/tool_registry.py);
+inner planner at
+[backend/orchestration/configure_planner.py::draft_plan](../backend/orchestration/configure_planner.py).
+First real-router validation: static route flow. Followups: OSPF flow shipped
+(alpha.3 added "click Add when intent says add"); ISIS modal-race surfaced and
+patched via `_settle_page` in alpha.4 — end-to-end ISIS verification still
+pending due to Anthropic 529 overload blocking hardware retest on 2026-05-18
+(see [docs/today-2026-05-18-summary.md](today-2026-05-18-summary.md)).
 
 New planner tool: `propose_webui_configure(intent: str)`
 
@@ -198,7 +243,11 @@ prompt: add a section explaining when to use the generic configure path vs.
 the fast-path CLI/WebUI tools. Rule of thumb: hostname / interface IP / VLAN
 → use fast path. Anything else → generic configure.
 
-### Phase 6 — Vision on-demand (~0.5 day)
+### Phase 6 — Vision on-demand (~0.5 day) ⏳ NOT STARTED
+
+Deferred to post-`v0.4.0-alpha.1` consolidation per
+[docs/next-session-kickoff.md](next-session-kickoff.md). Spec below still
+applies.
 
 Vision is **only-on-demand**, not always-on. Cost: ~1 500 tokens per image at
 Haiku 4.5 rates = ~$0.0015 per call. Aim: <5% of flows trigger it.
@@ -217,7 +266,11 @@ Default off. Off-budget. The DOM-semantic path handles >95% of Cisco WebUI
 based on the manual's structure. Vision is the safety net for icon-only
 buttons / unlabelled elements.
 
-### Phase 7 — Archive what's unused (~0.5 day)
+### Phase 7 — Archive what's unused (~0.5 day) ⏳ NOT STARTED
+
+Deferred to post-`v0.4.0-alpha.1` consolidation per
+[docs/next-session-kickoff.md](next-session-kickoff.md). Spec below still
+applies.
 
 After the AI-driven generic proves out on at least one real-router flow
 (OSPF route is the canonical test from the existing plan), survey:
@@ -264,16 +317,16 @@ until it's rehydrated with real data.
 
 ## Sequencing
 
-| When | What | Touch points |
+| Status | What | Shipped on / Touch points |
 |---|---|---|
-| Now (~10 min) | Phase 0: tag `v0.3.2-webui-flows-working` + daily backup | Repo tags only |
-| Day 8 morning | Phase 1: prompt caching + token telemetry + RAG cap | [backend/orchestration/planner.py](backend/orchestration/planner.py), [backend/knowledge_agent/retrieve.py](backend/knowledge_agent/retrieve.py), [backend/core/settings.py](backend/core/settings.py) |
-| Day 8 afternoon | Phase 2: keep/archive matrix lands (no code change yet, just commit a README in `backend/webui_agent/` documenting the architecture) | Docs only |
-| Day 9 | Phase 3: `semantic_dom.py` + unit tests on canned HTML | New module + test file |
-| Day 10 | Phase 4: `generic_driver.py` + self-heal loop. Validate against the test fake-WebUI before touching the real router. | New module + test file |
-| Day 11 | Phase 5: `propose_webui_configure` tool + planner system prompt update. First real-router flow: OSPF route. | [backend/orchestration/tool_registry.py](backend/orchestration/tool_registry.py), [backend/orchestration/planner.py](backend/orchestration/planner.py) |
-| Day 12 | Phase 6: vision-on-demand tool. Confirm <5% trigger rate on real flows. | `backend/webui_agent/vision.py` (new), planner update |
-| Day 13 | Phase 7: archive sweep + tag `v0.4.0-ai-first` | Code housekeeping + tag |
+| ✅ | Phase 0: tag `v0.3.2-webui-flows-working` + daily backup | 2026-05-14 — repo tags only |
+| ✅ | Phase 1: prompt caching + token telemetry + RAG cap | early alpha — [backend/orchestration/planner.py](../backend/orchestration/planner.py), [backend/knowledge_agent/retrieve.py](../backend/knowledge_agent/retrieve.py), [backend/core/settings.py](../backend/core/settings.py) |
+| ✅ | Phase 2: keep/archive matrix lands | 2026-05-14 — docs only |
+| ✅ | Phase 3: `semantic_dom.py` + unit tests on canned HTML | alpha.1 — [backend/webui_agent/semantic_dom.py](../backend/webui_agent/semantic_dom.py) + test file |
+| ✅ | Phase 4: `generic_driver.py` + self-heal loop | alpha.1 — [backend/webui_agent/generic_driver.py](../backend/webui_agent/generic_driver.py) + test file |
+| ✅ | Phase 5: `propose_webui_configure` tool + planner update. First real-router flow: static route → OSPF → ISIS. | alpha.1 (`v0.4.0-alpha.1-ai-configure`) → alpha.3 (Add-button fix) → alpha.4 (settle-wait) — [backend/orchestration/tool_registry.py](../backend/orchestration/tool_registry.py), [backend/orchestration/configure_planner.py](../backend/orchestration/configure_planner.py), [backend/orchestration/planner.py](../backend/orchestration/planner.py) |
+| ⏳ | Phase 6: vision-on-demand tool. Confirm <5% trigger rate on real flows. | TODO — `backend/webui_agent/vision.py` (new), planner update |
+| ⏳ | Phase 7: archive sweep + tag (originally `v0.4.0-ai-first`, now superseded by the alpha chain) | TODO — code housekeeping + tag |
 
 ---
 
@@ -281,24 +334,26 @@ until it's rehydrated with real data.
 
 After the AI-first path lands:
 
-1. **Cost regression check**: pick three flows (read-only chat, fast-path
-   VLAN add, generic OSPF configure). Compare `planner_iteration_usage` logs
-   to a baseline captured before Phase 1. Expect: fast paths unchanged or
-   cheaper (caching), generic flow ~20–30k tokens uncached / ~12–18k tokens
-   cached → ~$0.012–$0.025 per flow at Haiku 4.5 pricing.
-2. **Cabled-session smoke**: chat → "Configure OSPF process 100 area 0 with
-   network 10.0.0.0/8 on LAB-R1 via WebUI." Expected: AI retrieves manual
-   section, calls `webui_open` + `describe_page`, drafts plan, inline APPROVE,
-   step-by-step screenshots, `show running-config | section ospf` confirms.
-3. **Self-heal smoke**: same flow, but hand-pop a confirmation modal mid-flow.
-   Expected: AI detects, dismisses modal, resumes. No human intervention.
-4. **Vision-fallback smoke**: stage an unlabelled icon-only button scenario
-   (mock if needed). Expected: AI's DOM path fails twice, vision tool fires,
-   correct element gets clicked. Token telemetry shows vision call cost
-   logged separately.
-5. **Token-budget assertion**: a new unit test that runs the planner with a
-   stubbed Anthropic client and asserts `cache_read_input_tokens > 0` on the
-   second iteration of a multi-step flow. Catches a future caching regression.
+1. **Cost regression check** — *partial*: `planner_iteration_usage` telemetry is
+   live and we can read per-iteration token cost from logs, but no formal
+   baseline-comparison check has been written. Generic flow per-step costs are
+   in the expected band on inspection; a proper before/after comparison vs. a
+   Phase-1 baseline is still owed.
+2. **Cabled-session smoke** — ⏳ no named smoke test exists; manual hardware runs
+   of static route / OSPF / ISIS via the chat UI covered the same ground during
+   alpha.1-4. Codifying these as scripted smoke scenarios is open.
+3. **Self-heal smoke** — ⏳ not yet written. The self-heal loop *is* exercised
+   in unit tests against canned describe-output, but the cabled "hand-pop a
+   modal mid-flow" smoke is not in the suite. Cisco Angular's auto-dismiss race
+   (the alpha.4 `_settle_page` motivator) is the closest real-world analogue
+   and is still partially unresolved (see
+   [docs/today-2026-05-18-summary.md](today-2026-05-18-summary.md)).
+4. **Vision-fallback smoke** — ⏳ blocked on Phase 6 (vision tool not yet
+   implemented).
+5. **Token-budget assertion** — *partial*: telemetry is emitted, but the
+   stubbed-Anthropic-client unit test asserting `cache_read_input_tokens > 0`
+   on iteration 2 has not been written. The signal is observable in real logs
+   today; a regression test for it is owed.
 
 All of the above run as smoke scenarios — gated on `ROUTER_HOST` in `.env` for
 items 2 / 3 / 4; item 1 + 5 run without a router.
@@ -336,6 +391,32 @@ items 2 / 3 / 4; item 1 + 5 run without a router.
 
 ---
 
+## What landed beyond the original plan
+
+Two pieces shipped during the alpha.1-4 chain that weren't called out in the
+Phase 1-7 list above:
+
+**Generic CLI configure path** — `propose_cli_configure` + `cli_configure_planner`
+shipped alongside the WebUI generic path. Same outer-planner contract (intent →
+inner-planner draft → APPROVE → execute with evidence) but the inner planner
+generates IOS XE CLI lines instead of WebUI click steps. Shares the approval
+gate, pre-write snapshot, and post-write verification with the WebUI flow.
+Defense-in-depth: denylist check at draft time *and* per-command re-validation
+at execute time. The CLI path turns out to be the cheaper option for anything
+already covered by Netmiko — the WebUI generic is the fallback when the
+manual's WebUI section is the only authoritative source.
+
+**`_settle_page` Angular stabilizer (alpha.4)** — not anticipated in Phase 3/4.
+The Cisco WebUI's Angular modals can auto-dismiss during the per-locator
+iteration inside `describe_page`, which made every locator after the dismissal
+miss. `_settle_page` waits for network-idle + animation-frame settle before each
+describe attempt. Partial fix only: the modal can still vanish *during* an
+in-flight `describe_page`, not just between actions. Remaining candidates
+(modal pin, re-describe-on-disappearance, single-shot DOM snapshot) are
+captured in [docs/today-2026-05-18-summary.md](today-2026-05-18-summary.md).
+
+---
+
 ## Open Questions
 
 1. **Caching TTL**: 5-minute default is fine for a single flow, but Anthropic
@@ -363,6 +444,11 @@ items 2 / 3 / 4; item 1 + 5 run without a router.
 - Every router write goes through the approval gate. No prompt override.
 - Conventional Commits. `ruff check` + relevant pytest + `mypy` before every
   commit. Push after every green run.
-- Tags hands-off **except**: `v0.3.2-webui-flows-working` (this plan's Phase 0,
-  authorised) + `v0.4.0-ai-first` (Phase 7, will need authorisation when we get
-  there) + daily `backup-*` tags (autonomous per CLAUDE.md).
+- Tags hands-off **except** the ones already authorised for this plan:
+  `v0.3.2-webui-flows-working` (Phase 0, shipped 2026-05-14) plus the alpha
+  chain that actually shipped in place of the originally-planned single
+  `v0.4.0-ai-first` tag: `v0.4.0-alpha.1-ai-configure` → `alpha.2-retry-guard`
+  → `alpha.3-add-button` → `alpha.4-settle-wait` → `alpha.4-pre-redesign`
+  (all individually authorised). Phase 7's final consolidation tag will need
+  fresh authorisation when we get there. Daily `backup-*` tags remain
+  autonomous per CLAUDE.md.

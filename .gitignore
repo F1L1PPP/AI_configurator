@@ -32,11 +32,11 @@ htmlcov/
 .coverage
 *.cover
 
-# Node / Next.js
+# Node / Next.js — wildcards cover frontend/, frontend-design-backup/, frontend-new/
 node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
+**/.next/
+**/out/
+**/build/
 .npm
 *.tsbuildinfo
 next-env.d.ts

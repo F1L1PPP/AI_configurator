@@ -8,12 +8,16 @@ are **not** live documentation.
 For current, supported docs see `docs/` itself:
 
 - `how-it-works.md` — architecture overview
-- `rag-sources.md` — RAG ingest checklist
 - `smoke-scenarios.md` — PROJECT_PLAN §2 → test file mapping
 - `router-prerequisites.md` — what to set up on the C1111 before first run
 - `clean-config-walkthrough.md` — full reset procedure
-- `codegen-howto.md` — Playwright codegen tips
 - `technical_report.md` — formal technical report
+
+Notable archived docs (live until their work shipped):
+
+- `rag-sources.md` — Day 7 ingest checklist; corpus shipped (913 chunks)
+- `codegen-howto.md` — Day 4 Playwright codegen bootstrap procedure
+- `security-review-2026-05-14.md` — point-in-time review; most threats closed by Phase 5
 
 If you're looking for "what we shipped on day N", look here. If you need to
 *do* something today, look up one level.
