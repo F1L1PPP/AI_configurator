@@ -369,7 +369,7 @@ function SettingsScreen({ tweaks, setTweak }) {
             <div className="about-title">CISCO AI CONFIG</div>
             <div className="about-sub">AI-POWERED NETWORK CONFIGURATION</div>
             <div className="about-meta">
-              <div>Agent v1.0 · UI prototype 0.4</div>
+              <div>Agent v0.5.0 · UI v0.5.0</div>
               <div>Connected to <span className="mono">localhost:8000</span></div>
             </div>
           </div>
