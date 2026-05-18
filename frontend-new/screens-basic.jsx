@@ -1,6 +1,13 @@
 // Dashboard + Devices + Settings screens
 
 function DashboardScreen({ onGotoChat, onGotoDevices }) {
+  const [activity, setActivity] = React.useState(window.RECENT_ACTIVITY || []);
+  React.useEffect(() => {
+    window.api.fetchRecentActivity(10).then(rows => {
+      if (rows.length) setActivity(rows);
+    });
+  }, []);
+
   return (
     <div className="screen screen--dashboard">
       <div className="dash-intro">
@@ -48,7 +55,7 @@ function DashboardScreen({ onGotoChat, onGotoDevices }) {
       <div className="dash-grid">
         <Card title="Recent activity" className="card--activity">
           <ul className="activity">
-            {RECENT_ACTIVITY.map((a) => (
+            {activity.map((a) => (
               <li key={a.id} className="activity-item">
                 <span className={`act-dot act-dot--${a.kind}`} />
                 <div className="activity-body">
