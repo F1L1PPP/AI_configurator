@@ -1,83 +1,144 @@
-# Next session kickoff — 2026-05-16+
+# Next session kickoff — 2026-05-19+
 
 Paste the block between **=== START ===** and **=== END ===** into the first message of a fresh chat. Then wait for "go" before any code change.
 
 === START ===
 
-You are joining the Cisco AI Config Agent project mid-stream. Read these four docs first, then summarise back in 5-7 sentences:
+You are joining the Cisco AI Config Agent project mid-stream. Read these five docs first, then summarise back in 6-8 sentences:
 
-1. [docs/today-2026-05-15-summary.md](docs/today-2026-05-15-summary.md) — yesterday morning's wrap (12 commits, Phase 3.3+3.4+5+runaway-fixes-and-Haiku-swap)
-2. [docs/today-2026-05-15-evening-summary.md](docs/today-2026-05-15-evening-summary.md) — yesterday evening's wrap (10 commits, multi-propose chain + CLI AI configure + 4 real-router-driven fixes + 3 release tags)
-3. [docs/plan-ai-first-webui.md](docs/plan-ai-first-webui.md) — the v0.4.0 phase plan
-4. [docs/security-review-2026-05-14.md](docs/security-review-2026-05-14.md) — the open hardening backlog
+1. [docs/today-2026-05-15-summary.md](docs/today-2026-05-15-summary.md) — 2026-05-15 morning wrap (Phase 3.3+3.4+5 + Haiku-only swap)
+2. [docs/today-2026-05-15-evening-summary.md](docs/today-2026-05-15-evening-summary.md) — 2026-05-15 afternoon wrap (multi-propose chain + CLI configure + 4 real-router fixes, alpha.1/.2/.3 tags)
+3. [docs/today-2026-05-18-summary.md](docs/today-2026-05-18-summary.md) — 2026-05-18 wrap (settle-wait fix + alpha.4 tag + design handoff doc + ISIS retest blocked by Anthropic 529s)
+4. [docs/plan-ai-first-webui.md](docs/plan-ai-first-webui.md) — the v0.4.0 phase plan
+5. [docs/design-handoff.md](docs/design-handoff.md) — design redesign brief (parallel-track; designer working on mockups)
 
 After reading, summarise:
-1. The state of `feature/bootstrap` at HEAD (`be4e7fd`) — what works end-to-end on the C1111, what's known-broken
-2. The three `v0.4.0-alpha.*` release tags on origin and what each one fixes
-3. The OSPF flow gap (WebUI side needs hardware retest with alpha.3 fixes; CLI side has a router-id-reuse blind spot)
-4. What's locked vs unlocked for scope (CLAUDE.md §72 referenced "six scenarios" until v0.4.0-alpha.1 tagged — three alpha.* tags now exist, so the scope-lock is effectively lifted)
+1. The state of `feature/bootstrap` at HEAD (`115fc2d`) — 500 tests passing, 5 v0.4.0-alpha.* tags on origin, ISIS retest pending due to Anthropic 529s
+2. What `_settle_page` does and which class of bug it solves (modal disappearance race between action and re-describe)
+3. The Anthropic 529 overload events on 2026-05-18 — why they blocked verification, why retry hardening is the FIRST chunk of this session
+4. The unverified-but-deployed fixes that need hardware retest: ISIS WebUI (alpha.4), OSPF WebUI (alpha.3)
+5. The design redesign is a parallel track — designer has [docs/design-handoff.md](design-handoff.md), no mockups yet, frontend stable
 
 Then wait for "go" before making any change. Don't propose re-planning — the plan is locked unless Filip asks.
 
-## Today's first chunk — validate OSPF WebUI end-to-end (~30 min)
+## Today's first chunk — Anthropic 529 retry hardening (~20 min)
 
-**Why**: alpha.3's rule-3 split for the inner WebUI prompt says "if intent contains add/create + Add button visible → draft `[click Add]` first iteration, fill form in iter 2". Yesterday's hardware test of OSPF via /webui/#/OSPF was BEFORE this fix landed and got an empty-plan response. The fix is committed and tagged but not yet hardware-validated for OSPF.
+**Why FIRST**: yesterday's ISIS retest failed because Anthropic's API returned `OverloadedError` (HTTP 529) on the outer and inner planner LLM calls. The SDK's default `max_retries=2` ran out in ~2-3s, then the whole flow bombed out as `tool_failed`. Until this is hardened, we can't reliably retest ANY hardware flow during overload windows.
+
+**Three changes**:
+
+1. **Bump `max_retries=5`** at every `Anthropic()` client construction site:
+   - `backend/orchestration/planner.py` (the outer planner client)
+   - `backend/orchestration/configure_planner.py:draft_plan` (inner WebUI planner — currently constructs client lazily inside the function)
+   - `backend/orchestration/cli_configure_planner.py:draft_cli_plan` (inner CLI planner — same lazy construction)
+
+   The Anthropic SDK's exponential backoff with max_retries=5 gives roughly 0.5s + 1s + 2s + 4s + 8s = ~15s of retrying instead of ~2-3s. Most transient 529s clear within that window.
+
+2. **Friendly error wrapping** in `_webui_configure` and `_cli_configure` for `OverloadedError`:
+   ```python
+   from anthropic import OverloadedError
+   ...
+   except OverloadedError as exc:
+       return {
+           "error": "llm_overloaded",
+           "message": (
+               "Anthropic API temporarily overloaded — retry in 1-2 minutes. "
+               "Your action_id is preserved; clicking EXECUTE again will start fresh."
+           ),
+           "request_id": getattr(exc, "request_id", None),
+       }
+   ```
+   The chat UI's existing "✗ SERVER ERROR" panel will display the friendly message instead of the raw JSON traceback.
+
+3. **Same wrapping in `propose_webui_configure` and `propose_cli_configure`** — covers the case where the outer planner survives but the inner planner 529s during propose.
+
+**Tests**: mock `Anthropic.messages.create` to raise `OverloadedError`, assert each propose/configure tool returns `{"error": "llm_overloaded", ...}` instead of letting the exception propagate as `tool_failed`. ~3-5 regression tests across `test_configure_planner.py`, `test_cli_configure_planner.py`, `test_tool_registry_phase5.py`.
+
+**Tag after landing**: `v0.4.0-alpha.5-overload-retry`.
+
+## Second chunk — ISIS WebUI hardware retest (~15 min)
+
+**Why**: alpha.4's `_settle_page` is deployed but unverified end-to-end. The 2026-05-18 retest got blocked at the LLM layer (529s), not at the Playwright/modal layer. Need to confirm the settle wait actually keeps the ISIS Add modal open long enough for `describe_page` to capture the form.
 
 **Steps**:
-1. Restart uvicorn (alpha.3 = `be4e7fd` is HEAD; auto-reload may have picked it up already).
-2. From chat: `Nakonfiguruj OSPF process 6 cez WebUI` (router-id can be 10.0.0.6 to avoid clashing with the existing ospf 2 at 10.0.0.1 and any other process you've added during testing — check with `show ip ospf | include Routing Process` first).
-3. Expected flow:
-   - Outer Haiku → `propose_webui_configure(intent, webui_path=/webui/#/OSPF)`
-   - Inner Haiku sees OSPF list page + Add button → drafts `[click Add]` with verify_text=null
-   - APPROVE / EXECUTE → multi-propose loop runs
-   - Iter 1: click Add → form appears
-   - Iter 2: inner Haiku sees form fields → drafts fill plan with verify_text="ospf 6"
-   - Verify reads `Routing Process "ospf 6"` from `show ip ospf | include Routing Process` (use this exact command — alpha.2 prompt fix). Or page text in WebUI.
-   - `mark_executed`, Chromium closes
-4. If iter 2 mis-maps field values (like static route's IP Type/Prefix collision did before the spatial-label fix), capture the executed plan from the structured log and we'll add another inner-prompt example.
+1. Confirm Anthropic API is healthy (https://status.anthropic.com).
+2. Restart uvicorn (alpha.4 is in HEAD; auto-reload should have picked it up but a clean restart removes any doubt).
+3. From chat: `Nakonfiguruj ISIS proces s názvom A cez WebUI`.
+4. Expected flow:
+   - propose_webui_configure → inner Haiku drafts `[click Add]`
+   - APPROVE → EXECUTE
+   - Iter 1: click Add → `_settle_page` waits → modal stable → re-describe captures form fields (Router ISIS textbox, Level dropdown, Net Area, Net IP Address, Apply to Device button)
+   - Iter 2: inner Haiku drafts fill plan: `Router ISIS=A`, `Net Area=49.0001`, `Net IP Address=0000.0000.0001.00`, click `Apply to Device`
+   - Verify "A" present in the ISIS table → `mark_executed`
+5. Verify on device: `show isis protocol | include System Id`. Should print `System Id: 0000.0000.0001`.
 
-**Test plan if it works**: confirm via `show ip ospf | include Routing Process` from chat. Should show ospf 6 alongside any other configured processes.
+**If iter 2 still gets `inner_plan_empty`**: the modal closes faster than the 500ms fallback handles. Bump `_SETTLE_FALLBACK_MS` to 1000ms in `_playwright_subprocess.py` and retest. Don't go above 2000ms without revisiting the per-step cost budget.
 
-## Second chunk — close the OSPF router-id reuse blind spot (~45 min)
+**If iter 2 fills fields but the labels are weird** (e.g., "Net" is split across `Area` + `IP Address` columns and the spatial-label fix doesn't catch them as separate labelled fields): the issue is form-specific. Add an ISIS example to the inner WebUI prompt's field-mapping section showing how to split a NSAP address `49.0001.0000.0000.0001.00` into `Area=49.0001` + `IP Address=0000.0000.0001.00`.
 
-**Why**: yesterday's CLI OSPF process 5 attempt failed because router-id 10.0.0.1 was already in use by ospf 2. The `cli_configure` execution returned `verify_failed` (correct), and alpha.3 added the `device_errors` field to surface Cisco's `% Router-ID 10.0.0.1 in use` message — but the inner LLM at propose time should have caught this BEFORE the propose ever reached the human.
+## Third chunk — OSPF WebUI hardware retest (~15 min)
 
-**Fix path**:
-- The inner CLI planner already receives the live running-config in its prompt context. It just doesn't use it carefully.
-- Inner prompt update (`backend/orchestration/cli_configure_planner.py:_INNER_SYSTEM_PROMPT`): add a "Pre-flight conflict check" rule:
-  - When intent specifies a router-id, IP address, VLAN ID, or any other unique identifier, SCAN the running-config first.
-  - If the identifier is already in use, return `config_commands: []` with risk = `"Conflict — router-id <X> already in use by ospf process <Y>. Pick a different router-id or remove the existing process first."`
-- The outer Haiku will surface that refusal cleanly (Rule 8 handles the FINAL signal).
-
-**Tests**:
-- Mock `show_running_config` to return a config containing `router ospf 2 / router-id 10.0.0.1`. Inner LLM (mocked) should refuse with empty config_commands and a conflict message in risk.
-- Add a regression to `test_cli_configure_planner.py`.
-- Real-router: ask `Configure OSPF process 7 with router-id 10.0.0.1` (collision intentional). Should refuse at propose time, NO action_id created.
-
-**Why not in alpha.3**: this needs inner-prompt iteration + real-router validation, and we already shipped alpha.3 with the device_errors safety net which handles the case after the fact. Pre-flight is better UX but not a security requirement.
-
-## Third chunk — consolidate to v0.4.0-alpha.1 milestone tag (~15 min)
-
-**Why**: CLAUDE.md §72 said "six scenarios in PROJECT_PLAN.md §2 only until v0.4.0-alpha.1 tagged". We have iterative alpha.1/.2/.3 with `-suffix` names but no consolidated `v0.4.0-alpha.1` milestone tag (the formal one referenced in CLAUDE.md). Once OSPF WebUI is hardware-validated (chunk 1) AND the router-id conflict check lands (chunk 2), the moment is right.
+**Why**: alpha.3's click-Add rule was tested in unit tests but not on hardware for OSPF specifically. Yesterday's session moved straight to ISIS without revisiting OSPF.
 
 **Steps**:
-1. Confirm OSPF WebUI works on hardware (chunk 1 outcome).
-2. Confirm router-id conflict refusal works (chunk 2 outcome).
-3. Filip authorises milestone tag (CLAUDE.md tag rule — he creates them).
-4. Tag the consolidated milestone:
-   ```
-   git tag -a v0.4.0-alpha.1 <HEAD> -m "v0.4.0-alpha.1: AI-first Cisco configure agent validated"
-   ```
-5. Push.
-6. Update CLAUDE.md §72 to remove the scope-lock now that the tag exists. Or move that line to a "completed milestones" section.
+1. Check existing OSPF processes: `show ip ospf | include Routing Process`.
+2. Pick a process ID that doesn't clash (e.g., 8 or higher if 2/3/4/5/100 are in use). Pick a router-id that's NOT 10.0.0.1 (already in use by ospf 2).
+3. From chat: `Nakonfiguruj OSPF process 8 s router ID 10.0.0.8 cez WebUI`.
+4. Expected flow: same shape as ISIS — click Add → form opens → fill Process ID + router-id → Apply.
+5. Verify: `show ip ospf | include Routing Process` should now include `Routing Process "ospf 8"`.
 
-## Fourth chunk — open backlog (if time permits)
+## Fourth chunk — router-id conflict pre-check (~45 min)
 
-Pick one:
-- **Iteration cap=4 evaluation**: OSPF with router-id + network statements + interface assignment may legitimately need 5-6 iterations. Bump to 6 if any real-world flow hits the cap.
-- **Section vs include for BGP/route-map**: alpha.2 fixed `| section` → `| include` for OSPF. Other features may have the same gotcha. Check what BGP/route-map `show` commands look like and add to the gotchas list if needed.
-- **Recorder catalog refresh**: re-run `scripts/record_webui_catalog.py` to capture the OSPF page elements properly (so the outer nav-map points at the right URL).
-- **Snapshot diff view**: when `verify_failed` returns, the snapshots are saved but there's no UI to view the pre/post diff. A simple `GET /api/actions/{id}/diff` endpoint would help debugging.
+**Why**: alpha.3's `device_errors` field surfaces Cisco rejections AFTER execute. Better UX: refuse at propose time when the operator picks a router-id already in use.
+
+**Fix path** (`backend/orchestration/cli_configure_planner.py:_INNER_SYSTEM_PROMPT`):
+
+Add a "Pre-flight conflict check" rule:
+> Before drafting `config_commands`, scan the provided running-config for conflicts with the intent's unique identifiers:
+> - **router-id**: if the intent specifies `router-id X.X.X.X`, grep running-config for existing `router-id X.X.X.X` lines. If found, return `config_commands: []` with `risk: "Conflict — router-id X.X.X.X already in use by <process>. Pick a different router-id or remove the existing process first."`.
+> - **interface IP**: similar grep for `ip address X.X.X.X` collisions.
+> - **VLAN ID**: similar grep for `vlan X` collisions.
+> - **OSPF/EIGRP/RIP process IDs**: similar grep.
+
+The outer Haiku Rule 8 already handles the FINAL signal — when propose_cli_configure returns `intent_not_mappable` (or a similar error), the chat surfaces the conflict message without retrying.
+
+**Tests**: mock `show_running_config` to return a config with `router ospf 2 / router-id 10.0.0.1`. Inner LLM (mocked) should refuse with empty config_commands + a conflict-flavored risk note. Add regression to `test_cli_configure_planner.py`.
+
+**Real-router validation**: ask `Configure OSPF process 9 with router-id 10.0.0.1` (intentional collision). Should refuse at propose time, NO action_id created, user sees the conflict message in chat.
+
+## Fifth chunk — consolidate to v0.4.0-alpha.1 milestone tag (~15 min)
+
+**Why**: CLAUDE.md §72 references the un-suffixed name `v0.4.0-alpha.1` for the scope-lock release. Five iterative alpha.* tags with suffixes exist; the formal milestone tag does not yet.
+
+**Steps**:
+1. Confirm chunks 1-4 above all landed and validated on hardware.
+2. Filip authorises milestone tag (CLAUDE.md tag rule — he creates them or explicitly authorises Claude to create).
+3. Tag the consolidated milestone:
+   ```
+   git tag -a v0.4.0-alpha.1 <HEAD> -m "v0.4.0-alpha.1: AI-first Cisco configure agent validated on hardware"
+   git push origin --tags
+   ```
+4. Update CLAUDE.md §72 — remove or move the scope-lock note now that the tag exists.
+
+## Open backlog (pick one if time permits)
+
+- **Resume from mid-flow on retry**: if iter 1 succeeded but iter 2's LLM call 529s, the next EXECUTE click could pick up from iter 2 instead of starting over. Requires persisting `executed_steps` to the action store. Bigger change — only do if 529s become a daily problem.
+- **Iteration cap evaluation**: cap=4 may be tight for complex flows (OSPF with multiple network statements + interface assignments). Bump to 6 if any flow hits the cap.
+- **`| section` → `| include` for BGP/route-map**: alpha.2 fixed OSPF; other features may have the same gotcha.
+- **Recorder catalog refresh**: re-run `scripts/record_webui_catalog.py` to capture the ISIS page elements properly. The outer nav map currently points at `/webui/#/isis` correctly but doesn't know about the per-protocol Add modals.
+- **Phase 6 — Vision on-demand** (canonical next phase after v0.4.0-alpha.1): `webui_visual_check(question)` tool with screenshot + bbox overlay + image content block. Would catch the shift-by-one-row class of bug AND verify modal-state checks. ~0.5 day. See [plan-ai-first-webui.md §201](plan-ai-first-webui.md).
+
+## Design redesign (parallel track, informational)
+
+Designer working on mockups. Has [docs/design-handoff.md](design-handoff.md) which covers the full UI map, component inventory, approve/execute flow, and design principles. Five open questions to resolve with the designer before committing to a final design:
+
+1. Live event stream placement (right panel current vs bottom drawer vs separate route).
+2. Action ID prominence (chip / expanded / hover-only).
+3. Chromium-during-execute as a separate OS window (current) or embedded.
+4. Failed-action info hierarchy (error → device_errors → snapshots → full output).
+5. Slovak/English UI strings.
+
+When mockups arrive: that's a separate chunk, separately scoped. Until then, the frontend is stable; no code work needed for the designer.
 
 ## Operating notes
 
@@ -88,42 +149,52 @@ Pick one:
 - Approval flow: INLINE in chat (no /preview round-trip)
 - Conventional Commits + `ruff check && mypy && pytest -q` before every commit
 - Pre-commit hook auto-formats — first commit may bounce; re-stage and re-commit (DO NOT `--amend`)
-- **Tags**: Filip authorises milestone tags. Daily `backup-YYYYMMDD-HHMM` tags are autonomous via `/checkpoint`. The harness classifier blocks LLM tag creation by default — Filip ran the three alpha.* tag commands manually yesterday after explicit authorisation.
+- **Tags**: Filip authorises milestone tags. Daily `backup-YYYYMMDD-HHMM` tags are autonomous via `/checkpoint`. The harness classifier blocks unauthorised tag creation. Filip explicitly authorised the alpha.* tags created in this chain.
 - **Production LLM = Haiku 4.5 only** (memory rule, locked 2026-05-15)
-- **Model role split for dev**: Opus plans, Sonnet implements step-by-step with tests interleaved, Haiku audits lightweight (memory rule)
-- **Per-turn propose quota** (locked 2026-05-15 evening): at most ONE call to each propose_* tool per turn. `verify_failed`/`empty_plan`/`unsafe_command` are FINAL — don't retry.
+- **Per-turn propose quota** (locked 2026-05-15 evening): at most ONE call to each propose_* tool per turn. `verify_failed`/`empty_plan`/`unsafe_command` are FINAL.
+- **Settle-wait is load-bearing** (added 2026-05-18): every successful WebUI action gets a settle pass before re-describe. Networkidle 1500ms + 500ms fallback. Bump constants if a future Cisco page needs more.
 
 === END ===
 
-## Today's open testable surface (what works as of 2026-05-15 evening)
+## Release tag chain on origin
 
-Filip can test these end-to-end RIGHT NOW (proven on the C1111 lab router this session):
+| Tag | Commit | What it fixes |
+|---|---|---|
+| `v0.4.0-alpha.1-ai-configure` | `b5a88a4` | First hardware-validated cut: multi-propose chain + CLI configure + spatial-label fix + CIDR splitting + null-verify loop continuation |
+| `v0.4.0-alpha.2-retry-guard` | `50e09c3` | Per-turn propose quota + OSPF `\| section` → `\| include` |
+| `v0.4.0-alpha.3-add-button` | `be4e7fd` | Inner planner clicks Add when intent says add + `device_errors` surface % lines |
+| `v0.4.0-alpha.4-settle-wait` | `c96b653` | `_settle_page` between action and re-describe — survives Cisco's auto-dismiss modal race (ISIS) |
+
+Next planned: `v0.4.0-alpha.5-overload-retry` after chunk 1 lands. Then consolidated `v0.4.0-alpha.1` (no suffix) once chunks 2-4 are hardware-validated.
+
+## Today's open testable surface
+
+Filip can test these end-to-end RIGHT NOW (proven on the C1111 lab router this session series):
 
 **Fast-path CLI** (single command via chat):
 - `zmeň hostname na FOO` → propose_set_hostname → APPROVE → set_hostname → verify
 - `nastav IP 192.168.20.1/24 na Gi0/0/1` → propose_set_interface_ip → ...
 - `pridaj VLAN 30 s názvom OFFICE` → propose_set_access_vlan → ...
 
-**Fast-path WebUI** (single command, demo path):
-- `zmeň hostname na BAR cez WebUI` → propose_webui_set_hostname → ...
-- `pridaj VLAN 30 cez WebUI` → propose_webui_add_access_vlan → ...
+**Fast-path WebUI**:
+- `zmeň hostname na BAR cez WebUI`
+- `pridaj VLAN 30 cez WebUI`
+
+**Generic WebUI (multi-propose chain)** — VALIDATED:
+- Static route: `pridaj statickú trasu 10.99.99.0/24 cez 192.168.10.254 cez WebUI` ✅
+
+**Generic WebUI** — PENDING hardware retest (alpha.3 + alpha.4 deployed, not verified):
+- ISIS: `Nakonfiguruj ISIS proces s názvom A cez WebUI`
+- OSPF: `Nakonfiguruj OSPF process N s router ID 10.0.0.N cez WebUI`
+
+**Generic CLI (AI configure)** — VALIDATED:
+- Trunk port, OSPF process 100, hostname rename via generic path
 
 **Read-only**:
-- Any `show *` request — routed through CLI read tools
-- Any "ako sa konfiguruje X" question — search_docs grounded answer with Sources section
-
-**Generic WebUI (multi-propose chain)** — VALIDATED today:
-- `pridaj statickú trasu 10.99.99.0/24 cez 192.168.10.254 cez WebUI` — all 5 form fields filled correctly, verify passes. ~45s end-to-end.
-
-**Generic CLI (AI configure)** — VALIDATED today:
-- `nakonfiguruj trunk port s povolenými všetkými VLAN na Gi0/1/3` — applied on device. Verify passes after alpha.2 prompt fix.
-- `nakonfiguruj OSPF process 100 area 0 na Vlan1 cez CLI` — applied on device. Verify passes with `show ip ospf | include Routing Process`.
-
-**Generic WebUI for OSPF** — needs hardware retest tomorrow:
-- alpha.3's click-Add rule should resolve. Use a router-id that's NOT already in use (check via `show ip ospf | include Routing Process` first).
+- Any `show *` request, any `ako sa konfiguruje X` question
 
 **Recorder**:
-- `.venv\Scripts\python.exe scripts\record_webui_catalog.py` — opens Chromium, logs in, auto-captures every page Filip visits
+- `.venv\Scripts\python.exe scripts\record_webui_catalog.py`
 
 ## Out of scope until Phase 6+
 
@@ -132,16 +203,7 @@ Filip can test these end-to-end RIGHT NOW (proven on the C1111 lab router this s
 - Selector allowlist enforcement
 - Multi-device targeting
 - Mid-flow CANCELLING state
-- Auto-rollback (a separate `propose_cli_rollback(action_id)` could land later; not in v0.4.x)
+- Auto-rollback
+- Mid-flow LLM-failure resumption
 
-These are tracked in [docs/plan-ai-first-webui.md](docs/plan-ai-first-webui.md) Phase 5.1+ deferred list.
-
-## Release tag chain on origin
-
-| Tag | Commit | What it fixes |
-|---|---|---|
-| `v0.4.0-alpha.1-ai-configure` | `b5a88a4` | First hardware-validated cut: multi-propose chain + CLI configure + spatial-label fix + CIDR splitting + null-verify loop continuation |
-| `v0.4.0-alpha.2-retry-guard` | `50e09c3` | Per-turn propose quota + OSPF `| section` → `| include` |
-| `v0.4.0-alpha.3-add-button` | `be4e7fd` | Inner planner clicks Add when intent says add + `device_errors` surface % lines |
-
-Next planned: consolidated `v0.4.0-alpha.1` (no suffix) once OSPF WebUI is hardware-validated and the router-id conflict check lands.
+These are tracked in [plan-ai-first-webui.md](plan-ai-first-webui.md) Phase 5.1+ deferred list.
