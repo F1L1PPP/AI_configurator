@@ -1,3 +1,4 @@
+// Phase 1 status: kept as offline fallback / first-paint defaults. Real data comes from window.api.* (api.jsx).
 // Scripted data + state for the prototype.
 
 const MOCK_DEVICES = [

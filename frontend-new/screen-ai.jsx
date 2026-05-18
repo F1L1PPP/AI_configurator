@@ -81,7 +81,7 @@ function adapterEventToStreamLine(ev) {
 }
 
 function ChatScreen({ pushPreview }) {
-  const [messages, setMessages] = React.useState(INITIAL_CHAT);
+  const [messages, setMessages] = React.useState([]);
   const [input, setInput] = React.useState("");
   const [typing, setTyping] = React.useState(false);
   const [pending, setPending] = React.useState(null); // current awaiting-approval proposal
