@@ -41,6 +41,9 @@ node_modules/
 *.tsbuildinfo
 next-env.d.ts
 
+# Designer reference materials — large binary inputs, not runtime assets
+frontend-new/uploads/
+
 # OS
 .DS_Store
 Thumbs.db
