@@ -126,6 +126,13 @@ const NAV = [
 
 
 function Sidebar({ route, setRoute }) {
+  const [device, setDevice] = React.useState(null);
+  React.useEffect(() => {
+    window.api.fetchDevices().then((rows) => {
+      if (rows && rows.length) setDevice(rows[0]);
+    });
+  }, []);
+
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
@@ -149,7 +156,7 @@ function Sidebar({ route, setRoute }) {
               className={"nav-item" + (active ? " is-active" : "")}
               onClick={() => setRoute(n.id)}
               aria-current={active ? "page" : undefined}>
-              
+
               <Icon className="nav-icon" />
               <span className="nav-label">{n.label}</span>
               {active && <span className="nav-active-bar" aria-hidden="true" />}
@@ -161,12 +168,13 @@ function Sidebar({ route, setRoute }) {
       <div className="sidebar-foot">
         <div className="active-device-card">
           <div className="adc-label">ACTIVE DEVICE</div>
-          <div className="adc-name">Router-01</div>
-          <div className="adc-ip">192.168.1.1</div>
+          <div className="adc-name">{device ? device.name : "—"}</div>
+          <div className="adc-ip">{device ? device.ip : "—"}</div>
           <div className="adc-art" aria-hidden="true" />
-          <div className="adc-ios">IOS XE 17.6.1</div>
+          <div className="adc-ios">{device ? device.ios : "—"}</div>
           <div className="adc-status">
-            <span className="dot dot--ok" /> Connected
+            <span className={"dot dot--" + (device && device.status === "connected" ? "ok" : "warn")} />
+            {device ? device.status : "loading"}
           </div>
         </div>
       </div>
