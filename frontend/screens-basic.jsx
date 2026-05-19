@@ -1,12 +1,62 @@
 // Dashboard + Devices + Settings screens
 
+// Format an ISO 8601 timestamp as a short "Xm ago" / "Xh ago" / "Xd ago" string.
+// Returns "—" for falsy or unparseable input. Caps at days; longer than that
+// is rare enough that a date stamp would be more useful — out of scope here.
+function relativeTime(iso) {
+  if (!iso) return "—";
+  var t = Date.parse(iso);
+  if (isNaN(t)) return "—";
+  var diffS = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (diffS < 60) return diffS + "s ago";
+  var diffM = Math.floor(diffS / 60);
+  if (diffM < 60) return diffM + "m ago";
+  var diffH = Math.floor(diffM / 60);
+  if (diffH < 24) return diffH + "h ago";
+  return Math.floor(diffH / 24) + "d ago";
+}
+
 function DashboardScreen({ onGotoChat, onGotoDevices }) {
   const [activity, setActivity] = React.useState(window.RECENT_ACTIVITY || []);
+  const [devices, setDevices] = React.useState([]);
+  const [backup, setBackup] = React.useState({
+    action_id: null, taken_at: null, snapshot_path: null, count: 0,
+  });
+
   React.useEffect(() => {
     window.api.fetchRecentActivity(10).then(rows => {
       if (rows.length) setActivity(rows);
     });
+    window.api.fetchDevices().then(rows => {
+      setDevices(rows);
+      if (rows.length) {
+        window.api.fetchLastBackup(rows[0].id).then(setBackup);
+      }
+    });
   }, []);
+
+  const dev = devices[0] || {};
+  const deviceCount = devices.length;
+  const configsSaved = backup.count || 0;
+  // Health derives from the most recent activity entry's `kind` field
+  // (adaptLogEntry in api.jsx maps event names to kinds). "rejected" or an
+  // explicit failure -> warn. Anything else (applied / backup / session /
+  // info) reads as green. No activity yet -> "Idle" pill, not green/warn.
+  const lastActivity = activity[0];
+  let healthLabel = "Idle";
+  let healthKind = "warn"; // neutral default
+  if (lastActivity) {
+    if (lastActivity.kind === "rejected") {
+      healthLabel = "Check";
+      healthKind = "warn";
+    } else {
+      healthLabel = "Good";
+      healthKind = "ok";
+    }
+  }
+
+  // Connection Trace: last 5 activity entries (mini terminal-like feed).
+  const trace = activity.slice(0, 5);
 
   return (
     <div className="screen screen--dashboard">
@@ -31,21 +81,21 @@ function DashboardScreen({ onGotoChat, onGotoDevices }) {
 
       <div className="kpi-row">
         <div className="kpi">
-          <div className="kpi-num">1</div>
-          <div className="kpi-lbl">Device connected</div>
+          <div className="kpi-num">{deviceCount}</div>
+          <div className="kpi-lbl">Device{deviceCount === 1 ? "" : "s"} connected</div>
         </div>
-        <div className="kpi">
-          <div className="kpi-num">3</div>
+        <div className="kpi" title="Live SSH/HTTP session count — backend tool not wired yet">
+          <div className="kpi-num">—</div>
           <div className="kpi-lbl">Active sessions</div>
         </div>
         <div className="kpi">
-          <div className="kpi-num">12</div>
+          <div className="kpi-num">{configsSaved}</div>
           <div className="kpi-lbl">Configs saved</div>
         </div>
         <div className="kpi kpi--health">
           <div>
             <div className="kpi-health-status">
-              <Pill kind="ok"><span className="dot" /> Good</Pill>
+              <Pill kind={healthKind}><span className="dot" /> {healthLabel}</Pill>
             </div>
             <div className="kpi-lbl">Health</div>
           </div>
@@ -73,13 +123,13 @@ function DashboardScreen({ onGotoChat, onGotoDevices }) {
             <div className="device-overview">
               <div className="device-overview-art" aria-hidden="true" />
               <div className="device-overview-info">
-                <div className="dov-name">Router-01</div>
-                <div className="dov-ip">192.168.1.1</div>
-                <div className="dov-meta">IOS XE 17.6.1 · ISR 4321</div>
+                <div className="dov-name">{dev.name || "—"}</div>
+                <div className="dov-ip">{dev.ip || "—"}</div>
+                <div className="dov-meta">{dev.ios || "—"} · {dev.model || "—"}</div>
                 <div className="dov-stats">
-                  <div><span>Uptime</span><b>23d 14h</b></div>
-                  <div><span>Sessions</span><b>3 active</b></div>
-                  <div><span>Last backup</span><b>06m ago</b></div>
+                  <div><span>Uptime</span><b>{dev.uptime || "—"}</b></div>
+                  <div><span>Status</span><b>{dev.status || "—"}</b></div>
+                  <div><span>Last backup</span><b>{relativeTime(backup.taken_at)}</b></div>
                 </div>
               </div>
             </div>
@@ -120,10 +170,15 @@ function DashboardScreen({ onGotoChat, onGotoDevices }) {
 
           <Card title="Connection trace" className="card--mini-stream">
             <ul className="mini-stream">
-              <li><span className="ms-time">10:24</span><span className="ms-ok">●</span><span>handshake ok</span></li>
-              <li><span className="ms-time">10:24</span><span className="ms-ok">●</span><span>ssh authenticated</span></li>
-              <li><span className="ms-time">10:24</span><span className="ms-ok">●</span><span>config sync · 12 files</span></li>
-              <li><span className="ms-time">10:23</span><span className="ms-ok">●</span><span>vlan brief · 3 entries</span></li>
+              {trace.length === 0 ? (
+                <li><span className="ms-time">—</span><span className="ms-ok">●</span><span>no activity yet</span></li>
+              ) : trace.map((t) => (
+                <li key={t.id}>
+                  <span className="ms-time">{t.time || "—"}</span>
+                  <span className={t.kind === "rejected" ? "ms-warn" : "ms-ok"}>●</span>
+                  <span>{t.text}</span>
+                </li>
+              ))}
             </ul>
           </Card>
         </div>

@@ -653,6 +653,7 @@ button { font-family: inherit; }
 }
 .mini-stream .ms-time { color: var(--ink-4); }
 .mini-stream .ms-ok { color: var(--ok); font-size: 9px; }
+.mini-stream .ms-warn { color: var(--fail); font-size: 9px; }
 .quick-actions { display: grid; gap: 6px; }
 .qa-btn {
   display: grid;
@@ -696,6 +697,7 @@ button { font-family: inherit; }
 }
 .mini-stream .ms-time { color: var(--ink-4); }
 .mini-stream .ms-ok { color: var(--ok); font-size: 9px; }
+.mini-stream .ms-warn { color: var(--fail); font-size: 9px; }
 .device-overview-art {
   width: 100%;
   aspect-ratio: 1.162;

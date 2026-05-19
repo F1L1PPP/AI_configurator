@@ -207,6 +207,22 @@
         }
       },
 
+      // GET /api/devices/{id}/last-backup → {action_id, taken_at, snapshot_path, count}.
+      // Returns null fields + count 0 when no snapshots exist yet.
+      fetchLastBackup: async function (deviceId) {
+        try {
+          var res = await fetch(url("/api/devices/" + encodeURIComponent(deviceId) + "/last-backup"));
+          if (!res.ok) {
+            console.error("[api] fetchLastBackup HTTP " + res.status);
+            return { action_id: null, taken_at: null, snapshot_path: null, count: 0 };
+          }
+          return res.json();
+        } catch (err) {
+          console.error("[api] fetchLastBackup network error:", err);
+          return { action_id: null, taken_at: null, snapshot_path: null, count: 0 };
+        }
+      },
+
       // GET /api/logs/recent?limit=N → [{id, text, time, kind}], [] on failure.
       fetchRecentActivity: async function (limit) {
         if (limit === undefined) limit = 10;
