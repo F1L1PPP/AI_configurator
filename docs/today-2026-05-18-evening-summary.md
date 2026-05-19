@@ -70,3 +70,53 @@ Carry-overs from earlier in the day that didn't get worked on (still in `docs/ne
 Also tomorrow-candidate: sweep the remaining "prototype" labels in `frontend/README.md`, `frontend/index.html` `<title>`, and `frontend/styles.css` header (cosmetic, ~1 commit).
 
 `frontend-design-backup/` can stay for a few sessions; sweep when the new frontend feels stable.
+
+---
+
+## Late evening additions (after 3b7a638)
+
+### CI fix — drop frontend job (9d166ac)
+
+`.github/workflows/ci.yml` had a leftover `frontend:` job from the Next.js era running `npm ci` against the deleted `frontend/package-lock.json`. Every push since the v0.5.0 swap was failing. Dropped the entire job. Backend tests still exercise the StaticFiles mount path implicitly — [tests/unit/test_routes_devices.py](../tests/unit/test_routes_devices.py) imports `backend.main`, which fails to load if `frontend/` doesn't exist. Left a NOTE block in the YAML explaining what was there and when to restore it (Phase 2 Next.js port).
+
+### README + GitHub repo polish (uncommitted at end of day)
+
+Top-level [README.md](../README.md) rewritten to match post-v0.5.0 state:
+
+- Removed Node.js prerequisite and `cd frontend && npm install`
+- Single `uvicorn backend.main:app --reload --port 8000` for both API and SPA
+- New Screenshots section at the top — three placeholders pointing at `docs/screenshots/{dashboard,ai-configuration,devices}.png`
+- Tightened install / run / test sections; pointer block to the key docs
+
+`docs/screenshots/` created with `.gitkeep` so the directory lands in git. PNG files NOT yet on disk — Filip needs to save 3 screenshots from the chat into that directory before the commit lands, otherwise the README ships with broken image links.
+
+GitHub repo description + topics drafted, ready to paste via the web UI (`gh` CLI is not authed locally):
+
+- **Description**: `AI-powered Cisco router configuration with Claude. Chat → plan → human approves → Python executes. CLI + WebUI agents.`
+- **Topics**: cisco, network-automation, ai-agent, claude, llm, fastapi, python, playwright, netmiko, rag, chromadb, human-in-the-loop, ios-xe
+
+### Bug surfaced: CLI `set_interface_ip` silently failed
+
+Filip ran `zmen ip na GigabitEthernet0/1/3 na ip 10.0.0.1 255.255.255.0` against the lab C1111-4P (action_id `act_20260518_ec1a69`). The chat showed success, Approve+Execute went through cleanly, but the IP wasn't actually on the interface afterward. Root cause stack:
+
+1. **C1111-4P `Gi0/1/x` are hardware-locked L2 switchports.** [backend/cli_agent/write_tools.py:314](../backend/cli_agent/write_tools.py) already prepends `no switchport` to handle the C1111-4P L2 default. But on the C1111-4P the four `Gi0/1/0..Gi0/1/3` ports are part of the embedded EHWIC switch module — they are hardware-L2-only, and IOS XE rejects `no switchport` on them outright. After that rejection the subsequent `ip address` is rejected too (still a switchport), but `no shutdown` succeeds (always valid). The interface comes up with no IP. Workflow for getting an IP on traffic going to `Gi0/1/3` is the SVI pattern (create `interface vlan N` with the IP, then `switchport access vlan N` on the port).
+
+2. **The write_tool reports success even when Netmiko's commands were rejected.** `conn.send_config_set([...])` returns the captured device output but doesn't raise on `% ` error markers unless an `error_pattern=` argument is passed. The code doesn't pass one, doesn't scan the captured output for `% `, and doesn't run a verify (`show running-config interface <name>`) afterward. The success log line `"GigabitEthernet0/1/3 → 10.0.0.1/255.255.255.0"` is a string interpolation of the *intent*, not a check of the post-write state.
+
+3. **Empty commands block in the proposal UI.** The `IOS XE commands` code block in the chat showed empty — `propose_set_interface_ip` is a fast-path tool that returns just `{interface, ip, mask}`, no `commands` array. Frontend's `synthesizeProposal` falls back to `[]`. Operator has no preview of what's about to run before clicking Approve.
+
+Fix queued as tomorrow's first chunk; see [docs/next-session-kickoff.md](next-session-kickoff.md).
+
+### WebSocket origin allowlist gap
+
+~30 rejections logged between 09:51 and 09:57 with `origin: http://127.0.0.1:8000`. Commit 60e1eb4 added `http://localhost:8000` to `allowed_origins` but not the IPv4 spelling. If the operator opens the app via `127.0.0.1:8000` instead of `localhost:8000`, WS handshake gets 403'd and the live event stream column never connects. After Filip switched to `localhost:8000` the WS started accepting at 10:20. Tomorrow: add `http://127.0.0.1:8000` to defaults.
+
+### Sidebar + Dashboard still showing mock device
+
+Filip's screenshots showed the left sidebar's `ACTIVE DEVICE` card and the Dashboard's `DEVICE OVERVIEW` panel both rendering Router-01 at 192.168.1.1 ISR 4321 — that's the mock data, not the real C1111-LAB at 192.168.10.1. The Devices table and the topbar `1 DEVICES` count both fetch correctly from `/api/devices` (commit 4 wired those). The sidebar (in `frontend/chrome.jsx` or `frontend/app.jsx`) and the Dashboard panel (in `frontend/screens-basic.jsx`) were never explicitly wired in the migration plan and still read directly from `window.MOCK_DEVICES`. Tomorrow's chunk 4.
+
+### Late-evening commits on origin
+
+- `9d166ac` — ci: drop frontend job (Next.js retired at v0.5.0)
+
+Everything else above is uncommitted in the working tree until tomorrow's chunk 8.
