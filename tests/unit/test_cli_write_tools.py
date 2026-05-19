@@ -381,6 +381,92 @@ def test_set_access_vlan_raises_when_vlan_brief_missing_new_row(_mock_pool, _moc
 
 
 # ---------------------------------------------------------------------------
+# Live CLI command stream (chunk 2b 2026-05-19)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_cli_commands_publishes_one_event_per_command(monkeypatch):
+    """Each command in the list should generate a `cli_command_sent` event
+    with the right index/total + mode. Powers the chat live event stream's
+    terminal-scroll view."""
+    published: list[dict] = []
+    monkeypatch.setattr(wt.bus, "publish", lambda ev: published.append(ev))
+
+    wt._emit_cli_commands(
+        "set_interface_ip",
+        "act_abc",
+        ["interface Gi0/1/3", " no switchport", " ip address 10.0.0.1 255.255.255.0"],
+        mode="config",
+    )
+
+    assert len(published) == 3
+    for i, ev in enumerate(published):
+        assert ev["type"] == "cli_command_sent"
+        assert ev["data"]["tool"] == "set_interface_ip"
+        assert ev["data"]["action_id"] == "act_abc"
+        assert ev["data"]["command_index"] == i + 1
+        assert ev["data"]["command_total"] == 3
+        assert ev["data"]["mode"] == "config"
+    assert published[0]["data"]["command"] == "interface Gi0/1/3"
+    assert published[2]["data"]["command"] == " ip address 10.0.0.1 255.255.255.0"
+
+
+def test_set_interface_ip_emits_cli_commands_before_send_config_set(
+    _mock_pool, _mock_snapshot, monkeypatch
+):
+    """The eventbus must see all 4 cli_command_sent events BEFORE Netmiko
+    is called (operator sees what's about to run before the SSH lands).
+    Values match the `_mock_pool` fixture default `send_command.return_value`
+    so the post-write verify passes and we exercise the full happy path."""
+    call_order: list[str] = []
+    monkeypatch.setattr(
+        wt.bus,
+        "publish",
+        lambda ev: call_order.append("emit:" + ev["data"]["command"])
+        if ev["type"] == "cli_command_sent"
+        else None,
+    )
+    _mock_pool.send_config_set.side_effect = lambda *a, **kw: (
+        call_order.append("send_config_set") or "config applied"
+    )
+
+    aid = propose_action("set_interface_ip", {})
+    approve_action(aid)
+    wt.set_interface_ip("GigabitEthernet0/1/2", "10.1.1.1", "255.255.255.0", action_id=aid)
+
+    # All 4 emits must precede the single send_config_set call.
+    send_idx = call_order.index("send_config_set")
+    assert call_order[:send_idx] == [
+        "emit:interface GigabitEthernet0/1/2",
+        "emit: no switchport",
+        "emit: ip address 10.1.1.1 255.255.255.0",
+        "emit: no shutdown",
+    ]
+
+
+def test_set_access_vlan_emits_both_config_and_verify_commands(
+    _mock_pool, _mock_snapshot, monkeypatch
+):
+    """Both phases stream: 2 config-mode emits during send_config_set, then
+    1 exec-mode emit when _verify_running_config runs `show vlan brief`."""
+    published: list[dict] = []
+    monkeypatch.setattr(wt.bus, "publish", lambda ev: published.append(ev))
+
+    aid = propose_action("set_access_vlan", {"vlan_id": 40, "vlan_name": "OFFICE"})
+    approve_action(aid)
+    wt.set_access_vlan(40, "OFFICE", action_id=aid)
+
+    cli_events = [e for e in published if e["type"] == "cli_command_sent"]
+    config_events = [e for e in cli_events if e["data"]["mode"] == "config"]
+    exec_events = [e for e in cli_events if e["data"]["mode"] == "exec"]
+    assert len(config_events) == 2
+    assert config_events[0]["data"]["command"] == "vlan 40"
+    assert config_events[1]["data"]["command"] == " name OFFICE"
+    assert len(exec_events) == 1
+    assert exec_events[0]["data"]["command"] == "show vlan brief"
+
+
+# ---------------------------------------------------------------------------
 # CLI AI configure — validators
 # ---------------------------------------------------------------------------
 

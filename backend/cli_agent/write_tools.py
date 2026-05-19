@@ -19,10 +19,12 @@ from __future__ import annotations
 import ipaddress
 import re
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from backend.cli_agent.connection import pool
 from backend.cli_agent.snapshots import take_snapshot
+from backend.core.eventbus import bus
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
 from backend.orchestration.confirmations import (
@@ -269,6 +271,44 @@ def _guard(action_id: str) -> None:
         )
 
 
+def _emit_cli_commands(
+    tool: str,
+    action_id: str,
+    commands: list[str],
+    mode: str = "config",
+) -> None:
+    """Publish one `cli_command_sent` event per CLI line so the chat live
+    event stream can show what the agent is typing at the IOS prompt.
+
+    Netmiko's `send_config_set` is a single round-trip — there's no actual
+    per-line wire delay we can hook into without rewriting the SSH layer.
+    Emitting the events here, just before the call, gives the operator
+    line-by-line visibility into the same buffered batch. Cosmetic
+    line-by-line pacing is applied client-side (see ChatProvider in
+    app.jsx).
+
+    `mode` is `"config"` for `send_config_set` calls and `"exec"` for
+    `send_command` / post-write verify reads.
+    """
+    total = len(commands)
+    ts_iso = datetime.now(UTC).isoformat()
+    for idx, cmd in enumerate(commands, start=1):
+        bus.publish(
+            {
+                "type": "cli_command_sent",
+                "ts": ts_iso,
+                "data": {
+                    "tool": tool,
+                    "action_id": action_id,
+                    "command": cmd,
+                    "command_index": idx,
+                    "command_total": total,
+                    "mode": mode,
+                },
+            }
+        )
+
+
 def _check_netmiko_output_for_errors(output: str) -> None:
     """Raise WriteRejectedError if Netmiko config output contains IOS XE
     error markers ('%' line prefix). IOS XE returns from the SSH session
@@ -298,6 +338,10 @@ def _verify_running_config(verify_command: str, verify_pattern: str, tool: str) 
     miss. Returns the verify output on success (for inclusion in the
     tool's result dict).
     """
+    # action_id isn't in scope here — emit with '-' so the live stream
+    # still shows what the verify is running, even if it can't cross-
+    # reference back to a specific action.
+    _emit_cli_commands(tool, "-", [verify_command], mode="exec")
     try:
         conn = _get_conn()
         verify_output: str = conn.send_command(verify_command, read_timeout=60)
@@ -332,12 +376,11 @@ def set_hostname(new_name: str, action_id: str) -> dict:
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    cmds = [f"hostname {new_name}"]
+    _emit_cli_commands("set_hostname", action_id, cmds, mode="config")
     try:
         conn = _get_conn()
-        output: str = conn.send_config_set(
-            [f"hostname {new_name}"],
-            read_timeout=CONFIG_READ_TIMEOUT_S,
-        )
+        output: str = conn.send_config_set(cmds, read_timeout=CONFIG_READ_TIMEOUT_S)
     except Exception as exc:
         mark_failed(action_id)
         log.error(
@@ -423,17 +466,16 @@ def set_interface_ip(
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    cmds = [
+        f"interface {interface}",
+        " no switchport",
+        f" ip address {ip} {mask}",
+        " no shutdown",
+    ]
+    _emit_cli_commands("set_interface_ip", action_id, cmds, mode="config")
     try:
         conn = _get_conn()
-        output: str = conn.send_config_set(
-            [
-                f"interface {interface}",
-                " no switchport",
-                f" ip address {ip} {mask}",
-                " no shutdown",
-            ],
-            read_timeout=CONFIG_READ_TIMEOUT_S,
-        )
+        output: str = conn.send_config_set(cmds, read_timeout=CONFIG_READ_TIMEOUT_S)
     except Exception as exc:
         mark_failed(action_id)
         log.error(
@@ -513,15 +555,14 @@ def set_access_vlan(vlan_id: int, vlan_name: str, action_id: str) -> dict:
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    cmds = [
+        f"vlan {vlan_id}",
+        f" name {vlan_name}",
+    ]
+    _emit_cli_commands("set_access_vlan", action_id, cmds, mode="config")
     try:
         conn = _get_conn()
-        output: str = conn.send_config_set(
-            [
-                f"vlan {vlan_id}",
-                f" name {vlan_name}",
-            ],
-            read_timeout=CONFIG_READ_TIMEOUT_S,
-        )
+        output: str = conn.send_config_set(cmds, read_timeout=CONFIG_READ_TIMEOUT_S)
     except Exception as exc:
         mark_failed(action_id)
         log.error(
@@ -605,6 +646,7 @@ def cli_configure(
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    _emit_cli_commands("cli_configure", action_id, config_commands, mode="config")
     try:
         conn = _get_conn()
         config_output: str = conn.send_config_set(
@@ -624,6 +666,7 @@ def cli_configure(
     # Verify in EXEC mode. send_command isn't config mode, so we don't
     # need to drop out — Netmiko's send_config_set already exited config
     # by the time it returned.
+    _emit_cli_commands("cli_configure", action_id, [verify_command], mode="exec")
     try:
         verify_output: str = conn.send_command(verify_command, read_timeout=60)
     except Exception as exc:

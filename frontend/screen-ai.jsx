@@ -56,7 +56,7 @@ function synthesizeProposal(reply) {
 }
 
 // Maps a backend WebSocket event ({type, ts, data}) to the {line, kind} shape
-// the stream column renders. All 7 backend event types handled; unknown types
+// the stream column renders. All 8 backend event types handled; unknown types
 // get a defensive "info" fallback so one unknown event never crashes the render.
 function adapterEventToStreamLine(ev) {
   const d = ev.data || {};
@@ -75,20 +75,38 @@ function adapterEventToStreamLine(ev) {
       return { line: "✓ verified", kind: "verify" };
     case "error":
       return { line: "✗ " + (d.message ?? ""), kind: "fail" };
+    case "cli_command_sent": {
+      // Per-command event from backend/cli_agent/write_tools.py (chunk 2b).
+      // Renders like a terminal scroll: `(config)#` for `mode: "config"`,
+      // `#` for `mode: "exec"` (post-write `show ...` verify reads).
+      const prompt = d.mode === "exec" ? "#" : "(config)#";
+      return { line: prompt + " " + (d.command ?? ""), kind: "cli" };
+    }
     default:
       return { line: "· " + (ev.type || "unknown"), kind: "info" };
   }
 }
 
 function ChatScreen({ pushPreview }) {
-  const [messages, setMessages] = React.useState([]);
+  // Persisted chat state lives in window.ChatContext (provided by ChatProvider
+  // in app.jsx) so navigating away and back keeps the conversation alive.
+  // The WS subscription also lives at the provider, so live-stream events
+  // that arrive while the user is on another page aren't dropped.
+  const ctx = React.useContext(window.ChatContext);
+  const {
+    messages, setMessages,
+    pending, setPending,
+    stream,
+    phase, setPhase,
+    setHistory,
+    chatHistory, setChatHistory,
+    reset,
+  } = ctx;
+
+  // Input + typing + scroll are not worth persisting — they're transient
+  // and would be confusing if they survived a page navigation.
   const [input, setInput] = React.useState("");
   const [typing, setTyping] = React.useState(false);
-  const [pending, setPending] = React.useState(null); // current awaiting-approval proposal
-  const [stream, setStream] = React.useState([]); // live event stream lines
-  const [phase, setPhase] = React.useState("idle"); // idle | thinking | awaiting | executing | done
-  const [history, setHistory] = React.useState([]); // completed-actions log (pre-existing prototype semantic)
-  const [chatHistory, setChatHistory] = React.useState([]); // multi-turn context passed to POST /api/chat
   const scrollRef = React.useRef(null);
 
   React.useEffect(() => {
@@ -96,15 +114,6 @@ function ChatScreen({ pushPreview }) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, typing]);
-
-  // WebSocket subscription — connect once for the screen lifetime.
-  // WS drives the live event stream column; cleanup closes on unmount.
-  React.useEffect(() => {
-    const handle = window.api.connectAgentWs(
-      (ev) => setStream(s => [...s, adapterEventToStreamLine(ev)])
-    );
-    return () => handle.close();
-  }, []);
 
   // Auto-grow stream during certain phases
   async function send(text) {
@@ -215,6 +224,15 @@ function ChatScreen({ pushPreview }) {
                 {phase === "executing" && "Executing"}
                 {phase === "done" && "Complete"}
               </span>
+              <button
+                type="button"
+                className="chat-reset-btn"
+                onClick={reset}
+                disabled={typing || phase === "executing"}
+                title="Clear messages, history, and live event stream"
+              >
+                Reset chat
+              </button>
             </div>
           </div>
 

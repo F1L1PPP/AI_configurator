@@ -918,6 +918,22 @@ button { font-family: inherit; }
 .chat-phase--executing { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
 .chat-phase--done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
 
+.chat-reset-btn {
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.chat-reset-btn:hover:not(:disabled) { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 40%, transparent); }
+.chat-reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 @keyframes pulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.5; } }
 
 .chat-scroll {
@@ -1180,6 +1196,15 @@ button { font-family: inherit; }
 .stream-line--step { color: var(--ink-2); }
 .stream-line--fail { color: var(--fail); }
 .stream-line--info { color: var(--ink-4); }
+.stream-line--cli {
+  color: var(--ink-1);
+  font-family: var(--mono);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  padding: 2px 6px;
+  border-left: 2px solid var(--accent);
+  border-radius: 2px;
+  white-space: pre-wrap;
+}
 .stream-foot {
   border-top: 1px solid var(--line-softer);
   padding: 12px 18px;

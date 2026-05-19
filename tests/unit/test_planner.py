@@ -285,3 +285,39 @@ def test_system_prompt_has_per_turn_quota_for_propose_tools():
     assert "/webui/#/OSPF" in window or "tweaked" in window
     # verify_failed responses must also be FINAL
     assert "verify_failed" in window
+
+
+# ---------------------------------------------------------------------------
+# Language detection — the planner replies in the user's language, not a
+# hardcoded default. Filip reported (2026-05-19) that the assistant always
+# answered in Slovak regardless of the user's input language; root cause was
+# the explicit "Speak Slovak by default" line in the system prompt.
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_does_not_force_slovak_default():
+    """Regression guard for the 2026-05-19 language bug. The literal
+    'Speak Slovak by default' phrasing biased the model to Slovak replies
+    even on English input. The new rule must be language-symmetric."""
+    from backend.orchestration.planner import SYSTEM_PROMPT
+
+    assert "Speak Slovak by default" not in SYSTEM_PROMPT
+    # The Slovak-only safety paragraph was also a Slovak bias signal — it
+    # taught the model that safety-critical context arrives in Slovak.
+    assert "Bezpečnosť:" not in SYSTEM_PROMPT
+
+
+def test_system_prompt_mirrors_user_language():
+    """The new rule must tell the model to detect + mirror the user's
+    language, not pin one as default."""
+    from backend.orchestration.planner import SYSTEM_PROMPT
+
+    assert "Detect the language" in SYSTEM_PROMPT
+    assert "same language" in SYSTEM_PROMPT
+    # English fallback for genuinely ambiguous input (single tokens, IDs)
+    # must still be specified so the model has a tie-breaker.
+    assert "ambiguous" in SYSTEM_PROMPT
+    # The Slovak intent-recognition keywords (vykonaj, schválená, cez WebUI,
+    # etc.) must STAY — those are user-input triggers, not output bias.
+    assert "vykonaj" in SYSTEM_PROMPT
+    assert "cez WebUI" in SYSTEM_PROMPT
