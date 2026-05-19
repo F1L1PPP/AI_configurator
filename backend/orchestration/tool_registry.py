@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -528,9 +529,133 @@ def _propose_set_hostname(new_name: str) -> dict:
     }
 
 
+_SWITCHPORT_RE = re.compile(r"^\s*switchport(\s|$)", re.MULTILINE)
+
+
+def _derive_svi_vlan_id(ip: str) -> int:
+    """Pick a VLAN id for the auto-redirected SVI plan.
+
+    Heuristic: third octet of the requested IP — works for the common
+    `192.168.<N>.<host>/24` lab layout (192.168.40.1 -> VLAN 40). When
+    the third octet is 0 or 1 (e.g. 10.0.0.x, anything on VLAN 1), fall
+    back to 100 so we never collide with the default VLAN or produce an
+    out-of-range id. Operator can rename/re-VLAN later if they want.
+    """
+    try:
+        third_octet = int(ip.split(".")[2])
+    except (IndexError, ValueError):
+        return 100
+    if 2 <= third_octet <= 4094:
+        return third_octet
+    return 100
+
+
+def _build_svi_redirect_proposal(interface: str, ip: str, mask: str) -> dict:
+    """When `interface` is a hardware switchport, propose an SVI plan
+    instead of the direct `set_interface_ip` write.
+
+    Three IOS XE blocks bundled into one approval:
+      1. `vlan <N>` + `name auto-vlan-<N>` (idempotent — re-applies if exists)
+      2. `interface Vlan<N>` + `ip address <ip> <mask>` + `no shutdown`
+      3. `interface <port>` + `switchport mode access` + `switchport access vlan <N>`
+
+    Returns the same `awaiting_approval` shape as `_propose_cli_configure`
+    so the chat/UI render it identically and execute via `cli_configure`.
+    """
+    vlan_id = _derive_svi_vlan_id(ip)
+    vlan_name = f"auto-vlan-{vlan_id}"
+
+    config_commands = [
+        f"vlan {vlan_id}",
+        f" name {vlan_name}",
+        "exit",
+        f"interface Vlan{vlan_id}",
+        f" ip address {ip} {mask}",
+        " no shutdown",
+        "exit",
+        f"interface {interface}",
+        " switchport mode access",
+        f" switchport access vlan {vlan_id}",
+        " no shutdown",
+    ]
+    verify_command = f"show ip interface brief | include Vlan{vlan_id}"
+    # `show ip interface brief` columns are width-padded; \s+ between
+    # interface name and the address handles whatever spacing IOS XE uses.
+    verify_pattern = rf"Vlan{vlan_id}\s+{re.escape(ip)}\s+"
+    risk = (
+        f"{interface} is a hardware switchport on the C1111-4P and cannot take "
+        f"`ip address` directly. Applying via VLAN {vlan_id} SVI: creates VLAN "
+        f"{vlan_id} if absent (named {vlan_name!r}); assigns {ip}/{mask} to "
+        f"`interface Vlan{vlan_id}`; sets {interface} to "
+        f"`switchport mode access` + `switchport access vlan {vlan_id}`. Any "
+        f"prior trunk/voice/extra config on {interface} will be replaced; if "
+        f"VLAN {vlan_id} already exists with a different SVI IP, that IP is "
+        f"overwritten."
+    )
+
+    # Defense-in-depth — same validators every cli_configure plan goes through.
+    _validate_config_commands(config_commands)
+    _validate_verify_command(verify_command)
+    _validate_verify_pattern(verify_pattern)
+
+    intent = (
+        f"Set {ip}/{mask} on {interface} (re-routed: port is L2-only on "
+        f"this chassis, applying via VLAN {vlan_id} SVI)"
+    )
+    evidence = [
+        {"source": "docs/router-prerequisites.md", "section": "C1111-4P Gi0/1/x L2-only"},
+    ]
+    action_id = propose_action(
+        tool="cli_configure",
+        params={
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+        },
+    )
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "cli_configure",
+        "preview": {
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+            "command_count": len(config_commands),
+        },
+        "next_step": _NEXT_STEP_INLINE,
+    }
+
+
 def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
     _validate_interface(interface)
     _validate_interface_ip_and_mask(ip, mask)
+
+    # Hardware pre-check: if the port is a switchport, `ip address` will be
+    # rejected at write time. Re-route to a 3-step SVI plan that the operator
+    # approves in one go. Snapshot-driven so it works across chassis without
+    # a hardcoded port list. SSH failure (router down, unit tests) is a soft
+    # miss — fall through to the direct propose; chunk-1's write-tool verify
+    # still catches the silent-failure case at execute time.
+    iface_block = ""
+    try:
+        iface_block = read_tools.show_running_config_interface(interface)
+    except Exception as exc:
+        log.warning(
+            "propose_set_interface_ip_precheck_read_failed",
+            interface=interface,
+            error=str(exc),
+        )
+
+    if iface_block and _SWITCHPORT_RE.search(iface_block):
+        return _build_svi_redirect_proposal(interface, ip, mask)
+
     action_id = propose_action(
         "set_interface_ip",
         {"interface": interface, "ip": ip, "mask": mask},

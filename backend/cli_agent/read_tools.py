@@ -99,3 +99,18 @@ def show_vlan_brief() -> list[dict]:
     parsed: list[dict] = result if isinstance(result, list) else []
     _log_action("show_vlan_brief", {}, parsed, ms)
     return parsed
+
+
+def show_running_config_interface(interface: str) -> str:
+    """Run `show running-config interface <name>` and return raw text.
+
+    Caller is responsible for validating `interface` against the IOS
+    grammar — this helper interpolates it verbatim into the command.
+    Used by propose-time hardware pre-checks (e.g. detect that a target
+    port is a hardware switchport before proposing `ip address` on it).
+    """
+    t0 = time.monotonic()
+    raw = _run(f"show running-config interface {interface}", use_textfsm=False)
+    ms = int((time.monotonic() - t0) * 1000)
+    _log_action("show_running_config_interface", {"interface": interface}, raw, ms)
+    return str(raw)
