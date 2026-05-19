@@ -11,6 +11,7 @@ import backend.cli_agent.write_tools as wt
 from backend.orchestration.confirmations import (
     NotApproved,
     approve_action,
+    get_action,
     propose_action,
 )
 
@@ -26,6 +27,19 @@ from backend.orchestration.confirmations import (
 def _mock_pool(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     mock_conn = MagicMock()
     mock_conn.send_config_set.return_value = "config applied"
+    # Default verify-read output satisfies the post-write `_verify_running_config`
+    # patterns for set_hostname / set_interface_ip / set_access_vlan happy-path
+    # tests below. Tests that exercise verify-miss override this per-test.
+    mock_conn.send_command.return_value = (
+        "hostname R1\n"
+        "hostname NEW-NAME\n"
+        "hostname LAB-R1\n"
+        "interface GigabitEthernet0/1/2\n"
+        " no switchport\n"
+        " ip address 10.1.1.1 255.255.255.0\n"
+        " no shutdown\n"
+        "40   OFFICE                           active\n"
+    )
     mock_pool = MagicMock()
     mock_pool.get_connection.return_value = mock_conn
     monkeypatch.setattr(wt, "pool", mock_pool)
@@ -280,6 +294,90 @@ def test_set_access_vlan_accepts_valid_names(_mock_pool, _mock_snapshot):
     approve_action(aid)
     for ok in ("OFFICE", "lab-vlan-1", "DMZ_INTERNAL", "v" * 32):
         wt._validate_vlan_name(ok)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# Post-write validation — % error scanner + show-back verify
+# (Regression suite for the 2026-05-18 silent-failure bug: `set_interface_ip`
+# on Gi0/1/3 returned success but the IP never landed because the hardware-
+# L2 port silently rejected `ip address`. Until write_tools validate their
+# own work, every fast-path CLI write is suspect.)
+# ---------------------------------------------------------------------------
+
+
+def test_check_netmiko_output_for_errors_passes_clean_output():
+    """No '%' lines → returns None, no exception."""
+    wt._check_netmiko_output_for_errors("Building configuration...\nhostname R1\n")
+
+
+def test_check_netmiko_output_for_errors_raises_on_invalid_input():
+    """The exact line IOS XE emits when an `ip address` lands on a switchport."""
+    output = (
+        "interface GigabitEthernet0/1/3\n"
+        " ip address 10.0.0.1 255.255.255.0\n"
+        "% Invalid input detected at '^' marker.\n"
+        " no shutdown\n"
+    )
+    with pytest.raises(wt.WriteRejectedError, match="Invalid input detected"):
+        wt._check_netmiko_output_for_errors(output)
+
+
+def test_set_interface_ip_raises_when_device_silently_rejects(_mock_pool, _mock_snapshot):
+    """The 2026-05-18 bug: send_config_set returned cleanly but the device
+    emitted '% Invalid input' for the `ip address` on a L2-only port. Tool
+    must raise WriteRejectedError + mark the action FAILED instead of
+    reporting success."""
+    _mock_pool.send_config_set.return_value = (
+        "interface GigabitEthernet0/1/3\n"
+        " no switchport\n"
+        "          ^\n"
+        "% Invalid input detected at '^' marker.\n"
+        " ip address 192.168.40.1 255.255.255.0\n"
+        " no shutdown\n"
+    )
+    aid = propose_action("set_interface_ip", {})
+    approve_action(aid)
+
+    with pytest.raises(wt.WriteRejectedError, match="Invalid input"):
+        wt.set_interface_ip("Gi0/1/3", "192.168.40.1", "255.255.255.0", action_id=aid)
+
+    assert get_action(aid)["state"] == "FAILED"
+    # Forensic post-snapshot was still taken so the operator can diff.
+    snap_phases = [c.args[1] for c in _mock_snapshot.call_args_list]
+    assert "pre" in snap_phases and "post" in snap_phases
+
+
+def test_set_hostname_raises_when_running_config_missing_new_hostname(_mock_pool, _mock_snapshot):
+    """send_config_set clean, no '%' errors, but the show-back doesn't
+    contain the new hostname → verify miss → WriteRejectedError + FAILED."""
+    _mock_pool.send_config_set.return_value = "config applied"
+    _mock_pool.send_command.return_value = "hostname OLD-NAME\n"  # new name not present
+
+    aid = propose_action("set_hostname", {"name": "BRAND-NEW"})
+    approve_action(aid)
+
+    with pytest.raises(wt.WriteRejectedError, match="post-write verify missed"):
+        wt.set_hostname("BRAND-NEW", action_id=aid)
+
+    assert get_action(aid)["state"] == "FAILED"
+
+
+def test_set_access_vlan_raises_when_vlan_brief_missing_new_row(_mock_pool, _mock_snapshot):
+    """`show vlan brief` doesn't list the new VLAN → verify miss → FAILED."""
+    _mock_pool.send_config_set.return_value = "config applied"
+    _mock_pool.send_command.return_value = (
+        "VLAN Name                             Status    Ports\n"
+        "1    default                          active    Gi0/1/0\n"
+        # VLAN 99 was supposed to be created but is missing from the output
+    )
+
+    aid = propose_action("set_access_vlan", {"vlan_id": 99, "vlan_name": "ABSENT"})
+    approve_action(aid)
+
+    with pytest.raises(wt.WriteRejectedError, match="post-write verify missed"):
+        wt.set_access_vlan(99, "ABSENT", action_id=aid)
+
+    assert get_action(aid)["state"] == "FAILED"
 
 
 # ---------------------------------------------------------------------------
