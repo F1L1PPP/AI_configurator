@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import httpx
+from anthropic._exceptions import OverloadedError as AnthropicOverloadedError
+
 from backend.orchestration import tool_registry as tr
 from backend.orchestration.confirmations import (
     approve_action,
@@ -968,3 +971,78 @@ def test_set_hostname_execute_params_contain_no_propose_metadata(monkeypatch):
 
     # And action.preview_meta carries the conflict for the UI
     assert action["preview_meta"]["existing_entity"] == "hostname c1111-lab"
+
+
+# ---------------------------------------------------------------------------
+# Chunk 10 — OverloadedError wrapping in propose tools
+# ---------------------------------------------------------------------------
+
+
+def _make_overloaded_error(request_id: str = "req_test_registry_529") -> AnthropicOverloadedError:
+    """Build a real OverloadedError with a real httpx.Response matching the
+    SDK's APIStatusError.__init__ signature."""
+    mock_request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    mock_response = httpx.Response(
+        status_code=529,
+        headers={"request-id": request_id},
+        request=mock_request,
+    )
+    return AnthropicOverloadedError(
+        message="Overloaded",
+        response=mock_response,
+        body={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+    )
+
+
+def test_propose_cli_configure_wraps_overloaded_error(monkeypatch):
+    """When draft_cli_plan raises OverloadedError, _propose_cli_configure must
+    return the structured llm_overloaded dict instead of propagating the exception."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "hostname LAB\n!\nend")
+
+    err = _make_overloaded_error("req_cli_529")
+    monkeypatch.setattr(tr, "draft_cli_plan", lambda *a, **kw: (_ for _ in ()).throw(err))
+
+    result = tr.execute_tool("propose_cli_configure", {"intent": "add VLAN 30"})
+
+    assert result["error"] == "llm_overloaded"
+    assert "overloaded" in result["message"].lower()
+    assert result["request_id"] == "req_cli_529"
+
+
+def test_propose_webui_configure_wraps_overloaded_error(monkeypatch):
+    """When draft_plan raises OverloadedError, _propose_webui_configure must
+    return the structured llm_overloaded dict and close the orphaned session."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_overload", "view": {}})
+    monkeypatch.setattr(
+        tr,
+        "webui_describe_page",
+        lambda **kw: {"session_id": "sess_overload", "view": {"elements": []}},
+    )
+
+    err = _make_overloaded_error("req_webui_529")
+    monkeypatch.setattr(tr, "draft_plan", lambda *a, **kw: (_ for _ in ()).throw(err))
+
+    close_calls: list[int] = []
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "configure OSPF", "webui_path": "/webui/#/routing/ospf"},
+    )
+
+    assert result["error"] == "llm_overloaded"
+    assert "overloaded" in result["message"].lower()
+    assert result["request_id"] == "req_webui_529"
+    assert len(close_calls) == 1, (
+        "close_all_sessions must be called on overload to clean up session"
+    )

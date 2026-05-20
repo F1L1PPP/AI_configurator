@@ -55,6 +55,9 @@ _ERROR_TO_STATUS: dict[str, int] = {
     "bad_parameters": 422,
     # Tool raised an unhandled exception. 500.
     "tool_failed": 500,
+    # Inner LLM (Haiku) was overloaded during a propose step. 503 matches
+    # the outer-planner case so callers see a consistent status code.
+    "llm_overloaded": 503,
 }
 
 

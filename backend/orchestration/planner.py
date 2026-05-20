@@ -422,7 +422,7 @@ def run_planner(
     """
     settings = get_settings()
     if client is None:
-        client = Anthropic(api_key=settings.anthropic_api_key)
+        client = Anthropic(api_key=settings.anthropic_api_key, max_retries=5)
 
     messages: list[dict[str, Any]] = list(history or [])
     messages.append({"role": "user", "content": user_message})

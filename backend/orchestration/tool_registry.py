@@ -22,6 +22,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from anthropic._exceptions import OverloadedError as AnthropicOverloadedError
+
 from backend.cli_agent import read_tools, write_tools
 from backend.cli_agent.write_tools import (
     _validate_config_commands,
@@ -830,6 +832,14 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
     # 3. Inner Haiku drafts the plan
     try:
         drafted = draft_cli_plan(intent, rag_chunks, running_config)
+    except AnthropicOverloadedError as exc:
+        request_id = getattr(exc, "request_id", None)
+        log.warning("propose_cli_configure_llm_overloaded", intent=intent, request_id=request_id)
+        return {
+            "error": "llm_overloaded",
+            "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+            "request_id": request_id,
+        }
     except RuntimeError as exc:
         log.error("propose_cli_configure_draft_failed", intent=intent, error=str(exc))
         return {"error": "draft_failed", "message": str(exc)}
@@ -992,6 +1002,15 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     # 4. Inner LLM drafts the plan
     try:
         drafted = draft_plan(intent, rag_chunks, view, running_config=running_config)
+    except AnthropicOverloadedError as exc:
+        request_id = getattr(exc, "request_id", None)
+        log.warning("propose_webui_configure_llm_overloaded", intent=intent, request_id=request_id)
+        close_all_sessions()
+        return {
+            "error": "llm_overloaded",
+            "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+            "request_id": request_id,
+        }
     except RuntimeError as exc:
         log.error("propose_webui_configure_draft_failed", intent=intent, error=str(exc))
         # Close the orphaned session — propose failed before propose_action
@@ -1266,6 +1285,23 @@ def _webui_configure(**kwargs: Any) -> dict:
                 new_view,
                 previous_steps=executed_steps,
             )
+        except AnthropicOverloadedError as exc:
+            request_id = getattr(exc, "request_id", None)
+            log.warning(
+                "webui_configure_llm_overloaded",
+                action_id=action_id,
+                iteration=iteration,
+                request_id=request_id,
+            )
+            mark_failed(action_id)
+            close_all_sessions()
+            return {
+                "error": "llm_overloaded",
+                "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+                "request_id": request_id,
+                "iteration": iteration,
+                "completed_steps": executed_steps,
+            }
         except RuntimeError as exc:
             mark_failed(action_id)
             close_all_sessions()

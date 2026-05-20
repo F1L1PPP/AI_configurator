@@ -7,7 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from anthropic import Anthropic as AnthropicClient
+from anthropic._exceptions import OverloadedError as AnthropicOverloadedError
 
 from backend.orchestration.planner import (
     MAX_ITERATIONS,
@@ -285,6 +288,56 @@ def test_system_prompt_has_per_turn_quota_for_propose_tools():
     assert "/webui/#/OSPF" in window or "tweaked" in window
     # verify_failed responses must also be FINAL
     assert "verify_failed" in window
+
+
+# ---------------------------------------------------------------------------
+# Chunk 10 — Anthropic 529 / OverloadedError hardening
+# ---------------------------------------------------------------------------
+
+
+def _make_overloaded_error(request_id: str = "req_test_abc123") -> AnthropicOverloadedError:
+    """Build an OverloadedError using real httpx objects to match the SDK's
+    APIStatusError.__init__ signature (response.request, response.status_code,
+    response.headers)."""
+    mock_request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    mock_response = httpx.Response(
+        status_code=529,
+        headers={"request-id": request_id},
+        request=mock_request,
+    )
+    return AnthropicOverloadedError(
+        message="Overloaded",
+        response=mock_response,
+        body={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+    )
+
+
+def test_run_planner_overloaded_error_propagates():
+    """OverloadedError must propagate out of run_planner unchanged —
+    routes_chat.py handles the friendly 503, not the planner itself."""
+    err = _make_overloaded_error()
+    client = MagicMock()
+    client.messages.create.side_effect = err
+
+    with pytest.raises(AnthropicOverloadedError):
+        run_planner("set hostname to X", history=[], client=client)
+
+
+def test_anthropic_client_has_max_retries_5(monkeypatch):
+    """When no client is injected, run_planner builds one with max_retries=5."""
+    captured_kwargs: dict = {}
+
+    def capturing_init(self, **kwargs):  # type: ignore[override]
+        captured_kwargs.update(kwargs)
+        # Raise immediately so we don't need a real API key
+        raise RuntimeError("short-circuit in test")
+
+    monkeypatch.setattr(AnthropicClient, "__init__", capturing_init)
+
+    with pytest.raises(RuntimeError, match="short-circuit"):
+        run_planner("set hostname to X")
+
+    assert captured_kwargs.get("max_retries") == 5
 
 
 # ---------------------------------------------------------------------------
