@@ -247,3 +247,67 @@ def test_propose_set_access_vlan_vlan_brief_fallback_skipped_when_detector_hits(
 
     assert result["preview_meta"]["existing_entity"] == "vlan 30"
     assert result["preview_meta"]["is_exact_match"] is True
+
+
+# ---------------------------------------------------------------------------
+# WebUI fast-path: same conflict detection as the CLI fast-path
+# ---------------------------------------------------------------------------
+
+
+def test_propose_webui_add_access_vlan_attaches_conflict_via_vlan_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WebUI fast-path uses the shared `_detect_vlan_conflict` helper so the
+    C1111-4P vlan.dat fallback applies to WebUI proposes too. Same as the
+    CLI fast-path: VLAN 30 in vlan_brief but not in running-config → fallback
+    fires, preview_meta + commands populated."""
+    from backend.orchestration.confirmations import get_action
+
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "!\nhostname X\n!\n")
+    monkeypatch.setattr(
+        tr.read_tools,
+        "show_vlan_brief",
+        lambda: [{"vlan_id": "30", "vlan_name": "OFFICE", "status": "active"}],
+    )
+
+    result = tr._TOOL_FUNCS["propose_webui_add_access_vlan"](vlan_id=30, vlan_name="OFFICE")
+
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert result["preview_meta"]["existing_block"] == "vlan 30\n name OFFICE"
+    assert result["preview_meta"]["is_exact_match"] is True
+    # commands field carries IOS-equivalent so the frontend can render the
+    # `IOS XE commands` block on a WebUI proposal too.
+    assert result["commands"] == ["vlan 30", " name OFFICE"]
+    # Regression guard: params stays clean for executor splat
+    action = get_action(result["action_id"])
+    assert action["params"] == {"vlan_id": 30, "vlan_name": "OFFICE"}
+    assert action["preview_meta"]["existing_entity"] == "vlan 30"
+
+
+def test_propose_webui_add_access_vlan_no_conflict_when_brand_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New VLAN that doesn't exist anywhere → no conflict fields, commands
+    still populated for display."""
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "!\nhostname X\n!\n")
+    monkeypatch.setattr(tr.read_tools, "show_vlan_brief", lambda: [])
+
+    result = tr._TOOL_FUNCS["propose_webui_add_access_vlan"](vlan_id=99, vlan_name="NEW")
+
+    assert result["preview_meta"] is None
+    assert result["commands"] == ["vlan 99", " name NEW"]
+
+
+def test_propose_webui_set_hostname_attaches_conflict_when_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WebUI hostname fast-path uses the shared `_detect_hostname_conflict`
+    helper — same IDENTICAL CONFIG / REPLACES EXISTING signal as the CLI
+    fast-path. Renaming to the current value → is_exact_match=True."""
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "!\nhostname LAB-R4\n!\n")
+
+    result = tr._TOOL_FUNCS["propose_webui_set_hostname"](new_name="LAB-R4")
+
+    assert result["preview_meta"]["existing_entity"] == "hostname LAB-R4"
+    assert result["preview_meta"]["is_exact_match"] is True
+    assert result["commands"] == ["hostname LAB-R4"]

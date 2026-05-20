@@ -510,6 +510,91 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
+def _detect_hostname_conflict(new_name: str) -> dict | None:
+    """Shared propose-time conflict check for hostname changes.
+
+    Called by both CLI (_propose_set_hostname) and WebUI
+    (_propose_webui_set_hostname) fast-path tools so behaviour can't drift.
+    Returns a `preview_meta` dict (with existing_entity / existing_block /
+    is_exact_match) when a conflict is found, or None if SSH soft-fails or
+    no existing hostname line matches the proposed one.
+    """
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("hostname_conflict_precheck_read_failed", error=str(exc))
+    if not running_config:
+        return None
+    existing = find_existing_block([f"hostname {new_name}"], running_config)
+    if not existing:
+        return None
+    return {
+        "existing_entity": existing["anchor"],
+        "existing_block": existing["block"],
+        "is_exact_match": existing["is_exact_match"],
+    }
+
+
+def _detect_vlan_conflict(vlan_id: int, vlan_name: str) -> dict | None:
+    """Shared propose-time conflict check for VLAN add/rename.
+
+    Called by both CLI (_propose_set_access_vlan) and WebUI
+    (_propose_webui_add_access_vlan) fast-path tools so the C1111-4P
+    vlan.dat fallback applies to both. Returns a `preview_meta` dict or
+    None. The fallback path queries `show vlan brief` when the universal
+    detector misses the stanza in running-config — VLAN definitions on
+    the embedded switch live in vlan.dat and don't always appear in
+    `show running-config` as a clean `vlan N / name X` stanza.
+    """
+    would_be_commands = [f"vlan {vlan_id}", f" name {vlan_name}"]
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("vlan_conflict_precheck_read_failed", vlan_id=vlan_id, error=str(exc))
+
+    existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    if existing:
+        return {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
+
+    # Fallback: show_vlan_brief is authoritative for VLAN existence + name on
+    # C1111-4P style devices where VLAN config lives in vlan.dat only.
+    try:
+        vlans = read_tools.show_vlan_brief()
+    except Exception as exc:
+        log.warning("vlan_conflict_vlan_brief_failed", vlan_id=vlan_id, error=str(exc))
+        return None
+    for v in vlans:
+        if not isinstance(v, dict):
+            continue
+        if str(v.get("vlan_id", "")).strip() != str(vlan_id):
+            continue
+        # ntc-templates emits `vlan_name` (NOT `name`) for the
+        # cisco_ios_show_vlan_brief template. See
+        # backend/webui_agent/verify.py:49 for the same gotcha.
+        existing_name = (v.get("vlan_name") or "").strip()
+        synthetic_block = (
+            f"vlan {vlan_id}\n name {existing_name}" if existing_name else f"vlan {vlan_id}"
+        )
+        log.info(
+            "vlan_conflict_vlan_brief_match",
+            vlan_id=vlan_id,
+            existing_name=existing_name,
+            requested_name=vlan_name,
+        )
+        return {
+            "existing_entity": f"vlan {vlan_id}",
+            "existing_block": synthetic_block,
+            "is_exact_match": existing_name == vlan_name,
+        }
+    return None
+
+
 def _propose_set_hostname(new_name: str) -> dict:
     # Validate at propose-time so the chat reply fails fast (HTTP 422 via
     # the planner) instead of creating an action_id that can only error
@@ -518,24 +603,10 @@ def _propose_set_hostname(new_name: str) -> dict:
     # mode is the cheap one.
     _validate_hostname(new_name)
 
-    would_be_commands = [f"hostname {new_name}"]
-    running_config = ""
-    try:
-        running_config = read_tools.show_running_config()
-    except Exception as exc:
-        log.warning("propose_set_hostname_precheck_read_failed", error=str(exc))
-
     # params contains ONLY the executor's kwargs — no propose-time metadata.
     # (`set_hostname(new_name: str, action_id: str)`)
     params: dict[str, Any] = {"new_name": new_name}
-    existing = find_existing_block(would_be_commands, running_config) if running_config else None
-    preview_meta: dict[str, Any] | None = None
-    if existing:
-        preview_meta = {
-            "existing_entity": existing["anchor"],
-            "existing_block": existing["block"],
-            "is_exact_match": existing["is_exact_match"],
-        }
+    preview_meta = _detect_hostname_conflict(new_name)
 
     action_id = propose_action("set_hostname", params, preview_meta=preview_meta)
     return {
@@ -545,7 +616,7 @@ def _propose_set_hostname(new_name: str) -> dict:
         "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": _NEXT_STEP_INLINE + " No need to open another screen.",
-        "commands": would_be_commands,
+        "commands": [f"hostname {new_name}"],
         "preview_meta": preview_meta,
     }
 
@@ -722,60 +793,9 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     _validate_vlan_id(vlan_id)
     _validate_vlan_name(vlan_name)
 
-    would_be_commands = [f"vlan {vlan_id}", f" name {vlan_name}"]
-    running_config = ""
-    try:
-        running_config = read_tools.show_running_config()
-    except Exception as exc:
-        log.warning("propose_set_access_vlan_precheck_read_failed", error=str(exc))
-
     # params contains ONLY the executor's kwargs — no propose-time metadata.
     params: dict[str, Any] = {"vlan_id": vlan_id, "vlan_name": vlan_name}
-    existing = find_existing_block(would_be_commands, running_config) if running_config else None
-    preview_meta: dict[str, Any] | None = None
-    if existing:
-        preview_meta = {
-            "existing_entity": existing["anchor"],
-            "existing_block": existing["block"],
-            "is_exact_match": existing["is_exact_match"],
-        }
-    else:
-        # Fallback for IOS XE devices (e.g. C1111-4P) where VLAN definitions
-        # live in vlan.dat and may not appear in `show running-config` as a
-        # clean `vlan N / name X` stanza. `show vlan brief` is the
-        # authoritative source for VLAN existence + name on those devices.
-        try:
-            vlans = read_tools.show_vlan_brief()
-        except Exception as exc:
-            log.warning("propose_set_access_vlan_vlan_brief_failed", error=str(exc))
-            vlans = []
-        for v in vlans:
-            if not isinstance(v, dict):
-                continue
-            if str(v.get("vlan_id", "")).strip() == str(vlan_id):
-                # ntc-templates emits `vlan_name` (NOT `name`) for the
-                # cisco_ios_show_vlan_brief template. See
-                # backend/webui_agent/verify.py:49 for the same gotcha.
-                existing_name = (v.get("vlan_name") or "").strip()
-                # Synthesize an existing_block that mirrors the running-config
-                # format so the frontend renders it identically to the
-                # detector-found case.
-                synthetic_block = (
-                    f"vlan {vlan_id}\n name {existing_name}" if existing_name else f"vlan {vlan_id}"
-                )
-                preview_meta = {
-                    "existing_entity": f"vlan {vlan_id}",
-                    "existing_block": synthetic_block,
-                    "is_exact_match": existing_name == vlan_name,
-                }
-                log.info(
-                    "propose_set_access_vlan_vlan_brief_match",
-                    vlan_id=vlan_id,
-                    existing_name=existing_name,
-                    requested_name=vlan_name,
-                    is_exact_match=preview_meta["is_exact_match"],
-                )
-                break
+    preview_meta = _detect_vlan_conflict(vlan_id, vlan_name)
 
     action_id = propose_action("set_access_vlan", params, preview_meta=preview_meta)
     return {
@@ -791,16 +811,24 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_INLINE,
-        "commands": would_be_commands,
+        "commands": [f"vlan {vlan_id}", f" name {vlan_name}"],
         "preview_meta": preview_meta,
     }
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
     _validate_hostname(new_name)
+    # Conflict detection runs against the same running-config the CLI fast-path
+    # checks — the operator gets the same warning regardless of which transport
+    # the LLM picks. `commands` field carries the IOS-equivalent so the
+    # frontend's `IOS XE commands` block renders meaningfully even though the
+    # actual write goes via WebUI clicks.
+    preview_meta = _detect_hostname_conflict(new_name)
     # Store under `new_name` to match the flow function's kwarg name
     # (change_hostname_via_webui(new_name, action_id)).
-    action_id = propose_action("webui_set_hostname", {"new_name": new_name})
+    action_id = propose_action(
+        "webui_set_hostname", {"new_name": new_name}, preview_meta=preview_meta
+    )
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
@@ -808,14 +836,21 @@ def _propose_webui_set_hostname(new_name: str) -> dict:
         "execute_tool": "webui_set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": _NEXT_STEP_WEBUI,
+        "commands": [f"hostname {new_name}"],
+        "preview_meta": preview_meta,
     }
 
 
 def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     _validate_vlan_id(vlan_id)
     _validate_vlan_name(vlan_name)
+    # Same VLAN conflict detection as the CLI fast-path — includes the
+    # vlan.dat fallback via show_vlan_brief for C1111-4P style devices.
+    preview_meta = _detect_vlan_conflict(vlan_id, vlan_name)
     action_id = propose_action(
-        "webui_add_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name}
+        "webui_add_access_vlan",
+        {"vlan_id": vlan_id, "vlan_name": vlan_name},
+        preview_meta=preview_meta,
     )
     return {
         "status": "awaiting_approval",
@@ -832,6 +867,8 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_WEBUI,
+        "commands": [f"vlan {vlan_id}", f" name {vlan_name}"],
+        "preview_meta": preview_meta,
     }
 
 
