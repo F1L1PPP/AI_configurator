@@ -1349,6 +1349,15 @@ button { font-family: inherit; }
   color: var(--ink-3);
   padding: 14px 20px;
 }
+/* Summary + Commands card empty-state placeholders — match their populated
+   states' monospace styling. Position inherits from .card-body's default
+   padding (14px 20px 20px), so no padding override needed. */
+.card--summary .muted,
+.card--commands .muted {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-3);
+}
 .diff {
   font-family: var(--mono);
   font-size: 12.5px;
