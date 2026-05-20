@@ -127,6 +127,11 @@ def find_existing_block(
         break
 
     if anchor is None:
+        log.info(
+            "conflict_detector_no_anchor",
+            reason="all config_commands lines were trivial / no-prefix / physical-interface",
+            commands_count=len(config_commands),
+        )
         return None
 
     # ------------------------------------------------------------------
@@ -135,6 +140,16 @@ def find_existing_block(
     pattern = re.compile(rf"^{re.escape(anchor)}\s*$", re.MULTILINE | re.IGNORECASE)
     match = pattern.search(running_config)
     if match is None:
+        log.info(
+            "conflict_detector_no_match",
+            anchor=anchor,
+            is_stanza=_is_stanza(anchor),
+            running_config_chars=len(running_config),
+            # Quick fingerprint to help diagnose IOS dialect differences
+            # (e.g. anchor not in running-config at all vs anchor present
+            # but with trailing tokens that defeat `\s*$`).
+            anchor_substring_present=anchor.lower() in running_config.lower(),
+        )
         return None
 
     # ------------------------------------------------------------------
@@ -155,10 +170,11 @@ def find_existing_block(
     proposed_text = "\n".join(config_commands)
     is_exact = _normalise_block(proposed_text) == _normalise_block(existing_block)
 
-    log.debug(
+    log.info(
         "conflict_detector_match",
         anchor=anchor,
         is_exact_match=is_exact,
+        block_chars=len(existing_block),
     )
 
     return {
