@@ -1341,10 +1341,13 @@ button { font-family: inherit; }
 .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .card--diff .card-body { padding: 0 0 14px; }
 .card--diff .muted {
+  /* Sit where line 1 of populated diff would: match `.diff` vertical
+     padding (14px) and `.diff-line` horizontal padding (16px) so the
+     empty-state placeholder reads as if it were row 1 of the diff. */
   font-family: var(--mono);
   font-size: 12.5px;
   color: var(--ink-3);
-  padding: 8px 0;
+  padding: 14px 16px;
 }
 .diff {
   font-family: var(--mono);
