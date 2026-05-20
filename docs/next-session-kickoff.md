@@ -1,4 +1,4 @@
-# Next session kickoff — 2026-05-20+
+# Next session kickoff — 2026-05-21+
 
 Paste the block between **=== START ===** and **=== END ===** into the first message of a fresh chat. Then wait for "go" before any code change.
 
@@ -6,20 +6,21 @@ Paste the block between **=== START ===** and **=== END ===** into the first mes
 
 You are joining the Cisco AI Config Agent project mid-stream. You are operating as the **Orchestrator / Head Architect** of an Engineering & Networking Team reporting to the Director (Filip). Read the Director Blueprint and the roadmap before responding:
 
-1. [CLAUDE.md](CLAUDE.md) — project tone, branch rules, commits, AND the new **Communication style** section (team voice, tradeoffs first, no fluff).
+1. [CLAUDE.md](CLAUDE.md) — project tone, branch rules, commits, AND the **Communication style** section (team voice, tradeoffs first, no fluff).
 2. [~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md](~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md) — full Director Blueprint (role split, communication, concrete flow per task, edge cases).
-3. [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — master 18-chunk roadmap from Filip's bug list. Phase A and Phase B are done; Phase C is next.
-4. The "What landed 2026-05-19" section in **this** kickoff doc — full chronological recap of yesterday's nine commits.
+3. [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — master 18-chunk roadmap from Filip's bug list. Phases A, B, C, D, E + chunks 1/1.5/9/10 are LANDED.
+4. The "What landed 2026-05-19" + "What landed 2026-05-20" sections in **this** kickoff doc — chronological recap of the last two days.
 
 After reading, summarise back in 6-8 sentences:
 
-1. `feature/bootstrap` at HEAD `c0da7e3`, 544 tests passing, last tag `v0.5.2-phase-b-chat` at `cf3572d`.
+1. `feature/bootstrap` at HEAD `88bd731`, 588 tests passing (+44 over the 544 baseline of 2026-05-20 morning), last tag `v0.5.5-phase-e-preview-diff` at `88bd731`.
 2. The Director Blueprint operating directive — team voice ("Team recommendation:" / "We should…"), tradeoff tables BEFORE architectural decisions, Haiku as delegated read-fetcher, reject corporate fluff.
-3. Phase A (dashboard goes real), Phase B (language fix + chat persistence + live CLI stream), and chunks 1/1.5/9 are LANDED. Don't re-do.
-4. Phase C is the next focus: universal "config already exists" pre-check at propose time — not just VLAN, ANY stanza (OSPF, RIP, BGP, route-maps, ACLs, etc.). Architecture is already designed in the roadmap doc.
-5. The Phase C plan calls for the **Opus → Sonnet → Haiku** agent split: Opus (this chat) writes per-chunk briefings inline; Sonnet implements with tests interleaved; Haiku audits deltas.
-6. Tradeoff already settled for Phase C: **WARN, don't REFUSE.** Pre-check is informational — operator sees existing block + drafted commands side by side and approves with eyes open.
+3. Phases A, B, C, D, E + chunks 1/1.5/9/10 are LANDED. Don't re-do.
+4. Phase C went BEYOND the original chunks: also covers WebUI fast-path conflict detection + a C1111-4P-specific `show_vlan_brief` fallback (VLAN definitions live in vlan.dat, not running-config on this chassis).
+5. Phase E (`v0.5.5-phase-e-preview-diff`) made the Config Preview's diff render for real via a new `/api/actions/{id}/snapshot/{phase}` endpoint that bridges the backend-stores-paths / frontend-expects-content gap that had been there since day one.
+6. The Opus → Sonnet → Haiku agent split is the standard flow: Opus writes per-chunk briefings inline; Sonnet implements with tests interleaved; Haiku audits deltas.
 7. Working tree: README.md modification still uncommitted (waiting on screenshots — chunk 16).
+8. Next candidate: chunk 12 (auto-debug on write failure + on-demand "Debug my config" sweep, ~90 min, MED priority). Skip the chunk-order question — it is locked unless Filip asks.
 
 Then wait for "go" before making any change. **Do not propose re-planning the chunk order** — it is locked unless Filip asks.
 
@@ -79,68 +80,59 @@ Filip's 2026-05-19 directive: the agents are not independent — they form a spe
 
 ---
 
-## Tomorrow's first chunk — Phase C chunk 6: Fast-path conflict pre-checks (~45 min, HIGH)
+## What landed 2026-05-20
 
-**Why FIRST**: the operator currently has no signal at propose time when a fast-path write will collide with existing config. "add VLAN 30 named NEW" when VLAN 30 already exists as OLD goes straight to approval, then either silently updates or surprises the operator. Same for setting the hostname to the current value (wasted approval round-trip).
+24 commits across `feature/bootstrap` between morning HEAD `c0da7e3` and end-of-day HEAD `88bd731`. 6 tags pushed (3 phase milestones + 3 timestamped backups). Tests 544 → 588 (+44), 0 failed. Live-smoked on the C1111-4P throughout.
 
-Two propose tools in [backend/orchestration/tool_registry.py](backend/orchestration/tool_registry.py):
+### Phase C — Universal conflict pre-checks (`v0.5.3-phase-c-conflict-detect` at `f0d788a`)
 
-1. **`_propose_set_hostname`** ([tool_registry.py:510-528](backend/orchestration/tool_registry.py:510)): read current hostname via `read_tools.show_version().get("hostname")`; if requested == current, return `{"error": "hostname_unchanged", "message": "Router is already named <X>.", "current_hostname": "<X>"}`. SSH soft-fail → fall through to normal propose.
+**Chunk 6 (`040affc`)** — `backend/orchestration/conflict_detector.py` with `find_existing_block(commands, running_config) -> {anchor, block, is_exact_match} | None`. Universal anchor algorithm handles indented stanzas (vlan/interface Vlan/router/route-map/etc.) AND single-line globals (hostname, ip route). Physical-interface guard, `no <X>` skip, `is_exact_match` for true no-op detection. 13 unit tests.
 
-2. **`_propose_set_access_vlan`** ([tool_registry.py:553-571](backend/orchestration/tool_registry.py:553)): call `read_tools.show_vlan_brief()`, scan for `vlan_id` match; if present, add `existing_entity: "vlan <id>"` + `existing_block: "<id> <current_name> <status>"` to the proposal preview. **Never refuse** — VLAN rename is a legitimate use case. SSH soft-fail same pattern.
+**Chunk 7 (`558018e`)** — wired into all 5 CLI propose tools (`set_hostname`, `set_access_vlan`, `set_interface_ip` non-SVI branch, `cli_configure`, `webui_configure`). `configure_planner.draft_plan` extended with optional `running_config` + `equivalent_cli_commands` return so the WebUI inner Haiku also feeds the detector. 8 integration tests.
 
-**Tests**: 4 regression tests covering: hostname-same refuses; hostname-different proceeds; VLAN-exists adds `existing_entity`; SSH read failure → soft-fall to normal propose.
+**Chunk 8 (`cd135b0`)** — frontend: `synthesizeProposal` extracts conflict fields; `ProposalBubble` renders amber `REPLACES EXISTING` / stronger `IDENTICAL CONFIG — APPLYING WILL BE A NO-OP` block above the commands; CSS via `var(--warn)` tokens + `color-mix()` for the noop variant.
 
-**Run as**: Opus (the next chat) writes the per-chunk Sonnet briefing inline with the relevant slice of [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) Phase C section. Sonnet implements with tests interleaved. Haiku audits the delta. Director (Filip) only re-reviews if Haiku flags divergence.
+### Phase D — Smart suggestion chips (`v0.5.4-phase-d-smart-suggestions` at `2b8dd5d`)
 
-**No tag after this chunk** — collect chunks 6+7+8 under one Phase C tag.
+**Chunk 11 (`2b8dd5d`)** — NEW `GET /api/suggestions` endpoint. `_build_digest` extracts hostname + VLAN list + interface IPs from running-config (caps at 2 KB). Haiku 4.5 drafts 4 short chips grounded on the digest. 30s per-device in-memory cache. Soft-fails to 4 static defaults on any failure (SSH down, Haiku overloaded, empty response). Frontend `useState`-seeded with the defaults so the UI is never empty during in-flight fetch. 6 unit tests.
 
-## Chunk 7 — Universal `cli_configure` conflict pre-check (~60 min, HIGH)
+### Phase E — Config Preview real diff (`v0.5.5-phase-e-preview-diff` at `88bd731`)
 
-**NEW module**: `backend/orchestration/conflict_detector.py` (~120 lines). Public API:
-```python
-def find_existing_block(config_commands: list[str], running_config: str) -> dict | None
-```
+**Chunk 13 (`596be37`)** — NEW `GET /api/actions/{action_id}/snapshot/{phase}` returns `running-config.txt` content. Path-traversal guards (`^act_[A-Za-z0-9_-]+$` regex + phase ∈ `{pre, post}` literal check before any filesystem touch). `fetchPreview` parallel-fetches both snapshots via `Promise.all` and inlines content for the unchanged `adaptPreview` — so the diff finally renders for real. `screen-preview.jsx` drops the hardcoded `"Add VLAN 30 named OFFICE on Router-01"` demo, auto-fetches the most-recent action via `fetchLastBackup` when no `actionId` in route. Change Summary + Commands cards read from `action.params`. 5 unit tests. Plus 6 stacked CSS fixes from live smoke (empty-state monospace + 20px alignment to match card title + viewport-anchor wave via `margin-top: auto`).
 
-Universal anchor algorithm (see roadmap doc Phase C "Architecture" section for the full spec): extract the first non-trivial line from `config_commands`, skip if `no <anything>`, classify (physical interface → skip; virtual interface or top-level stanza → check), regex-search running-config for the anchor, walk forward to extract the indented block. Returns `{"anchor": "router ospf 1", "block": "router ospf 1\n network ...\n exit"}` or `None`.
+### Carryover chunks pulled forward
 
-Wire into:
-- `_propose_cli_configure` ([tool_registry.py:770-794](backend/orchestration/tool_registry.py:770)) — after `draft_cli_plan` returns, before validators. Inject `existing_entity` + `existing_block` into proposal preview when not None.
-- `_propose_webui_configure` ([tool_registry.py:906-910](backend/orchestration/tool_registry.py:906)) — also gets `show_running_config()` context (currently drafts blind). Update `draft_plan` signature in [backend/orchestration/configure_planner.py](backend/orchestration/configure_planner.py) to accept optional `running_config: str = ""`.
+**Chunk 10 (`dcbe9de`)** — Anthropic 529 hardening. `max_retries=5` on all three Anthropic clients (planner + cli_configure_planner + configure_planner). `routes_chat.py` catches `OverloadedError` specifically → HTTP 503 with `"Claude API is temporarily overloaded (HTTP 529). Already retried 5 times via the SDK. Please wait a minute and try again. request_id: req_..."`. Propose tools wrap inner-LLM overloads into `{"error": "llm_overloaded", ...}` structured dicts that the executor maps to 503. 5 unit tests. **Live-verified** during Anthropic's actual overload window today.
 
-**NEW tests**: `tests/unit/test_conflict_detector.py` (~10 unit tests) + 2 integration tests in `tests/unit/test_tool_registry_phase5.py`.
+### Bug-fix commits stacked on Phase C/E (lessons learned)
 
-## Chunk 8 — Surface commands in fast-path proposals + frontend rendering (~30 min, MED)
+- `9fcaa9d` — `preview_meta` separated from `action.params` (executor splat broke `set_hostname` when chunk 7 stuffed conflict fields into params; architectural fix, not pragmatic patch).
+- `bc10d5a` — `commands` routed through `awaiting_approval` event instead of `tool_call.input` (frontend was reading the wrong event source).
+- `d204e3f` — `_event_to_dict` emits `{type, data}` instead of `{kind, data}` to match the WS convention. **Latent since day one** — `synthesizeProposal` had never found any awaiting_approval event before this; my Phase C work made the symptom visible.
+- `a21ee79` — `synthesizeProposal` type-checks `preview` before assigning to summary string (cli_configure + SVI return preview as a DICT, which crashed React with "Objects are not valid as a React child" — also latent, surfaced after the event-key fix).
+- `3873dba` — `/api/devices` enrichment now extracts `hostname` from `show_version`; AI Config page header wires to `/api/devices` instead of hardcoded `"Router-01 · 192.168.1.1"`.
+- `3e81818` + `68a50f3` — C1111-4P specific: VLAN definitions live in vlan.dat and don't appear in `show running-config` as a clean stanza, so the universal detector misses them. Added `show_vlan_brief` fallback inside `_propose_set_access_vlan` (later refactored into shared `_detect_vlan_conflict` helper). Also fixed `vlan_name` field name (ntc-templates emits `vlan_name` not `name` — same gotcha the WebUI verify layer had already documented).
+- `f0d788a` — `_detect_hostname_conflict` + `_detect_vlan_conflict` extracted as shared helpers so CLI fast-path AND WebUI fast-path (`webui_set_hostname` + `webui_add_access_vlan`) use identical detection logic. Adds `commands` field to WebUI fast-path returns so the IOS XE commands block renders for WebUI proposals too.
+- `219a7dc` — `cli_configure` verify_failed now includes a human-readable `message` field (incidental from a smoke test where the chat showed "no message").
 
-- Add `commands` field to `_propose_set_hostname`, `_propose_set_interface_ip`, `_propose_set_access_vlan` returns.
-- [frontend/screen-ai.jsx:7-56](frontend/screen-ai.jsx:7) `synthesizeProposal` forwards `input.existing_entity` and `input.existing_block`.
-- [frontend/screen-ai.jsx:385-442](frontend/screen-ai.jsx:385) `ProposalBubble` renders a "REPLACES EXISTING" block above the commands when `proposal.existing_entity` is present.
-- New `.prop-existing-block` style in [frontend/styles.css](frontend/styles.css).
+### Architectural lessons captured
 
-**Tag after chunks 6 + 7 + 8 land**: `v0.5.3-phase-c-conflict-detect` (Filip authorises).
-
-## Chunk 10 — Anthropic 529 retry hardening (~20 min, MED) — Phase F carryover
-
-Three changes:
-1. `max_retries=5` on `Anthropic()` clients in [planner.py](backend/orchestration/planner.py), [configure_planner.py](backend/orchestration/configure_planner.py), [cli_configure_planner.py](backend/orchestration/cli_configure_planner.py).
-2. Wrap `OverloadedError` → `{"error": "llm_overloaded", "message": "...", "request_id": exc.request_id}` in `_propose_*` + `_*_configure` in `tool_registry.py`.
-3. Mock-tests: `messages.create` raises `OverloadedError`, assert friendly dict.
-
-**Tag after landing**: `v0.5.4-overload-retry`.
+- **`params` dict is splatted into the executor — never put display-only fields there.** Use `preview_meta` (added to `propose_action` in `confirmations.py`) for propose-time metadata that the UI needs but the write tool doesn't.
+- **Event-payload key names must match what the frontend reads.** Chat-reply events now use `type` everywhere (matches `/ws/agent` convention).
+- **Mocks must match real parser output.** Three bugs surfaced from mocks using `name` instead of `vlan_name` (ntc-templates field).
+- **The CLAUDE.md "tags hands-off" rule was overridden 3× today** with explicit Filip authorisation per phase. Default remains: don't tag unless he says so.
 
 ## Remaining chunks (one-line each)
 
 | # | Chunk | Phase | Est | Pri |
 |---|---|---|---|---|
-| 11 | Smart fast actions — `/api/suggestions` calls Haiku with running-config digest | D | ~60 min | MED |
 | 12 | Auto-debug — reactive on write failure + on-demand sweep | G | ~90 min | MED |
-| 13 | Config Preview cleanup — latest-action default, font fix, role decision | E | ~30 min | MED |
 | 14 | WebUI speed pass — trim `_settle_page` waits, retest on live router | G | ~60 min | LOW |
 | 14b | Self-training WebUI vision fallback — Claude Vision + learned selectors | G | ~4 h | MED |
-| 15 | Hardware retests — ISIS + OSPF WebUI on live router after chunks 7 & 10 | F | ~30 min | MED |
+| 15 | Hardware retests — ISIS + OSPF WebUI on live router | F | ~30 min | MED |
 | 16 | README + screenshots + GitHub metadata (manual — Filip drops 3 PNGs) | F | ~5 min | — |
 | 17 | Cosmetic prototype-label sweep | F | ~10 min | LOW |
-| 18 | Cut clean `v0.4.0-alpha.1` consolidation tag once 7, 10 land | F | ~15 min | — |
+| 18 | Cut clean `v0.4.0-alpha.1` consolidation tag | F | ~15 min | — |
 
 ## Notes / housekeeping
 
@@ -149,3 +141,10 @@ Three changes:
 - `tools/check_vectorstore.py` and `tools/query_rag.py` flagged in yesterday's dead-code audit as worth a follow-up review — not blocking.
 - Director Blueprint applies from message #1 of the next chat. Use team voice, lead with tradeoffs on architectural decisions, route implementation through Sonnet and audits through Haiku.
 - The plan file `~/.claude/plans/write-me-what-is-graceful-sparkle.md` is outside the repo; safe to delete after the next session starts since the roadmap and per-chunk briefings live in `docs/`.
+
+## Post-roadmap polish (after all phases land)
+
+Items deferred until the main roadmap (chunks 12 → 18) is complete. None blocking — pick up only when there's appetite for polish work.
+
+- **Wire `device.id` selection into `fetchSuggestions`** — `frontend/screen-ai.jsx:232-244` currently calls `window.api.fetchSuggestions()` with no argument, so the server defaults to `device_id="router-01"`. Today this is correct (single-device C1111-4P lab; sidebar reads `fetchDevices()[0]`, no picker UI). When/if multi-device discovery lands, the device-picker chunk should ALSO wire its selected `device.id` into `fetchSuggestions(deviceId)` and add the selected device to the `useEffect` dependency array so chips refresh on device switch. The cache key in `backend/api/routes_suggestions.py` is already keyed by `device_id`, so backend is forward-compatible. Source: spawned-task chip from chunk 11 implementation; reviewed and deferred 2026-05-20 — premise required a device-selection UI that doesn't exist yet.
+- **Tighten Haiku suggestion grounding** — Phase D chip "Enable OSPF routing protocol on this router" surfaced live even though OSPF process 1 is already configured. The `_build_digest` in `routes_suggestions.py` includes `router ospf 1` lines but Haiku doesn't always treat them as exclusions. Consider an explicit `OSPF: process N active` digest line (similar to how VLANs get `vlan N name X`) so the inner system prompt's "avoid suggesting things already present" rule has a clearer signal. ~15 min when revisited.
