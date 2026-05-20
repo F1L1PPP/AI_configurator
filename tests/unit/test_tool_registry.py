@@ -293,3 +293,83 @@ def test_derive_svi_vlan_id_falls_back_to_100_for_zero_or_default_vlan():
     """Third-octet 0 (10.0.0.x) or 1 (avoid VLAN 1 collision) -> 100."""
     assert tr._derive_svi_vlan_id("10.0.0.1") == 100
     assert tr._derive_svi_vlan_id("172.16.1.5") == 100
+
+
+# ---------------------------------------------------------------------------
+# Chunk 7 — conflict_detector wired into propose tools
+# ---------------------------------------------------------------------------
+
+
+def test_propose_set_hostname_exact_match_attaches_conflict_fields(monkeypatch):
+    """When running-config contains an exact hostname match, both the returned
+    dict AND the stored action params carry the conflict fields."""
+    from backend.orchestration.confirmations import get_action
+
+    running_cfg = "!\nhostname c1111-lab\n!\n"
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    result = tr.execute_tool("propose_set_hostname", {"new_name": "c1111-lab"})
+
+    assert result["status"] == "awaiting_approval"
+    assert result["existing_entity"] == "hostname c1111-lab"
+    assert result["is_exact_match"] is True
+
+    action = get_action(result["action_id"])
+    params = action["params"]
+    assert params["existing_entity"] == "hostname c1111-lab"
+    assert params["is_exact_match"] is True
+
+
+def test_propose_set_hostname_different_no_conflict_fields(monkeypatch):
+    """When the proposed hostname doesn't exist in running-config, the detector
+    finds no match (find_existing_block searches for the PROPOSED anchor, not any
+    existing hostname) — no conflict fields, normal awaiting_approval shape."""
+    running_cfg = "!\nhostname c1111-lab\n!\n"
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    result = tr.execute_tool("propose_set_hostname", {"new_name": "lab-new"})
+
+    assert result["status"] == "awaiting_approval"
+    # Anchor "hostname lab-new" does not appear in running-config → no conflict.
+    assert "existing_entity" not in result
+
+
+def test_propose_set_hostname_ssh_read_failure_soft_falls(monkeypatch):
+    """show_running_config raising must not block the propose — conflict fields
+    simply absent, normal awaiting_approval shape preserved."""
+
+    def _boom():
+        raise Exception("ssh boom")
+
+    monkeypatch.setattr(tr.read_tools, "show_running_config", _boom)
+
+    result = tr.execute_tool("propose_set_hostname", {"new_name": "LAB-R1"})
+
+    assert result["status"] == "awaiting_approval"
+    assert "existing_entity" not in result
+
+
+def test_propose_set_interface_ip_existing_attaches_conflict_fields(monkeypatch):
+    """Non-SVI path: when running-config contains a matching interface stanza,
+    conflict fields appear on both the returned dict and stored params."""
+    from backend.orchestration.confirmations import get_action
+
+    routed_block = "interface Loopback0\n ip address 1.1.1.1 255.255.255.255\n no shutdown\n"
+    running_cfg = f"!\n{routed_block}!\n"
+
+    # show_running_config_interface must NOT return a switchport block
+    # (otherwise the SVI redirect fires instead of the direct propose).
+    monkeypatch.setattr(tr.read_tools, "show_running_config_interface", lambda iface: routed_block)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    result = tr.execute_tool(
+        "propose_set_interface_ip",
+        {"interface": "Loopback0", "ip": "1.1.1.1", "mask": "255.255.255.255"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert result["execute_tool"] == "set_interface_ip"
+    assert result["existing_entity"] == "interface Loopback0"
+
+    action = get_action(result["action_id"])
+    assert action["params"]["existing_entity"] == "interface Loopback0"

@@ -151,3 +151,30 @@ def test_next_step_no_longer_mentions_preview() -> None:
         assert "/preview" not in ns, f"{name}: next_step still mentions /preview: {ns!r}"
         assert "APPROVE" in ns.upper(), f"{name}: next_step should mention APPROVE button: {ns!r}"
         assert "EXECUTE" in ns.upper(), f"{name}: next_step should mention EXECUTE button: {ns!r}"
+
+
+# ---------------------------------------------------------------------------
+# Chunk 7 — conflict detection wired into propose_set_access_vlan
+# ---------------------------------------------------------------------------
+
+
+def test_propose_set_access_vlan_existing_attaches_conflict_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When running-config contains an existing vlan 30 stanza with a different
+    name, conflict fields appear on both the returned dict and stored params."""
+    from backend.orchestration.confirmations import get_action
+
+    running_cfg = "!\nvlan 30\n name OLD\n!\n"
+
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    result = tr._TOOL_FUNCS["propose_set_access_vlan"](vlan_id=30, vlan_name="RENAMED")
+
+    assert result["status"] == "awaiting_approval"
+    assert result["existing_entity"] == "vlan 30"
+    assert result["is_exact_match"] is False
+
+    action = get_action(result["action_id"])
+    assert action["params"]["existing_entity"] == "vlan 30"
+    assert action["params"]["is_exact_match"] is False

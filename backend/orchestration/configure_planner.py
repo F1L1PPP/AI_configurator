@@ -37,7 +37,8 @@ Your job: produce a JSON object with this exact shape:
     ...
   ],
   "verify_text": "<short distinguishing text expected on page after success>" | null,
-  "risk": "<one-sentence risk note for the human approver>"
+  "risk": "<one-sentence risk note for the human approver>",
+  "equivalent_cli_commands": ["<ios xe line 1>", "<ios xe line 2>", ...]
 }
 
 ## Strict rules
@@ -116,6 +117,16 @@ NEVER positionally. A few load-bearing conventions for Cisco WebUI forms:
 - **Never put two values into the same textbox.** A CIDR like
   `10.0.0.0/24` must split into Prefix=`10.0.0.0` + Prefix Mask=
   `255.255.255.0` across TWO fill steps.
+
+## Equivalent CLI commands (for server-side conflict detection)
+
+After the WebUI plan, infer the IOS XE configuration commands that would land
+the same change if applied via CLI, and emit them in a top-level
+`equivalent_cli_commands` array (list of strings, one IOS line per entry).
+These are used for server-side conflict detection — accuracy matters but a
+best-effort approximation is acceptable. Return an empty array `[]` if you
+cannot infer reliably (e.g. the form doesn't map to a single CLI stanza, or
+it's a multi-page wizard).
 
 ## Example: target visible (static route — exactly what the form expects)
 
@@ -228,22 +239,31 @@ def _extract_first_json_object(text: str) -> str | None:
     return None
 
 
+_RUNNING_CONFIG_MAX_CHARS = 32_000
+
+
 def draft_plan(
     intent: str,
     rag_chunks: list[dict[str, Any]],
     view: dict[str, Any],
     client: Anthropic | None = None,
     previous_steps: list[dict[str, Any]] | None = None,
+    running_config: str = "",
 ) -> dict[str, Any]:
     """Draft a step plan via Haiku 4.5.
 
-    Returns {plan, verify_text, risk}. Plan may be empty if intent doesn't
-    map cleanly to current view.
+    Returns {plan, verify_text, risk, equivalent_cli_commands}. Plan may be
+    empty if intent doesn't map cleanly to current view.
 
     ``previous_steps`` is for the multi-propose continuation case: pass
     entries like ``{"step": {...}, "result": {...}, "status": "ok" | "failed"}``
     so Haiku knows what already ran (and what failed). Default ``None``
     keeps single-shot callers (initial propose) backwards-compatible.
+
+    ``running_config`` is the current device running-config text. When
+    provided it is injected into the user message for context (truncated to
+    32 000 chars). Default empty string keeps single-shot callers without
+    running-config backwards-compatible.
 
     Raises RuntimeError on LLM call failure or JSON parse failure.
     """
@@ -258,6 +278,10 @@ def draft_plan(
         f"RAG chunks:\n{chunks_blob}\n\n"
         f"Current describe_page view:\n{view_blob}"
     )
+
+    if running_config:
+        truncated = running_config[:_RUNNING_CONFIG_MAX_CHARS]
+        user_msg += f"\n\nCurrent running-config (for CLI inference):\n{truncated}"
 
     if previous_steps:
         # Compact one-line-per-entry summary keeps token cost bounded while
@@ -311,8 +335,10 @@ def draft_plan(
     if not isinstance(result["plan"], list):
         raise RuntimeError(f"inner LLM 'plan' not a list: {type(result['plan'])}")
 
+    raw_equiv = result.get("equivalent_cli_commands")
     return {
         "plan": result["plan"],
         "verify_text": result.get("verify_text"),
         "risk": result.get("risk", "Inner LLM did not provide risk note."),
+        "equivalent_cli_commands": (raw_equiv if isinstance(raw_equiv, list) else []),
     }

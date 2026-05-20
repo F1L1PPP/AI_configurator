@@ -791,3 +791,138 @@ def test_propose_webui_configure_closes_session_on_intent_not_mappable(monkeypat
     assert len(close_calls) == 1, (
         "close_all_sessions must be called exactly once on intent_not_mappable"
     )
+
+
+# ---------------------------------------------------------------------------
+# Chunk 7 — conflict_detector wired into propose_cli_configure +
+#            propose_webui_configure
+# ---------------------------------------------------------------------------
+
+
+def test_propose_cli_configure_attaches_conflict_fields_on_match(monkeypatch):
+    """When draft_cli_plan returns commands whose anchor matches running-config,
+    conflict fields appear in both the returned preview sub-dict and the
+    stored action params."""
+    from backend.orchestration.confirmations import get_action
+
+    rag_result = {"results": [{"text": "OSPF ref", "source": "ospf.pdf", "section": "OSPF"}]}
+    drafted = {
+        "config_commands": ["router ospf 1", " network 10.0.0.0 0.0.0.255 area 0"],
+        "verify_command": 'show ip ospf | include "ospf 1"',
+        "verify_pattern": "ospf 1",
+        "risk": "Adds OSPF process 1.",
+    }
+    running_cfg = "!\nrouter ospf 1\n network 10.0.0.0 0.0.0.255 area 0\n!\n"
+
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(tr, "draft_cli_plan", lambda *a, **kw: drafted)
+
+    result = tr.execute_tool(
+        "propose_cli_configure",
+        {"intent": "Configure OSPF process 1 area 0"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert result["preview"]["existing_entity"] == "router ospf 1"
+    assert "is_exact_match" in result["preview"]
+
+    action = get_action(result["action_id"])
+    assert action["params"]["existing_entity"] == "router ospf 1"
+    assert "is_exact_match" in action["params"]
+
+    # Sanity: draft_plan was NOT involved (cli path uses draft_cli_plan)
+    # — just confirm running_config was passed to the tool
+    assert result["action_id"].startswith("act_")
+
+
+def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(monkeypatch):
+    """draft_plan returns equivalent_cli_commands matching running-config stanza;
+    conflict fields appear in preview sub-dict and stored params.
+    Also asserts draft_plan was called with running_config kwarg populated."""
+
+    from backend.orchestration.confirmations import get_action
+
+    rag_result = {"results": [{"text": "VLAN ref", "source": "vlan.pdf", "section": "VLAN"}]}
+    open_result = {"session_id": "sess_v30", "view": {}}
+    desc_result = {"session_id": "sess_v30", "view": {"elements": []}}
+    running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
+
+    drafted = {
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None}],
+        "verify_text": "30",
+        "risk": "Creates VLAN 30.",
+        "equivalent_cli_commands": ["vlan 30", " name OFFICE"],
+    }
+
+    draft_plan_calls: list[dict] = []
+
+    def _draft_plan(*args, **kwargs):
+        draft_plan_calls.append(kwargs)
+        return drafted
+
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
+    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(tr, "draft_plan", _draft_plan)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add VLAN 30 named OFFICE", "webui_path": "/webui/#/vlan"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert result["preview"]["existing_entity"] == "vlan 30"
+    assert "is_exact_match" in result["preview"]
+
+    action = get_action(result["action_id"])
+    assert action["params"]["existing_entity"] == "vlan 30"
+
+    # draft_plan must have received running_config=
+    assert len(draft_plan_calls) == 1
+    assert draft_plan_calls[0].get("running_config") == running_cfg
+
+
+def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkeypatch):
+    """When draft_plan returns equivalent_cli_commands=[], the conflict
+    detector is skipped — no conflict fields in the returned preview,
+    and no exception is raised."""
+
+    rag_result = {"results": [{"text": "x", "source": "s", "section": "S"}]}
+    open_result = {"session_id": "sess_empty_cli", "view": {}}
+    desc_result = {"session_id": "sess_empty_cli", "view": {"elements": []}}
+    running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
+
+    drafted = {
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None}],
+        "verify_text": "30",
+        "risk": "Adds VLAN.",
+        "equivalent_cli_commands": [],
+    }
+
+    draft_plan_calls: list[dict] = []
+
+    def _draft_plan(*args, **kwargs):
+        draft_plan_calls.append(kwargs)
+        return drafted
+
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
+    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(tr, "draft_plan", _draft_plan)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add VLAN 30", "webui_path": "/webui/#/vlan"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert "existing_entity" not in result["preview"]
+
+    # draft_plan still received running_config= kwarg
+    assert len(draft_plan_calls) == 1
+    assert draft_plan_calls[0].get("running_config") == running_cfg

@@ -41,6 +41,7 @@ from backend.orchestration.confirmations import (
     is_approved,
     propose_action,
 )
+from backend.orchestration.conflict_detector import find_existing_block
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 from backend.webui_agent.generic_driver import (
@@ -514,19 +515,40 @@ def _propose_set_hostname(new_name: str) -> dict:
     # re-run server-side — defense-in-depth, but the user-facing failure
     # mode is the cheap one.
     _validate_hostname(new_name)
+
+    would_be_commands = [f"hostname {new_name}"]
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("propose_set_hostname_precheck_read_failed", error=str(exc))
+
     # Store the param under the same key the write tool's signature expects
     # (`set_hostname(new_name: str, action_id: str)`), so the new
     # `/api/execute/{action_id}` endpoint can dispatch via {**params,
     # action_id=...} without a name-translation step.
-    action_id = propose_action("set_hostname", {"new_name": new_name})
-    return {
+    params: dict[str, Any] = {"new_name": new_name}
+    existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    if existing:
+        params["existing_entity"] = existing["anchor"]
+        params["existing_block"] = existing["block"]
+        params["is_exact_match"] = existing["is_exact_match"]
+
+    action_id = propose_action("set_hostname", params)
+    result: dict[str, Any] = {
         "status": "awaiting_approval",
         "action_id": action_id,
         "preview": f"Will run: 'hostname {new_name}' on the C1111",
         "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": _NEXT_STEP_INLINE + " No need to open another screen.",
+        "commands": would_be_commands,
     }
+    if existing:
+        result["existing_entity"] = existing["anchor"]
+        result["existing_block"] = existing["block"]
+        result["is_exact_match"] = existing["is_exact_match"]
+    return result
 
 
 _SWITCHPORT_RE = re.compile(r"^\s*switchport(\s|$)", re.MULTILINE)
@@ -656,11 +678,26 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
     if iface_block and _SWITCHPORT_RE.search(iface_block):
         return _build_svi_redirect_proposal(interface, ip, mask)
 
-    action_id = propose_action(
-        "set_interface_ip",
-        {"interface": interface, "ip": ip, "mask": mask},
-    )
-    return {
+    would_be_commands = [f"interface {interface}", f" ip address {ip} {mask}"]
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning(
+            "propose_set_interface_ip_conflict_read_failed",
+            interface=interface,
+            error=str(exc),
+        )
+
+    params: dict[str, Any] = {"interface": interface, "ip": ip, "mask": mask}
+    existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    if existing:
+        params["existing_entity"] = existing["anchor"]
+        params["existing_block"] = existing["block"]
+        params["is_exact_match"] = existing["is_exact_match"]
+
+    action_id = propose_action("set_interface_ip", params)
+    result: dict[str, Any] = {
         "status": "awaiting_approval",
         "action_id": action_id,
         "preview": f"Will set {interface} -> {ip}/{mask}",
@@ -672,14 +709,35 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_INLINE,
+        "commands": would_be_commands,
     }
+    if existing:
+        result["existing_entity"] = existing["anchor"]
+        result["existing_block"] = existing["block"]
+        result["is_exact_match"] = existing["is_exact_match"]
+    return result
 
 
 def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     _validate_vlan_id(vlan_id)
     _validate_vlan_name(vlan_name)
-    action_id = propose_action("set_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name})
-    return {
+
+    would_be_commands = [f"vlan {vlan_id}", f" name {vlan_name}"]
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("propose_set_access_vlan_precheck_read_failed", error=str(exc))
+
+    params: dict[str, Any] = {"vlan_id": vlan_id, "vlan_name": vlan_name}
+    existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    if existing:
+        params["existing_entity"] = existing["anchor"]
+        params["existing_block"] = existing["block"]
+        params["is_exact_match"] = existing["is_exact_match"]
+
+    action_id = propose_action("set_access_vlan", params)
+    result: dict[str, Any] = {
         "status": "awaiting_approval",
         "action_id": action_id,
         "preview": (
@@ -692,7 +750,13 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_INLINE,
+        "commands": would_be_commands,
     }
+    if existing:
+        result["existing_entity"] = existing["anchor"]
+        result["existing_block"] = existing["block"]
+        result["is_exact_match"] = existing["is_exact_match"]
+    return result
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
@@ -815,31 +879,44 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
         }
 
     evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
-    action_id = propose_action(
-        tool="cli_configure",
-        params={
-            "intent": intent,
-            "config_commands": config_commands,
-            "verify_command": verify_command,
-            "verify_pattern": verify_pattern,
-            "risk": risk,
-            "evidence": evidence,
-        },
-    )
+
+    # Conflict detection — runs BEFORE propose_action so stored params carry
+    # the conflict fields for chunk 8's frontend read path.
+    existing = find_existing_block(config_commands, running_config)
+    cli_params: dict[str, Any] = {
+        "intent": intent,
+        "config_commands": config_commands,
+        "verify_command": verify_command,
+        "verify_pattern": verify_pattern,
+        "risk": risk,
+        "evidence": evidence,
+    }
+    if existing:
+        cli_params["existing_entity"] = existing["anchor"]
+        cli_params["existing_block"] = existing["block"]
+        cli_params["is_exact_match"] = existing["is_exact_match"]
+
+    action_id = propose_action(tool="cli_configure", params=cli_params)
+
+    preview: dict[str, Any] = {
+        "intent": intent,
+        "config_commands": config_commands,
+        "verify_command": verify_command,
+        "verify_pattern": verify_pattern,
+        "risk": risk,
+        "evidence": evidence,
+        "command_count": len(config_commands),
+    }
+    if existing:
+        preview["existing_entity"] = existing["anchor"]
+        preview["existing_block"] = existing["block"]
+        preview["is_exact_match"] = existing["is_exact_match"]
 
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "execute_tool": "cli_configure",
-        "preview": {
-            "intent": intent,
-            "config_commands": config_commands,
-            "verify_command": verify_command,
-            "verify_pattern": verify_pattern,
-            "risk": risk,
-            "evidence": evidence,
-            "command_count": len(config_commands),
-        },
+        "preview": preview,
         "next_step": _NEXT_STEP_INLINE,
     }
 
@@ -905,9 +982,17 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         return desc_result
     view = desc_result["view"]
 
+    # 3b. Fetch running-config for conflict detection. Soft-fail: if SSH is
+    # down or any other error, we still proceed without conflict info.
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("propose_webui_configure_running_config_read_failed", error=str(exc))
+
     # 4. Inner LLM drafts the plan
     try:
-        drafted = draft_plan(intent, rag_chunks, view)
+        drafted = draft_plan(intent, rag_chunks, view, running_config=running_config)
     except RuntimeError as exc:
         log.error("propose_webui_configure_draft_failed", intent=intent, error=str(exc))
         # Close the orphaned session — propose failed before propose_action
@@ -919,6 +1004,7 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     plan = drafted["plan"]
     verify_text = drafted["verify_text"]
     risk = drafted["risk"]
+    equivalent_cli = drafted.get("equivalent_cli_commands") or []
 
     if not plan:
         # Inner LLM said it can't map the intent. Surface to the planner.
@@ -931,33 +1017,48 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
             ],
         }
 
-    # 5. Register the action
+    # 5. Conflict detection using equivalent CLI commands (soft-fail if either
+    # side is empty — avoid false positives from an LLM that couldn't infer).
+    existing = None
+    if equivalent_cli and running_config:
+        existing = find_existing_block(equivalent_cli, running_config)
+
+    # 6. Register the action
     evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
-    action_id = propose_action(
-        tool="webui_configure",
-        params={
-            "intent": intent,
-            "webui_path": webui_path,
-            "plan": plan,
-            "verify_text": verify_text,
-            "risk": risk,
-            "evidence": evidence,
-            "session_id": session_id,
-        },
-    )
+    webui_params: dict[str, Any] = {
+        "intent": intent,
+        "webui_path": webui_path,
+        "plan": plan,
+        "verify_text": verify_text,
+        "risk": risk,
+        "evidence": evidence,
+        "session_id": session_id,
+    }
+    if existing:
+        webui_params["existing_entity"] = existing["anchor"]
+        webui_params["existing_block"] = existing["block"]
+        webui_params["is_exact_match"] = existing["is_exact_match"]
+
+    action_id = propose_action(tool="webui_configure", params=webui_params)
+
+    webui_preview: dict[str, Any] = {
+        "intent": intent,
+        "plan": plan,
+        "verify_text": verify_text,
+        "risk": risk,
+        "evidence": evidence,
+        "step_count": len(plan),
+    }
+    if existing:
+        webui_preview["existing_entity"] = existing["anchor"]
+        webui_preview["existing_block"] = existing["block"]
+        webui_preview["is_exact_match"] = existing["is_exact_match"]
 
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "execute_tool": "webui_configure",
-        "preview": {
-            "intent": intent,
-            "plan": plan,
-            "verify_text": verify_text,
-            "risk": risk,
-            "evidence": evidence,
-            "step_count": len(plan),
-        },
+        "preview": webui_preview,
         "next_step": _NEXT_STEP_WEBUI,
     }
 
