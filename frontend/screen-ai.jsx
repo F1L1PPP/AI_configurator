@@ -39,22 +39,24 @@ function synthesizeProposal(reply) {
   const transport = toolName.includes("webui") ? "webui" : "cli";
   const input = lastToolCall.input || {};
 
-  // summary: prefer last awaiting_approval event's data.preview, else final_text
-  // preview_meta: conflict-detection fields emitted as a dedicated key on the
-  // awaiting_approval event (never on the tool_call input, which is the propose
-  // tool's CALL args, not its RESULT).
+  // summary / preview_meta / commands all come from the awaiting_approval
+  // event's data, NOT the tool_call event's input. The tool_call's input is
+  // the propose tool's CALL args (e.g. {new_name: "X"}); these three fields
+  // are on the propose RESULT, surfaced by planner.py as dedicated event keys.
   let summary = reply.final_text;
   let previewMeta = null;
+  let eventCommands = null;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.type === "awaiting_approval" && ev.data) {
       if (ev.data.preview) summary = ev.data.preview;
       if (ev.data.preview_meta) previewMeta = ev.data.preview_meta;
+      if (Array.isArray(ev.data.commands)) eventCommands = ev.data.commands;
       break;
     }
   }
 
-  const commands = input.commands || (input.params && input.params.commands) || [];
+  const commands = eventCommands || input.commands || (input.params && input.params.commands) || [];
   const risk = input.risk || "low";
   const verify = input.verify_pattern || "";
   const affects = input.affects || "";

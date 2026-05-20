@@ -649,6 +649,7 @@ def _build_svi_redirect_proposal(interface: str, ip: str, mask: str) -> dict:
             "command_count": len(config_commands),
         },
         "next_step": _NEXT_STEP_INLINE,
+        "commands": config_commands,
     }
 
 
@@ -915,6 +916,7 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
         "preview": preview,
         "next_step": _NEXT_STEP_INLINE,
         "preview_meta": preview_meta,
+        "commands": config_commands,
     }
 
 

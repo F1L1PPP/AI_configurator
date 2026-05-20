@@ -482,7 +482,10 @@ def run_planner(
             result = execute_tool(block.name, dict(block.input))
             _emit(events, "tool_result", {"name": block.name, "result": result})
 
-            # Surface action proposals as a dedicated event for UI consumption
+            # Surface action proposals as a dedicated event for UI consumption.
+            # `commands` and `preview_meta` are emitted as dedicated keys because
+            # they belong on the propose RESULT, not on the propose CALL args.
+            # The frontend reads from this event, not from the tool_call event.
             if isinstance(result, dict) and result.get("status") == "awaiting_approval":
                 _emit(
                     events,
@@ -491,6 +494,7 @@ def run_planner(
                         "action_id": result.get("action_id"),
                         "preview": result.get("preview"),
                         "preview_meta": result.get("preview_meta"),
+                        "commands": result.get("commands"),
                     },
                 )
 
