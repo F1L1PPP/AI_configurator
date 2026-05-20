@@ -714,8 +714,26 @@ def cli_configure(
             output_preview=verify_output[:300],
             device_errors=device_errors or None,
         )
+        # Human-readable message for chat surface. The route handler at
+        # routes_approvals.py:222 reads `message` to build the HTTP detail;
+        # without it the user sees "no message" and has no idea what went
+        # wrong. Surface the verify_command + pattern, plus any device-side
+        # `%` errors (e.g. "% Router-ID 10.0.0.1 in use by ospf process 2")
+        # which usually pinpoint the real cause.
+        if device_errors:
+            message = (
+                f"Device rejected the config: {'; '.join(device_errors)}. "
+                f"Verify `{verify_command}` did not match `{verify_pattern}`."
+            )
+        else:
+            output_snippet = verify_output[:200].replace("\n", " | ").strip()
+            message = (
+                f"Verify `{verify_command}` ran but its output did not match "
+                f"`{verify_pattern}`. Output preview: {output_snippet!r}"
+            )
         return {
             "error": "verify_failed",
+            "message": message,
             "tool": "cli_configure",
             "verify_command": verify_command,
             "verify_pattern": verify_pattern,
