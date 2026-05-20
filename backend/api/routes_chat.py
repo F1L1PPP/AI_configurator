@@ -49,7 +49,11 @@ class ChatResponse(BaseModel):
 
 
 def _event_to_dict(ev: PlannerEvent) -> dict[str, Any]:
-    return {"kind": ev.kind, "data": ev.data}
+    # Frontend reads `ev.type` (matches the /ws/agent convention used by
+    # adapterEventToStreamLine + synthesizeProposal). The PlannerEvent
+    # dataclass uses `kind` internally — rename at the wire boundary so
+    # both transports look identical to the React consumer.
+    return {"type": ev.kind, "data": ev.data}
 
 
 def _pending_approval(events: list[PlannerEvent]) -> str | None:
