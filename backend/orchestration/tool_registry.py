@@ -739,6 +739,40 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "existing_block": existing["block"],
             "is_exact_match": existing["is_exact_match"],
         }
+    else:
+        # Fallback for IOS XE devices (e.g. C1111-4P) where VLAN definitions
+        # live in vlan.dat and may not appear in `show running-config` as a
+        # clean `vlan N / name X` stanza. `show vlan brief` is the
+        # authoritative source for VLAN existence + name on those devices.
+        try:
+            vlans = read_tools.show_vlan_brief()
+        except Exception as exc:
+            log.warning("propose_set_access_vlan_vlan_brief_failed", error=str(exc))
+            vlans = []
+        for v in vlans:
+            if not isinstance(v, dict):
+                continue
+            if str(v.get("vlan_id", "")).strip() == str(vlan_id):
+                existing_name = (v.get("name") or "").strip()
+                # Synthesize an existing_block that mirrors the running-config
+                # format so the frontend renders it identically to the
+                # detector-found case.
+                synthetic_block = (
+                    f"vlan {vlan_id}\n name {existing_name}" if existing_name else f"vlan {vlan_id}"
+                )
+                preview_meta = {
+                    "existing_entity": f"vlan {vlan_id}",
+                    "existing_block": synthetic_block,
+                    "is_exact_match": existing_name == vlan_name,
+                }
+                log.info(
+                    "propose_set_access_vlan_vlan_brief_match",
+                    vlan_id=vlan_id,
+                    existing_name=existing_name,
+                    requested_name=vlan_name,
+                    is_exact_match=preview_meta["is_exact_match"],
+                )
+                break
 
     action_id = propose_action("set_access_vlan", params, preview_meta=preview_meta)
     return {

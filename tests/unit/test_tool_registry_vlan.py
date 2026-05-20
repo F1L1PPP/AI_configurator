@@ -182,3 +182,68 @@ def test_propose_set_access_vlan_existing_attaches_conflict_fields(
     # Regression guard: params stays clean for executor splat
     assert "existing_entity" not in action["params"]
     assert "is_exact_match" not in action["params"]
+
+
+def test_propose_set_access_vlan_falls_back_to_vlan_brief_when_not_in_running_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1111-4P quirk: VLAN definitions live in vlan.dat and don't appear in
+    `show running-config` as a `vlan N / name X` stanza, but `show vlan brief`
+    is authoritative. When the detector returns None, fall back to vlan_brief.
+    Exact-name match → is_exact_match=True (no-op write)."""
+    # Running-config has VLAN 1 but NOT vlan 30
+    running_cfg = "!\ninterface Vlan1\n ip address 192.168.10.1 255.255.255.0\n!\n"
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(
+        tr.read_tools,
+        "show_vlan_brief",
+        lambda: [
+            {"vlan_id": "1", "name": "default", "status": "active"},
+            {"vlan_id": "30", "name": "OFFICE", "status": "active"},
+        ],
+    )
+
+    result = tr._TOOL_FUNCS["propose_set_access_vlan"](vlan_id=30, vlan_name="OFFICE")
+
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert result["preview_meta"]["existing_block"] == "vlan 30\n name OFFICE"
+    assert result["preview_meta"]["is_exact_match"] is True
+
+
+def test_propose_set_access_vlan_vlan_brief_fallback_rename_not_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback fires when running-config lacks the stanza, AND when the
+    requested name differs from vlan_brief's name → is_exact_match=False
+    (rename collision, not no-op)."""
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "!\nhostname X\n!\n")
+    monkeypatch.setattr(
+        tr.read_tools,
+        "show_vlan_brief",
+        lambda: [{"vlan_id": "30", "name": "OFFICE", "status": "active"}],
+    )
+
+    result = tr._TOOL_FUNCS["propose_set_access_vlan"](vlan_id=30, vlan_name="RENAMED")
+
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert result["preview_meta"]["is_exact_match"] is False
+
+
+def test_propose_set_access_vlan_vlan_brief_fallback_skipped_when_detector_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the detector finds the VLAN in running-config (the normal IOS XE
+    case), the vlan_brief fallback must NOT also fire — no double-detection."""
+    running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    # Sentinel: if show_vlan_brief gets called, fail the test loudly
+    def boom() -> list[dict]:
+        raise AssertionError("vlan_brief fallback fired despite detector match")
+
+    monkeypatch.setattr(tr.read_tools, "show_vlan_brief", boom)
+
+    result = tr._TOOL_FUNCS["propose_set_access_vlan"](vlan_id=30, vlan_name="OFFICE")
+
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert result["preview_meta"]["is_exact_match"] is True
