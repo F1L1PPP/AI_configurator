@@ -229,12 +229,23 @@ function ChatScreen({ pushPreview }) {
     if (pending) pushPreview(pending);
   };
 
-  const suggestions = [
+  // Suggestion chips below the chat input. Initialized to a static fallback
+  // so the UI is never empty during the first fetch. /api/suggestions
+  // returns Haiku-drafted, context-aware chips based on running-config;
+  // it soft-fails to the same static list when the LLM is overloaded or
+  // SSH is down, so this React fallback is a pure UX nicety for the
+  // in-flight render window.
+  const [suggestions, setSuggestions] = React.useState([
     "add VLAN 30 named OFFICE",
     "change hostname to LAB-R1",
     "set GigabitEthernet0/1 to 192.168.10.1/24",
     "how do I configure a trunk port?",
-  ];
+  ]);
+  React.useEffect(() => {
+    window.api.fetchSuggestions().then((chips) => {
+      if (chips && chips.length) setSuggestions(chips);
+    });
+  }, []);
 
   return (
     <div className={"screen screen--ai" + (pending ? " has-sticky" : "")}>

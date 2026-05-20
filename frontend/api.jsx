@@ -192,6 +192,24 @@
   Object.assign(window, {
     api: {
 
+      // GET /api/suggestions?device_id=X → array of suggestion strings, [] on failure.
+      // device_id defaults to "router-01" on the server; pass undefined to use that default.
+      fetchSuggestions: async function (deviceId) {
+        try {
+          var qs = deviceId ? "?device_id=" + encodeURIComponent(deviceId) : "";
+          var res = await fetch(url("/api/suggestions" + qs));
+          if (!res.ok) {
+            console.error("[api] fetchSuggestions HTTP " + res.status);
+            return [];
+          }
+          var data = await res.json();
+          return Array.isArray(data.suggestions) ? data.suggestions : [];
+        } catch (err) {
+          console.error("[api] fetchSuggestions network error:", err);
+          return [];
+        }
+      },
+
       // GET /api/devices → parsed array, [] on failure.
       fetchDevices: async function () {
         try {
