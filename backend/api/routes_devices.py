@@ -55,10 +55,13 @@ def _enrich_with_show_version(device: dict[str, Any]) -> dict[str, Any]:
 
     version = parsed.get("version") if isinstance(parsed, dict) else None
     uptime = parsed.get("uptime") if isinstance(parsed, dict) else None
+    hostname = parsed.get("hostname") if isinstance(parsed, dict) else None
     if isinstance(version, str) and version.strip():
         enriched["ios"] = f"IOS XE {version}" if not version.lower().startswith("ios") else version
     if isinstance(uptime, str) and uptime.strip():
         enriched["uptime"] = uptime
+    if isinstance(hostname, str) and hostname.strip():
+        enriched["name"] = hostname
     return enriched
 
 

@@ -50,6 +50,7 @@ def test_get_devices_enriches_ios_and_uptime_from_show_version(client, monkeypat
     device = resp.json()[0]
     assert device["ios"] == "IOS XE 17.06.03a"
     assert device["uptime"] == "1 day, 2 hours, 17 minutes"
+    assert device["name"] == "c1111-lab"
 
 
 def test_get_devices_falls_back_when_show_version_raises(client, monkeypatch):

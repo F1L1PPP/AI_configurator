@@ -122,6 +122,16 @@ function ChatScreen({ pushPreview }) {
   const [typing, setTyping] = React.useState(false);
   const scrollRef = React.useRef(null);
 
+  // Active device for the chat header — same /api/devices the sidebar reads.
+  // Cheap to fetch twice; the alternative (lift to ChatProvider context) buys
+  // nothing yet since no other ChatScreen-scoped state shares it.
+  const [device, setDevice] = React.useState(null);
+  React.useEffect(() => {
+    window.api.fetchDevices().then((rows) => {
+      if (rows && rows.length) setDevice(rows[0]);
+    });
+  }, []);
+
   React.useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -229,7 +239,7 @@ function ChatScreen({ pushPreview }) {
               Session SES-0042
             </div>
             <div className="chat-head-meta">
-              <span>Router-01 · 192.168.1.1</span>
+              <span>{device ? device.name + " · " + device.ip : "— · —"}</span>
               <span className={"chat-phase chat-phase--" + phase}>
                 {phase === "idle" && "Idle"}
                 {phase === "thinking" && "Thinking…"}
