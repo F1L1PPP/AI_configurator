@@ -753,7 +753,10 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             if not isinstance(v, dict):
                 continue
             if str(v.get("vlan_id", "")).strip() == str(vlan_id):
-                existing_name = (v.get("name") or "").strip()
+                # ntc-templates emits `vlan_name` (NOT `name`) for the
+                # cisco_ios_show_vlan_brief template. See
+                # backend/webui_agent/verify.py:49 for the same gotcha.
+                existing_name = (v.get("vlan_name") or "").strip()
                 # Synthesize an existing_block that mirrors the running-config
                 # format so the frontend renders it identically to the
                 # detector-found case.

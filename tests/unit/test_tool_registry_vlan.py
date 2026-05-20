@@ -198,8 +198,8 @@ def test_propose_set_access_vlan_falls_back_to_vlan_brief_when_not_in_running_co
         tr.read_tools,
         "show_vlan_brief",
         lambda: [
-            {"vlan_id": "1", "name": "default", "status": "active"},
-            {"vlan_id": "30", "name": "OFFICE", "status": "active"},
+            {"vlan_id": "1", "vlan_name": "default", "status": "active"},
+            {"vlan_id": "30", "vlan_name": "OFFICE", "status": "active"},
         ],
     )
 
@@ -220,7 +220,7 @@ def test_propose_set_access_vlan_vlan_brief_fallback_rename_not_exact(
     monkeypatch.setattr(
         tr.read_tools,
         "show_vlan_brief",
-        lambda: [{"vlan_id": "30", "name": "OFFICE", "status": "active"}],
+        lambda: [{"vlan_id": "30", "vlan_name": "OFFICE", "status": "active"}],
     )
 
     result = tr._TOOL_FUNCS["propose_set_access_vlan"](vlan_id=30, vlan_name="RENAMED")
