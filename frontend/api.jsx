@@ -241,6 +241,23 @@
         }
       },
 
+      // GET /api/actions/{id}/snapshot/{phase} → running-config text, null on any failure.
+      // phase must be "pre" or "post". 404/422/network all collapse to null — caller
+      // renders the empty-state placeholder uniformly.
+      fetchSnapshot: async function (actionId, phase) {
+        try {
+          var res = await fetch(url("/api/actions/" + encodeURIComponent(actionId) + "/snapshot/" + encodeURIComponent(phase)));
+          if (!res.ok) {
+            return null;
+          }
+          var data = await res.json();
+          return typeof data.running_config === "string" ? data.running_config : null;
+        } catch (err) {
+          console.error("[api] fetchSnapshot network error:", err);
+          return null;
+        }
+      },
+
       // GET /api/logs/recent?limit=N → [{id, text, time, kind}], [] on failure.
       fetchRecentActivity: async function (limit) {
         if (limit === undefined) limit = 10;
@@ -260,11 +277,25 @@
       },
 
       // GET /api/actions/{actionId} → {action, before, after, addedSet, commands, note}.
+      // Also parallel-fetches pre/post snapshot content so adaptPreview can build a real diff.
       fetchPreview: async function (actionId) {
-        var res = await fetch(url("/api/actions/" + encodeURIComponent(actionId)));
-        if (!res.ok) await throwFromResponse(res);
-        var action = await res.json();
-        return adaptPreview(action);
+        try {
+          var res = await fetch(url("/api/actions/" + encodeURIComponent(actionId)));
+          if (!res.ok) return null;
+          var action = await res.json();
+          // Pull both snapshots in parallel. Returns null on any failure path; the
+          // adaptPreview's existing null-guard renders the empty-state cleanly.
+          var snapshots = await Promise.all([
+            this.fetchSnapshot(actionId, "pre"),
+            this.fetchSnapshot(actionId, "post"),
+          ]);
+          action.snapshot_pre = snapshots[0];
+          action.snapshot_post = snapshots[1];
+          return adaptPreview(action);
+        } catch (err) {
+          console.error("[api] fetchPreview network error:", err);
+          return null;
+        }
       },
 
       // POST /api/chat {message, history} → full ChatResponse; throws on non-2xx.

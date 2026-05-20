@@ -12,6 +12,7 @@ from backend.api import (
     routes_chat,
     routes_devices,
     routes_logs,
+    routes_snapshots,
     routes_suggestions,
     routes_ws,
 )
@@ -45,6 +46,7 @@ app.include_router(routes_approvals.router)
 app.include_router(routes_chat.router)
 app.include_router(routes_ws.router)
 app.include_router(routes_devices.router)
+app.include_router(routes_snapshots.router)
 app.include_router(routes_suggestions.router)
 
 
