@@ -40,11 +40,16 @@ function synthesizeProposal(reply) {
   const input = lastToolCall.input || {};
 
   // summary: prefer last awaiting_approval event's data.preview, else final_text
+  // preview_meta: conflict-detection fields emitted as a dedicated key on the
+  // awaiting_approval event (never on the tool_call input, which is the propose
+  // tool's CALL args, not its RESULT).
   let summary = reply.final_text;
+  let previewMeta = null;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
-    if (ev.type === "awaiting_approval" && ev.data && ev.data.preview) {
-      summary = ev.data.preview;
+    if (ev.type === "awaiting_approval" && ev.data) {
+      if (ev.data.preview) summary = ev.data.preview;
+      if (ev.data.preview_meta) previewMeta = ev.data.preview_meta;
       break;
     }
   }
@@ -54,9 +59,9 @@ function synthesizeProposal(reply) {
   const verify = input.verify_pattern || "";
   const affects = input.affects || "";
   const note = input.note || "";
-  const existingEntity = input.existing_entity || (input.params && input.params.existing_entity) || null;
-  const existingBlock = input.existing_block || (input.params && input.params.existing_block) || null;
-  const isExactMatch = Boolean(input.is_exact_match || (input.params && input.params.is_exact_match));
+  const existingEntity = previewMeta && previewMeta.existing_entity || null;
+  const existingBlock = previewMeta && previewMeta.existing_block || null;
+  const isExactMatch = Boolean(previewMeta && previewMeta.is_exact_match);
 
   return { actionId, summary, risk, transport, commands, verify, affects, note, existingEntity, existingBlock, isExactMatch };
 }

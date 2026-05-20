@@ -824,12 +824,17 @@ def test_propose_cli_configure_attaches_conflict_fields_on_match(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval"
-    assert result["preview"]["existing_entity"] == "router ospf 1"
-    assert "is_exact_match" in result["preview"]
+    # Conflict fields in top-level preview_meta, NOT inside preview sub-dict
+    assert result["preview_meta"]["existing_entity"] == "router ospf 1"
+    assert "is_exact_match" in result["preview_meta"]
+    assert "existing_entity" not in result["preview"]  # preview stays scoped
 
     action = get_action(result["action_id"])
-    assert action["params"]["existing_entity"] == "router ospf 1"
-    assert "is_exact_match" in action["params"]
+    assert action["preview_meta"]["existing_entity"] == "router ospf 1"
+    assert "is_exact_match" in action["preview_meta"]
+    # Regression guard: params stays clean for executor splat
+    assert "existing_entity" not in action["params"]
+    assert "is_exact_match" not in action["params"]
 
     # Sanity: draft_plan was NOT involved (cli path uses draft_cli_plan)
     # — just confirm running_config was passed to the tool
@@ -874,11 +879,16 @@ def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(m
     )
 
     assert result["status"] == "awaiting_approval"
-    assert result["preview"]["existing_entity"] == "vlan 30"
-    assert "is_exact_match" in result["preview"]
+    # Conflict fields in top-level preview_meta, NOT inside preview sub-dict
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert "is_exact_match" in result["preview_meta"]
+    assert "existing_entity" not in result["preview"]  # preview stays scoped
 
     action = get_action(result["action_id"])
-    assert action["params"]["existing_entity"] == "vlan 30"
+    assert action["preview_meta"]["existing_entity"] == "vlan 30"
+    # Regression guard: params stays clean for executor splat
+    assert "existing_entity" not in action["params"]
+    assert "is_exact_match" not in action["params"]
 
     # draft_plan must have received running_config=
     assert len(draft_plan_calls) == 1
@@ -887,7 +897,7 @@ def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(m
 
 def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkeypatch):
     """When draft_plan returns equivalent_cli_commands=[], the conflict
-    detector is skipped — no conflict fields in the returned preview,
+    detector is skipped — preview_meta is None in the returned result,
     and no exception is raised."""
 
     rag_result = {"results": [{"text": "x", "source": "s", "section": "S"}]}
@@ -921,8 +931,40 @@ def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkey
     )
 
     assert result["status"] == "awaiting_approval"
-    assert "existing_entity" not in result["preview"]
+    assert result["preview_meta"] is None
 
     # draft_plan still received running_config= kwarg
     assert len(draft_plan_calls) == 1
     assert draft_plan_calls[0].get("running_config") == running_cfg
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — Phase C bugfix (preview_meta separation)
+# ---------------------------------------------------------------------------
+
+
+def test_set_hostname_execute_params_contain_no_propose_metadata(monkeypatch):
+    """Regression: chunk 7 leaked propose-time conflict fields into action.params,
+    which broke set_hostname() splat in the execute path with TypeError.
+    Confirm params is clean even when a conflict IS detected."""
+    from backend.orchestration.confirmations import get_action
+
+    # Exact match so conflict IS detected — exercises the regression path.
+    running_cfg = "!\nhostname c1111-lab\n!\n"
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    result = tr._TOOL_FUNCS["propose_set_hostname"]("c1111-lab")
+
+    # Conflict was detected → preview_meta carries it
+    assert result["preview_meta"] is not None
+    assert result["preview_meta"]["existing_entity"] == "hostname c1111-lab"
+
+    # action.params stays CLEAN — only the executor's kwargs survive
+    action = get_action(result["action_id"])
+    assert action["params"] == {"new_name": "c1111-lab"}
+    assert "existing_entity" not in action["params"]
+    assert "existing_block" not in action["params"]
+    assert "is_exact_match" not in action["params"]
+
+    # And action.preview_meta carries the conflict for the UI
+    assert action["preview_meta"]["existing_entity"] == "hostname c1111-lab"

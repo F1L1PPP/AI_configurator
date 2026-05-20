@@ -68,8 +68,14 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def propose_action(tool: str, params: dict) -> str:
-    """Register a new action and return its action_id."""
+def propose_action(tool: str, params: dict, preview_meta: dict | None = None) -> str:
+    """Register a new action and return its action_id.
+
+    ``preview_meta`` carries propose-time conflict-detection fields
+    (existing_entity, existing_block, is_exact_match) that are needed by
+    the UI but must NOT appear in ``params``, because ``params`` is splatted
+    directly into the executor function via ``func(**params)``.
+    """
     now = _now()
     action_id = f"act_{datetime.now(UTC).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
     with _lock:
@@ -77,6 +83,7 @@ def propose_action(tool: str, params: dict) -> str:
             "action_id": action_id,
             "tool": tool,
             "params": params,
+            "preview_meta": copy.deepcopy(preview_meta) if preview_meta is not None else None,
             "state": ActionState.PROPOSED,
             "created_at": now,
             "updated_at": now,

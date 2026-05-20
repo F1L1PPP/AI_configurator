@@ -523,19 +523,20 @@ def _propose_set_hostname(new_name: str) -> dict:
     except Exception as exc:
         log.warning("propose_set_hostname_precheck_read_failed", error=str(exc))
 
-    # Store the param under the same key the write tool's signature expects
-    # (`set_hostname(new_name: str, action_id: str)`), so the new
-    # `/api/execute/{action_id}` endpoint can dispatch via {**params,
-    # action_id=...} without a name-translation step.
+    # params contains ONLY the executor's kwargs — no propose-time metadata.
+    # (`set_hostname(new_name: str, action_id: str)`)
     params: dict[str, Any] = {"new_name": new_name}
     existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    preview_meta: dict[str, Any] | None = None
     if existing:
-        params["existing_entity"] = existing["anchor"]
-        params["existing_block"] = existing["block"]
-        params["is_exact_match"] = existing["is_exact_match"]
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
 
-    action_id = propose_action("set_hostname", params)
-    result: dict[str, Any] = {
+    action_id = propose_action("set_hostname", params, preview_meta=preview_meta)
+    return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "preview": f"Will run: 'hostname {new_name}' on the C1111",
@@ -543,12 +544,8 @@ def _propose_set_hostname(new_name: str) -> dict:
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": _NEXT_STEP_INLINE + " No need to open another screen.",
         "commands": would_be_commands,
+        "preview_meta": preview_meta,
     }
-    if existing:
-        result["existing_entity"] = existing["anchor"]
-        result["existing_block"] = existing["block"]
-        result["is_exact_match"] = existing["is_exact_match"]
-    return result
 
 
 _SWITCHPORT_RE = re.compile(r"^\s*switchport(\s|$)", re.MULTILINE)
@@ -689,15 +686,19 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
             error=str(exc),
         )
 
+    # params contains ONLY the executor's kwargs — no propose-time metadata.
     params: dict[str, Any] = {"interface": interface, "ip": ip, "mask": mask}
     existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    preview_meta: dict[str, Any] | None = None
     if existing:
-        params["existing_entity"] = existing["anchor"]
-        params["existing_block"] = existing["block"]
-        params["is_exact_match"] = existing["is_exact_match"]
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
 
-    action_id = propose_action("set_interface_ip", params)
-    result: dict[str, Any] = {
+    action_id = propose_action("set_interface_ip", params, preview_meta=preview_meta)
+    return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "preview": f"Will set {interface} -> {ip}/{mask}",
@@ -710,12 +711,8 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
         },
         "next_step": _NEXT_STEP_INLINE,
         "commands": would_be_commands,
+        "preview_meta": preview_meta,
     }
-    if existing:
-        result["existing_entity"] = existing["anchor"]
-        result["existing_block"] = existing["block"]
-        result["is_exact_match"] = existing["is_exact_match"]
-    return result
 
 
 def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
@@ -729,15 +726,19 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     except Exception as exc:
         log.warning("propose_set_access_vlan_precheck_read_failed", error=str(exc))
 
+    # params contains ONLY the executor's kwargs — no propose-time metadata.
     params: dict[str, Any] = {"vlan_id": vlan_id, "vlan_name": vlan_name}
     existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    preview_meta: dict[str, Any] | None = None
     if existing:
-        params["existing_entity"] = existing["anchor"]
-        params["existing_block"] = existing["block"]
-        params["is_exact_match"] = existing["is_exact_match"]
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
 
-    action_id = propose_action("set_access_vlan", params)
-    result: dict[str, Any] = {
+    action_id = propose_action("set_access_vlan", params, preview_meta=preview_meta)
+    return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "preview": (
@@ -751,12 +752,8 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
         },
         "next_step": _NEXT_STEP_INLINE,
         "commands": would_be_commands,
+        "preview_meta": preview_meta,
     }
-    if existing:
-        result["existing_entity"] = existing["anchor"]
-        result["existing_block"] = existing["block"]
-        result["is_exact_match"] = existing["is_exact_match"]
-    return result
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
@@ -880,8 +877,8 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
 
     evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
 
-    # Conflict detection — runs BEFORE propose_action so stored params carry
-    # the conflict fields for chunk 8's frontend read path.
+    # Conflict detection — preview_meta carries conflict fields separately from
+    # cli_params so executor's func(**params) never receives unexpected kwargs.
     existing = find_existing_block(config_commands, running_config)
     cli_params: dict[str, Any] = {
         "intent": intent,
@@ -891,12 +888,15 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
         "risk": risk,
         "evidence": evidence,
     }
+    preview_meta: dict[str, Any] | None = None
     if existing:
-        cli_params["existing_entity"] = existing["anchor"]
-        cli_params["existing_block"] = existing["block"]
-        cli_params["is_exact_match"] = existing["is_exact_match"]
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
 
-    action_id = propose_action(tool="cli_configure", params=cli_params)
+    action_id = propose_action(tool="cli_configure", params=cli_params, preview_meta=preview_meta)
 
     preview: dict[str, Any] = {
         "intent": intent,
@@ -907,10 +907,6 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
         "evidence": evidence,
         "command_count": len(config_commands),
     }
-    if existing:
-        preview["existing_entity"] = existing["anchor"]
-        preview["existing_block"] = existing["block"]
-        preview["is_exact_match"] = existing["is_exact_match"]
 
     return {
         "status": "awaiting_approval",
@@ -918,6 +914,7 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
         "execute_tool": "cli_configure",
         "preview": preview,
         "next_step": _NEXT_STEP_INLINE,
+        "preview_meta": preview_meta,
     }
 
 
@@ -1023,7 +1020,8 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     if equivalent_cli and running_config:
         existing = find_existing_block(equivalent_cli, running_config)
 
-    # 6. Register the action
+    # 6. Register the action — preview_meta carries conflict fields separately
+    # from webui_params so executor's func(**params) never receives unexpected kwargs.
     evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
     webui_params: dict[str, Any] = {
         "intent": intent,
@@ -1034,12 +1032,17 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         "evidence": evidence,
         "session_id": session_id,
     }
+    preview_meta: dict[str, Any] | None = None
     if existing:
-        webui_params["existing_entity"] = existing["anchor"]
-        webui_params["existing_block"] = existing["block"]
-        webui_params["is_exact_match"] = existing["is_exact_match"]
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
 
-    action_id = propose_action(tool="webui_configure", params=webui_params)
+    action_id = propose_action(
+        tool="webui_configure", params=webui_params, preview_meta=preview_meta
+    )
 
     webui_preview: dict[str, Any] = {
         "intent": intent,
@@ -1049,10 +1052,6 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         "evidence": evidence,
         "step_count": len(plan),
     }
-    if existing:
-        webui_preview["existing_entity"] = existing["anchor"]
-        webui_preview["existing_block"] = existing["block"]
-        webui_preview["is_exact_match"] = existing["is_exact_match"]
 
     return {
         "status": "awaiting_approval",
@@ -1060,6 +1059,7 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         "execute_tool": "webui_configure",
         "preview": webui_preview,
         "next_step": _NEXT_STEP_WEBUI,
+        "preview_meta": preview_meta,
     }
 
 

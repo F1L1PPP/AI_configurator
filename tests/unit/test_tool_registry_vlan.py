@@ -162,7 +162,8 @@ def test_propose_set_access_vlan_existing_attaches_conflict_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When running-config contains an existing vlan 30 stanza with a different
-    name, conflict fields appear on both the returned dict and stored params."""
+    name, conflict fields appear in preview_meta on the returned dict and stored
+    action. action.params must NOT contain conflict fields (executor splat safety)."""
     from backend.orchestration.confirmations import get_action
 
     running_cfg = "!\nvlan 30\n name OLD\n!\n"
@@ -172,9 +173,12 @@ def test_propose_set_access_vlan_existing_attaches_conflict_fields(
     result = tr._TOOL_FUNCS["propose_set_access_vlan"](vlan_id=30, vlan_name="RENAMED")
 
     assert result["status"] == "awaiting_approval"
-    assert result["existing_entity"] == "vlan 30"
-    assert result["is_exact_match"] is False
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert result["preview_meta"]["is_exact_match"] is False
 
     action = get_action(result["action_id"])
-    assert action["params"]["existing_entity"] == "vlan 30"
-    assert action["params"]["is_exact_match"] is False
+    assert action["preview_meta"]["existing_entity"] == "vlan 30"
+    assert action["preview_meta"]["is_exact_match"] is False
+    # Regression guard: params stays clean for executor splat
+    assert "existing_entity" not in action["params"]
+    assert "is_exact_match" not in action["params"]

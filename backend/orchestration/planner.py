@@ -490,6 +490,7 @@ def run_planner(
                     {
                         "action_id": result.get("action_id"),
                         "preview": result.get("preview"),
+                        "preview_meta": result.get("preview_meta"),
                     },
                 )
 
