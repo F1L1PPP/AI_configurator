@@ -43,13 +43,24 @@ function synthesizeProposal(reply) {
   // event's data, NOT the tool_call event's input. The tool_call's input is
   // the propose tool's CALL args (e.g. {new_name: "X"}); these three fields
   // are on the propose RESULT, surfaced by planner.py as dedicated event keys.
+  //
+  // Note on preview shape: fast-path proposes (set_hostname, set_access_vlan,
+  // non-SVI set_interface_ip) emit a STRING preview. cli_configure + SVI
+  // auto-redirect emit a DICT preview (intent / config_commands / verify /
+  // risk / evidence). React can't render an object as a child — coerce to
+  // the dict's `intent` string when we see a dict, else keep reply.final_text.
   let summary = reply.final_text;
   let previewMeta = null;
   let eventCommands = null;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.type === "awaiting_approval" && ev.data) {
-      if (ev.data.preview) summary = ev.data.preview;
+      const p = ev.data.preview;
+      if (typeof p === "string" && p) {
+        summary = p;
+      } else if (p && typeof p === "object" && typeof p.intent === "string") {
+        summary = p.intent;
+      }
       if (ev.data.preview_meta) previewMeta = ev.data.preview_meta;
       if (Array.isArray(ev.data.commands)) eventCommands = ev.data.commands;
       break;
