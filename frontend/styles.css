@@ -1797,19 +1797,21 @@ button { font-family: inherit; }
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 100%);
   mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 100%);
 }
-/* Same min-height + padding-bottom treatment as .screen--dashboard so the
-   foot wave anchors to the viewport bottom even when the four preview
-   cards are short (e.g. all in empty/Loading state). Without this the
-   wave dangles in the middle of the page with a tall white gap below. */
+/* Anchor the foot wave to the viewport bottom even when the four preview
+   cards are short (e.g. all in empty/Loading state). Two parts:
+   1. .screen--preview gets min-height so it always fills the viewport.
+   2. .preview-foot-wave uses margin-top:auto inside the flex column to
+      sit at the bottom of that container instead of flush below the cards.
+   Without this, the wave dangles in the middle of the page with a tall
+   white gap below. */
 .screen--preview {
   position: relative;
   flex: 1;
   min-height: calc(100vh - var(--topbar-h) - var(--pad) * 2);
-  padding-bottom: 120px;
 }
 .preview-foot-wave {
   position: relative;
-  margin: -40px calc(var(--pad) * -1) calc(var(--pad) * -1);
+  margin: auto calc(var(--pad) * -1) calc(var(--pad) * -1);
   height: 280px;
   background: transparent;
   border: 0;
