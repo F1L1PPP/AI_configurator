@@ -29,6 +29,9 @@ function synthesizeProposal(reply) {
       verify: "",
       affects: "",
       note: "",
+      existingEntity: null,
+      existingBlock: null,
+      isExactMatch: false,
     };
   }
 
@@ -51,8 +54,11 @@ function synthesizeProposal(reply) {
   const verify = input.verify_pattern || "";
   const affects = input.affects || "";
   const note = input.note || "";
+  const existingEntity = input.existing_entity || (input.params && input.params.existing_entity) || null;
+  const existingBlock = input.existing_block || (input.params && input.params.existing_block) || null;
+  const isExactMatch = Boolean(input.is_exact_match || (input.params && input.params.is_exact_match));
 
-  return { actionId, summary, risk, transport, commands, verify, affects, note };
+  return { actionId, summary, risk, transport, commands, verify, affects, note, existingEntity, existingBlock, isExactMatch };
 }
 
 // Maps a backend WebSocket event ({type, ts, data}) to the {line, kind} shape
@@ -416,6 +422,21 @@ function ProposalBubble({ proposal }) {
         </div>
         <div className="prop-summary">{proposal.summary}</div>
         <div className="prop-note">{proposal.note}</div>
+        {proposal.existingEntity && (
+          <div className={"prop-block prop-existing-block" + (proposal.isExactMatch ? " prop-existing-block--noop" : "")}>
+            <div className="prop-block-title">
+              {proposal.isExactMatch
+                ? "IDENTICAL CONFIG — APPLYING WILL BE A NO-OP"
+                : "REPLACES EXISTING — " + proposal.existingEntity}
+            </div>
+            <pre className="codeblock">{proposal.existingBlock}</pre>
+            {proposal.isExactMatch && (
+              <div className="prop-existing-noop-hint">
+                Approve to confirm the redundant write, or reject to cancel.
+              </div>
+            )}
+          </div>
+        )}
         <div className="prop-block">
           <div className="prop-block-title">
             {proposal.transport === "cli" ? "IOS XE commands" : "WebUI steps"}

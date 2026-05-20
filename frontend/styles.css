@@ -1065,6 +1065,35 @@ button { font-family: inherit; }
   color: var(--ink-3);
 }
 
+.prop-existing-block {
+  /* Amber/warn tone — informational, NOT a danger refusal */
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+  padding-left: 12px;
+}
+
+.prop-existing-block .prop-block-title {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.prop-existing-block--noop {
+  /* Stronger emphasis: this is a no-op, the operator should pause */
+  border-left-color: color-mix(in srgb, var(--warn) 140%, var(--fail) 20%);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.prop-existing-block--noop .prop-block-title {
+  color: color-mix(in srgb, var(--warn) 130%, var(--fail) 10%);
+}
+
+.prop-existing-noop-hint {
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: var(--warn);
+  font-style: italic;
+}
+
 .codeblock {
   font-family: var(--mono);
   font-size: 12.5px;
