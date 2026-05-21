@@ -203,7 +203,14 @@ function ChatScreen({ pushPreview }) {
     if (!pending) return;
     setPhase("executing");
     try {
-      await window.api.executeAction(pending.actionId);
+      const resp = await window.api.executeAction(pending.actionId);
+      // For debug_sweep, the execute response carries a plain-English digest
+      // in resp.result.summary that the operator needs to see — without it
+      // the auto-debug flow is invisible. For regular write tools, no digest
+      // exists and we keep the propose's preview text as the title.
+      const digest = resp && resp.result && typeof resp.result.summary === "string"
+        ? resp.result.summary
+        : null;
       setMessages(m => [
         ...m,
         {
@@ -213,6 +220,7 @@ function ChatScreen({ pushPreview }) {
           actionId: pending.actionId,
           summary: pending.summary,
           verify: pending.verify,
+          digest: digest,
         },
       ]);
       setHistory(h => [{ ...pending, doneAt: new Date() }, ...h]);
@@ -452,6 +460,12 @@ function Message({ m }) {
               <div className="result-id">{m.actionId}</div>
             </div>
           </div>
+          {m.digest && (
+            <div className="result-digest">
+              <div className="result-digest-label">Diagnosis</div>
+              <div className="result-digest-text">{m.digest}</div>
+            </div>
+          )}
           <div className="result-body">
             <div className="result-row"><span>Verify</span><code>{m.verify}</code></div>
             <div className="result-row"><span>Snapshots</span><code>artifacts/device-snapshots/{m.actionId}/</code></div>

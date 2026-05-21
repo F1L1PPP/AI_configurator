@@ -511,16 +511,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "propose_debug_sweep",
         "description": (
-            "Propose a diagnostic show plan. Two modes: "
-            "(1) Reactive — pass failure_action_id of a previously failed action "
-            "(verify_failed or tool_failed) to draft 1-3 targeted `show` commands "
-            "that prove or refute the most likely failure causes. "
-            "(2) On-demand — call with no arguments (or failure_action_id omitted) "
-            "when the user asks to 'diagnose router state' — drafts a broader 4-6 "
-            "command health sweep. "
-            "Returns awaiting_approval; operator must APPROVE then EXECUTE. "
-            "All commands are read-only `show` commands — no router writes. "
-            "After execution, returns a plain-English digest synthesized by Haiku."
+            "Propose a diagnostic show plan. Two modes — pick based on the user's "
+            "most recent message:\n\n"
+            "(1) REACTIVE: when the user message looks like 'Please diagnose "
+            "action_id=act_XXX which failed at execute time: ...' (this is the "
+            "frontend's auto-debug trigger), you MUST extract the action_id token "
+            "(`act_YYYYMMDD_NNNNNN`) from the message and pass it as "
+            "`failure_action_id=act_XXX`. Drafts 1-3 NARROWED `show` commands "
+            "that re-query the specific failed change (e.g. for a failed `ip route` "
+            "write, the plan should include `show ip route static | include <prefix>` "
+            "— NOT a broad sweep). Failing to pass failure_action_id falls through "
+            "to a broad sweep, which loses the focused diagnosis the operator needs.\n\n"
+            "(2) ON-DEMAND: when the user explicitly asks for a broad sweep "
+            "(e.g. 'diagnose router state', 'debug my config', 'what's wrong'), "
+            "call with NO arguments. Drafts a broader 4-6 command health sweep.\n\n"
+            "Returns awaiting_approval; operator APPROVE+EXECUTE. All commands "
+            "are read-only `show` commands. After execution, returns a "
+            "plain-English digest synthesized by Haiku."
         ),
         "input_schema": {
             "type": "object",
@@ -528,8 +535,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "failure_action_id": {
                     "type": "string",
                     "description": (
-                        "action_id of the failed action to diagnose. "
-                        "Omit (or pass null) for an on-demand broad health sweep."
+                        "action_id of the failed action to diagnose, in the form "
+                        "`act_YYYYMMDD_NNNNNN`. MUST be extracted from the user's "
+                        "auto-debug message when one is present (e.g. message "
+                        "'Please diagnose action_id=act_20260521_ed8207 which "
+                        'failed...\' → pass `failure_action_id="act_20260521_ed8207"`). '
+                        "Omit ONLY for genuinely broad on-demand sweeps with no "
+                        "specific failure context."
                     ),
                 },
             },
