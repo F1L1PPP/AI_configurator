@@ -23,6 +23,7 @@ from backend.core.settings import get_settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    settings.validate_required_credentials()  # NEW: fail-fast on missing creds
     configure_logging(log_level=settings.log_level, logs_dir=settings.logs_dir)
     get_logger(__name__).info("startup", version="0.0.1")
     yield
