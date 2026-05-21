@@ -1413,6 +1413,10 @@ def _webui_configure(**kwargs: Any) -> dict:
             )
             return {
                 "error": "describe_failed",
+                "message": (
+                    new_view_result.get("message") if isinstance(new_view_result, dict) else None
+                )
+                or "describe_page returned no usable view",
                 "iteration": iteration,
                 "describe_error": new_view_result,
                 "completed_steps": executed_steps,

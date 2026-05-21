@@ -342,6 +342,30 @@ def _settle_page(page: Any) -> None:
         pass
 
 
+def _describe_with_retry(page: Any, max_attempts: int = 2) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Describe the page; on empty result, settle and retry up to max_attempts.
+
+    Cisco Angular pages can return an empty view if describe runs before
+    AngularJS finishes mounting controllers. Most pages settle in <500ms
+    after domcontentloaded, but the DHCP and OSPF detail forms have been
+    seen empty on the first call. Retry once after a fresh settle.
+
+    Returns whatever the last attempt produced — caller decides if an
+    empty view is still an error.
+    """
+    from backend.webui_agent.semantic_dom import describe_page  # noqa: PLC0415
+
+    for attempt_idx in range(max_attempts):
+        view, locator_map = describe_page(page)
+        elements = view.get("elements") or []
+        modals = view.get("modals") or []
+        if elements or modals:
+            return view, locator_map
+        if attempt_idx + 1 < max_attempts:
+            _settle_page(page)
+    return view, locator_map
+
+
 def _invoke_action(locator: Any, action: str, value: str | None) -> None:
     """Dispatch one Playwright action against ``locator``.
 
@@ -819,7 +843,6 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
     from backend.webui_agent.browser import webui_browser
     from backend.webui_agent.evidence import EvidenceCollector
     from backend.webui_agent.login import login
-    from backend.webui_agent.semantic_dom import describe_page
 
     action_id = str(init_payload.get("action_id") or "session")
     headless = init_payload.get("headless")
@@ -895,15 +918,16 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                             wait_until="domcontentloaded",
                             timeout=get_settings().webui_goto_timeout_ms,
                         )
+                        _settle_page(page)  # networkidle + fallback before first describe
                         # Label uses the path tail so screenshots stay scannable.
                         label_tail = raw_path.split("/")[-1] or "root"
                         ev.step(f"goto-{label_tail}", page)
-                        view, locator_map = describe_page(page)
+                        view, locator_map = _describe_with_retry(page, max_attempts=2)
                         current_view_id = view["view_id"]
                         _reply({"ok": True, "view": view})
 
                     elif op == "describe":
-                        view, locator_map = describe_page(page)
+                        view, locator_map = _describe_with_retry(page, max_attempts=2)
                         current_view_id = view["view_id"]
                         _reply({"ok": True, "view": view})
 
