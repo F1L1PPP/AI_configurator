@@ -95,7 +95,7 @@ def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) ->
 
     structlog.configure(
         processors=[
-            *shared_processors,
+            *shared_processors,  # type: ignore[list-item]
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
@@ -106,7 +106,7 @@ def configure_logging(log_level: str = "INFO", logs_dir: Path = Path("logs")) ->
 
     formatter = structlog.stdlib.ProcessorFormatter(
         processor=structlog.processors.JSONRenderer(),
-        foreign_pre_chain=shared_processors,
+        foreign_pre_chain=shared_processors,  # type: ignore[arg-type]
     )
 
     file_handler = _own(logging.FileHandler(log_file, encoding="utf-8"))

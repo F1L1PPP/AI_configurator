@@ -354,6 +354,40 @@ def test_propose_set_hostname_ssh_read_failure_soft_falls(monkeypatch):
     assert result["preview_meta"] is None
 
 
+# ---------------------------------------------------------------------------
+# Signature guard — review fix #7
+# ---------------------------------------------------------------------------
+
+
+def test_execute_tool_rejects_unexpected_params(monkeypatch):
+    """Stub accepting only (a, b) + unexpected extra key → bad_parameters."""
+
+    def _stub(a: int, b: int) -> dict:
+        return {"sum": a + b}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "show_version", _stub)
+    result = tr.execute_tool("show_version", {"a": 1, "b": 2, "extra_field": "boom"})
+    assert result["error"] == "bad_parameters"
+    assert "extra_field" in result["message"]
+
+
+def test_execute_tool_accepts_extras_for_kwargs_tools(monkeypatch):
+    """Tool using **kwargs must NOT be rejected — extras are fine."""
+
+    def _stub(**kwargs: object) -> dict:
+        return {"received": list(kwargs.keys())}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "show_version", _stub)
+    result = tr.execute_tool("show_version", {"a": 1, "unexpected": "ok"})
+    assert "error" not in result or result.get("error") != "bad_parameters"
+    assert "received" in result
+
+
+# ---------------------------------------------------------------------------
+# Existing conflict_detector tests (unchanged)
+# ---------------------------------------------------------------------------
+
+
 def test_propose_set_interface_ip_existing_attaches_conflict_fields(monkeypatch):
     """Non-SVI path: when running-config contains a matching interface stanza,
     conflict fields appear in preview_meta on both the returned dict and stored

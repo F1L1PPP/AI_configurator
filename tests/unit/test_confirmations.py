@@ -15,8 +15,12 @@ from backend.orchestration.confirmations import (
     ActionState,
     _actions,  # white-box: direct dict access for state setup
     _reset_for_testing,
+    approve_action,
+    get_action,
     propose_action,
     purge_terminal_actions_older_than,
+    try_begin_execution,
+    try_mark_failed_if_executing,
 )
 
 
@@ -86,3 +90,56 @@ def test_propose_action_triggers_lazy_purge():
 
     assert old_aid not in _actions, "Old terminal action should have been purged"
     assert new_aid in _actions, "New action must be present"
+
+
+# ---------------------------------------------------------------------------
+# try_mark_failed_if_executing — atomic CAS (review fix #5)
+# ---------------------------------------------------------------------------
+
+
+def test_try_mark_failed_if_executing_succeeds_when_executing():
+    """propose → approve → try_begin_execution → atomic CAS transitions to FAILED."""
+    aid = propose_action("tool_x", {"k": "v"})
+    approve_action(aid)
+    try_begin_execution(aid)
+
+    action = try_mark_failed_if_executing(aid, {"error": "boom"})
+
+    assert action is not None
+    assert action["state"] == ActionState.FAILED
+    # Result attached on the stored action
+    stored = get_action(aid)
+    assert stored["result"] == {"error": "boom"}
+
+
+def test_try_mark_failed_if_executing_returns_none_when_not_executing():
+    """PROPOSED state → CAS must not fire; returns None; state unchanged."""
+    aid = propose_action("tool_y", {"k": "v"})
+
+    result = try_mark_failed_if_executing(aid, {"error": "irrelevant"})
+
+    assert result is None
+    assert get_action(aid)["state"] == ActionState.PROPOSED
+
+
+def test_try_mark_failed_if_executing_returns_none_on_unknown_action():
+    """Bogus action_id → returns None instead of raising KeyError."""
+    result = try_mark_failed_if_executing("act_bogus_does_not_exist")
+    assert result is None
+
+
+def test_try_mark_failed_if_executing_persists_result_atomically():
+    """Successful CAS with a result dict → get_action["result"] returns a
+    deep copy (not the same object reference)."""
+    aid = propose_action("tool_z", {"k": "v"})
+    approve_action(aid)
+    try_begin_execution(aid)
+
+    original = {"nested": {"key": "val"}}
+    try_mark_failed_if_executing(aid, original)
+
+    stored_result = get_action(aid)["result"]
+    assert stored_result == original
+    # Must be a deep copy — mutating original must not affect stored result
+    original["nested"]["key"] = "mutated"
+    assert get_action(aid)["result"]["nested"]["key"] == "val"

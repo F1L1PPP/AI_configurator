@@ -24,10 +24,10 @@ from backend.orchestration.confirmations import (
     WrongState,
     approve_action,
     get_action,
-    get_state,
     mark_failed,
     reject_action,
     try_begin_execution,
+    try_mark_failed_if_executing,
 )
 from backend.orchestration.tool_registry import execute_tool
 
@@ -210,9 +210,10 @@ async def execute(action_id: str) -> dict:
         # tool's mark_failed may have already moved us — be idempotent.
         # Pass the structured result dict so debug_sweep can retrieve it
         # later via get_action(action_id)["result"].
-        if get_state(action_id) is not None and get_state(action_id).value == "EXECUTING":
-            with contextlib.suppress(KeyError):
-                mark_failed(action_id, result if isinstance(result, dict) else None)
+        try_mark_failed_if_executing(
+            action_id,
+            result if isinstance(result, dict) else None,
+        )
         status = _ERROR_TO_STATUS.get(err_key, 500)
         message = result.get("message") if isinstance(result, dict) else None
         log.warning(

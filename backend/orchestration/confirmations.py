@@ -241,6 +241,26 @@ def mark_executed(action_id: str) -> dict:
     return _transition(action_id, ActionState.EXECUTED)
 
 
+def try_mark_failed_if_executing(action_id: str, result: dict | None = None) -> dict | None:
+    """Atomic CAS: transition EXECUTING -> FAILED if currently EXECUTING, else no-op.
+
+    Returns the transitioned action on success; None if state was not EXECUTING
+    or action doesn't exist (idempotent — another caller may have already moved
+    the state). Persists the result dict on the action atomically with the
+    transition so debug_sweep can retrieve it via get_action(...)["result"].
+    """
+    try:
+        action = _transition_if(action_id, {ActionState.EXECUTING}, ActionState.FAILED)
+    except (KeyError, WrongState):
+        return None
+    # Result persistence under the same lock to keep the (state, result) pair
+    # atomic from a reader's perspective.
+    with _lock:
+        if action_id in _actions:
+            _actions[action_id]["result"] = copy.deepcopy(result) if result is not None else None
+    return action
+
+
 def mark_failed(action_id: str, result: dict | None = None) -> dict:
     """Transition to FAILED. Optionally persist a result dict on the action
     so that debug_sweep can retrieve it later via get_action(action_id)["result"].

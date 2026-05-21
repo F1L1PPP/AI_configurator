@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import inspect
 import json
 import re
 from collections.abc import Callable
@@ -1720,6 +1721,33 @@ def execute_tool(name: str, params: dict[str, Any]) -> dict:
             }
 
     func = _TOOL_FUNCS[name]
+
+    # Signature guard — refuse to splat params containing keys the target
+    # function doesn't accept. Catches the bug class where display-only fields
+    # leaked into action["params"] instead of preview_meta. The propose path
+    # enforces preview_meta separation, but this layer is defense-in-depth.
+    sig = inspect.signature(func)
+    has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if not has_var_keyword:
+        accepted = set(sig.parameters.keys())
+        extras = set(params.keys()) - accepted
+        if extras:
+            log.warning(
+                "tool_unexpected_params",
+                tool=name,
+                unexpected=sorted(extras),
+                accepted=sorted(accepted),
+            )
+            return {
+                "error": "bad_parameters",
+                "message": (
+                    f"execute_tool({name}) called with unexpected params: "
+                    f"{sorted(extras)}. Function accepts: {sorted(accepted)}. "
+                    "This usually means a display-only field was placed in "
+                    "action['params'] instead of preview_meta."
+                ),
+            }
+
     try:
         result = func(**params)
     except NotApproved as exc:
