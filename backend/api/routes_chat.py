@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from backend.core.logging import get_logger
 from backend.orchestration.planner import PlannerEvent, run_planner
+from backend.webui_agent.generic_driver import close_all_sessions
 
 log = get_logger(__name__)
 
@@ -136,6 +137,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
             status_code=500,
             detail=f"planner failed ({type(exc).__name__}): {exc}",
         ) from exc
+    finally:
+        # Every planner turn ends here. Close any Playwright sessions
+        # propose_webui_configure may have launched, so we don't leak
+        # Chromium child processes between chats. Idempotent + safe to
+        # call when no sessions exist.
+        close_all_sessions()
 
     return ChatResponse(
         final_text=result.final_text,
