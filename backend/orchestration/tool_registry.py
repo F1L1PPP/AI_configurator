@@ -16,6 +16,7 @@ Design notes:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -126,6 +127,11 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         # CLI AI configure — Haiku drafts IOS XE commands, denylist + human
         # approval gate, Netmiko applies, regex-verifies post-state.
         "cli_configure",
+        # Chunk 12 — diagnostic sweep executor. Read-only (show commands only),
+        # but gated behind the same two-click Approve+Execute contract so the
+        # operator sees and controls every sweep. propose_debug_sweep →
+        # APPROVE → debug_sweep.
+        "debug_sweep",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -497,6 +503,54 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "action_id": {
                     "type": "string",
                     "description": "Action ID from the matching propose_cli_configure call.",
+                },
+            },
+            "required": ["action_id"],
+        },
+    },
+    {
+        "name": "propose_debug_sweep",
+        "description": (
+            "Propose a diagnostic show plan. Two modes: "
+            "(1) Reactive — pass failure_action_id of a previously failed action "
+            "(verify_failed or tool_failed) to draft 1-3 targeted `show` commands "
+            "that prove or refute the most likely failure causes. "
+            "(2) On-demand — call with no arguments (or failure_action_id omitted) "
+            "when the user asks to 'diagnose router state' — drafts a broader 4-6 "
+            "command health sweep. "
+            "Returns awaiting_approval; operator must APPROVE then EXECUTE. "
+            "All commands are read-only `show` commands — no router writes. "
+            "After execution, returns a plain-English digest synthesized by Haiku."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "failure_action_id": {
+                    "type": "string",
+                    "description": (
+                        "action_id of the failed action to diagnose. "
+                        "Omit (or pass null) for an on-demand broad health sweep."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "debug_sweep",
+        "description": (
+            "Execute a previously-approved diagnostic show plan. Requires an "
+            "action_id from a propose_debug_sweep call that has been APPROVED by "
+            "the human. Runs each show command via SSH, collects raw outputs, and "
+            "asks Haiku to synthesize a plain-English digest. Read-only — never "
+            "modifies the router."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "Action ID from the matching propose_debug_sweep call.",
                 },
             },
             "required": ["action_id"],
@@ -1447,6 +1501,130 @@ def _webui_configure(**kwargs: Any) -> dict:
         plan = next_plan
 
 
+def _propose_debug_sweep(**kwargs: Any) -> dict:
+    """Propose a diagnostic show plan. Reactive (failure_action_id set) or
+    on-demand (None). Returns awaiting_approval shape."""
+    from backend.orchestration.confirmations import get_action
+    from backend.orchestration.debug_planner import draft_debug_plan, draft_debug_sweep
+
+    failure_action_id: str | None = kwargs.get("failure_action_id") or None
+
+    failure_context: dict | None = None
+    if failure_action_id:
+        try:
+            failed_action = get_action(failure_action_id)
+        except KeyError:
+            return {
+                "error": "unknown_action",
+                "message": f"no action {failure_action_id!r}",
+            }
+        # Pull the stored result dict (set by mark_failed extension)
+        failure_context = failed_action.get("result") or None
+        if failure_context is None:
+            # Action exists but no result stored (e.g. action never failed).
+            # Surface cleanly rather than drafting a diagnosis for nothing.
+            return {
+                "error": "no_failure_to_diagnose",
+                "message": f"action {failure_action_id!r} has no stored failure context",
+            }
+
+    try:
+        drafted = draft_debug_plan(failure_context) if failure_context else draft_debug_sweep()
+    except Exception as exc:
+        log.error("propose_debug_sweep_draft_failed", error=str(exc))
+        return {"error": "draft_failed", "message": str(exc)}
+
+    commands = drafted.get("commands") or []
+    if not commands:
+        return {
+            "error": "no_diagnostic_plan",
+            "message": drafted.get("summary_intent") or "Could not draft a diagnostic plan",
+        }
+
+    # Validate each command starts with `show ` for safety (defense in depth)
+    for cmd in commands:
+        if not isinstance(cmd, str) or not cmd.strip().lower().startswith("show "):
+            return {
+                "error": "unsafe_command",
+                "message": f"diagnostic plan included non-show command: {cmd!r}",
+            }
+
+    params = {
+        "commands": commands,
+        "failure_action_id": failure_action_id,  # may be None for on-demand
+    }
+    action_id = propose_action("debug_sweep", params, preview_meta=None)
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "debug_sweep",
+        "preview": {
+            "intent": drafted.get("summary_intent", "Diagnose router state"),
+            "commands": commands,
+            "risk": drafted.get("risk", "low — read-only show commands"),
+        },
+        "next_step": _NEXT_STEP_INLINE,
+        "commands": commands,
+        "preview_meta": None,
+    }
+
+
+def _debug_sweep(**kwargs: Any) -> dict:
+    """Execute the approved diagnostic show plan. Runs each show via
+    read_tools._run, collects outputs, hands them + failure context to
+    Haiku for a digest. Returns the digest as the chat reply text."""
+    from backend.orchestration.confirmations import get_action
+    from backend.orchestration.debug_planner import draft_debug_summary
+
+    action_id = kwargs.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        return {"error": "bad_parameters", "message": "action_id required"}
+    try:
+        action = get_action(action_id)
+    except KeyError:
+        return {"error": "unknown_action", "message": f"no action {action_id!r}"}
+
+    params = action.get("params", {})
+    commands = params.get("commands") or []
+    failure_action_id = params.get("failure_action_id")
+
+    # Pull the original failure context if reactive
+    failure_context = None
+    if failure_action_id:
+        with contextlib.suppress(KeyError):
+            failure_context = (get_action(failure_action_id).get("result")) or None
+
+    # Run each show command via _run (use_textfsm=False — diagnostic
+    # plans want the raw text, not parsed dicts). Cap individual output
+    # at 4000 chars to keep prompt cost bounded.
+    outputs: dict[str, str] = {}
+    for cmd in commands:
+        try:
+            raw = read_tools._run(cmd, use_textfsm=False)
+            outputs[cmd] = str(raw)[:4000]
+        except Exception as exc:
+            outputs[cmd] = f"<execution failed: {exc}>"
+
+    try:
+        digest = draft_debug_summary(outputs, failure_context)
+    except Exception as exc:
+        log.error("debug_sweep_summary_failed", error=str(exc))
+        digest = (
+            "Diagnostic outputs collected but the summary LLM call failed. "
+            "Raw outputs follow:\n\n" + "\n\n".join(f"{c}:\n{o}" for c, o in outputs.items())
+        )
+
+    return {
+        "tool": "debug_sweep",
+        "summary": digest,
+        "raw_outputs": outputs,
+        # No snapshot_post — debug_sweep is read-only. The applied-event
+        # heuristic in planner.py checks snapshot_post so it naturally
+        # won't emit `applied` for this tool. That's correct — the
+        # digest IS the operator-visible result.
+    }
+
+
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "show_version": read_tools.show_version,
     "show_ip_interface_brief": read_tools.show_ip_interface_brief,
@@ -1473,6 +1651,11 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     # at propose AND execute time.
     "propose_cli_configure": _propose_cli_configure,
     "cli_configure": _cli_configure,
+    # Chunk 12 — diagnostic sweep. propose_debug_sweep drafts the plan
+    # (reactive: failure_action_id set, or on-demand: no arg). debug_sweep
+    # executes the approved show commands and returns a Haiku digest.
+    "propose_debug_sweep": _propose_debug_sweep,
+    "debug_sweep": _debug_sweep,
 }
 
 

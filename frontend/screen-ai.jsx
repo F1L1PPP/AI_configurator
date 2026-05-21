@@ -220,8 +220,19 @@ function ChatScreen({ pushPreview }) {
       setPhase("done");
       setTimeout(() => setPhase("idle"), 1200);
     } catch (err) {
-      setMessages(m => [...m, { role: "system", text: "Execute failed: " + (err?.message || String(err)) }]);
+      var msg = err?.message || String(err);
+      setMessages(m => [...m, { role: "system", text: "Execute failed: " + msg }]);
       setPhase("idle");
+      // Reactive auto-debug: if the failure is one of the structured error
+      // keys we know how to diagnose, automatically kick off a follow-up
+      // chat that surfaces a diagnostic proposal. Limited to verify_failed
+      // and tool_failed so generic 500s / network errors don't loop.
+      if (typeof msg === "string" && (msg.indexOf("verify_failed") >= 0 || msg.indexOf("tool_failed") >= 0)) {
+        var failedActionId = pending && pending.actionId;
+        if (failedActionId) {
+          send("Please diagnose action_id=" + failedActionId + " which failed at execute time: " + msg);
+        }
+      }
     }
   };
 
@@ -240,6 +251,7 @@ function ChatScreen({ pushPreview }) {
     "change hostname to LAB-R1",
     "set GigabitEthernet0/1 to 192.168.10.1/24",
     "how do I configure a trunk port?",
+    "Diagnose router state",
   ]);
   React.useEffect(() => {
     window.api.fetchSuggestions().then((chips) => {

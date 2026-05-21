@@ -208,9 +208,11 @@ async def execute(action_id: str) -> dict:
     if err_key is not None:
         # Only flip to FAILED if we're still in EXECUTING. The write
         # tool's mark_failed may have already moved us — be idempotent.
+        # Pass the structured result dict so debug_sweep can retrieve it
+        # later via get_action(action_id)["result"].
         if get_state(action_id) is not None and get_state(action_id).value == "EXECUTING":
             with contextlib.suppress(KeyError):
-                mark_failed(action_id)
+                mark_failed(action_id, result if isinstance(result, dict) else None)
         status = _ERROR_TO_STATUS.get(err_key, 500)
         message = result.get("message") if isinstance(result, dict) else None
         log.warning(

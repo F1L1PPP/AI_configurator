@@ -726,7 +726,7 @@ def cli_configure(
                 f"Verify `{verify_command}` did not match `{verify_pattern}`."
             )
         else:
-            output_snippet = verify_output[:200].replace("\n", " | ").strip()
+            output_snippet = verify_output[:400].replace("\n", " | ").strip()
             message = (
                 f"Verify `{verify_command}` ran but its output did not match "
                 f"`{verify_pattern}`. Output preview: {output_snippet!r}"
@@ -737,7 +737,7 @@ def cli_configure(
             "tool": "cli_configure",
             "verify_command": verify_command,
             "verify_pattern": verify_pattern,
-            "verify_output_preview": verify_output[:1000],
+            "verify_output_preview": verify_output[:3000],
             "config_output": config_output,
             "device_errors": device_errors,
             "snapshot_pre": str(pre_dir),

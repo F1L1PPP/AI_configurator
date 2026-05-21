@@ -200,8 +200,17 @@ def mark_executed(action_id: str) -> dict:
     return _transition(action_id, ActionState.EXECUTED)
 
 
-def mark_failed(action_id: str) -> dict:
-    return _transition(action_id, ActionState.FAILED)
+def mark_failed(action_id: str, result: dict | None = None) -> dict:
+    """Transition to FAILED. Optionally persist a result dict on the action
+    so that debug_sweep can retrieve it later via get_action(action_id)["result"].
+
+    Backward-compatible: existing callers that pass no `result` get the old behaviour.
+    """
+    transitioned = _transition(action_id, ActionState.FAILED)
+    with _lock:
+        if action_id in _actions:
+            _actions[action_id]["result"] = copy.deepcopy(result) if result is not None else None
+    return transitioned
 
 
 def is_approved(action_id: str) -> bool:

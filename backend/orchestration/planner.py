@@ -153,6 +153,11 @@ Write — generic WebUI (for anything beyond fast paths: OSPF, RIP, ACLs, DHCP, 
 static routes, trunk VLANs, advanced interface settings, etc.):
 - propose_webui_configure -> webui_configure
 
+Diagnostic:
+- propose_debug_sweep -> debug_sweep — drafts a diagnostic show plan; use \
+reactively after verify_failed/tool_failed (pass failure_action_id), OR \
+on-demand when the user asks to diagnose the router state (no argument).
+
 All write paths are two-step: always propose first, wait for human approval.
 
 **Path choice for VLAN add and hostname change:** the user picks. If the
@@ -261,6 +266,16 @@ and mention that WebUI is also available for visible evidence.
      config likely landed but verify miss-matched; surface the error
      and let the operator inspect snapshots/screenshots. Do NOT
      propose the same change again.
+
+   **Exception — reactive auto-debug**: if the failing tool returned
+   `error: "verify_failed"` or `error: "tool_failed"` and you have
+   access to the failed `action_id` (from the tool_result envelope or
+   the user's message), you MUST call
+   `propose_debug_sweep(failure_action_id="<the failed action id>")`
+   BEFORE writing your final answer. Do NOT speculate about the failure
+   in chat text — surface the structured diagnostic proposal instead.
+   After the diagnostic proposal is approved + executed, THEN you may
+   provide a final-answer explanation that cites the diagnostic findings.
 
    The error message is for the human to read and decide what to do
    (narrow the intent, switch path, or skip). Retrying blindly is the
