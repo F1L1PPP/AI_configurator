@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     rag_chunk_tokens: int = Field(default=250, alias="RAG_CHUNK_TOKENS")
     rag_chunk_overlap: int = Field(default=30, alias="RAG_CHUNK_OVERLAP")
 
+    # WebUI Playwright timeout — promote from hardcoded 20 s so slow routers
+    # or flaky networks can be tuned via env without a code change.
+    webui_goto_timeout_ms: int = Field(default=20_000, alias="WEBUI_GOTO_TIMEOUT_MS")
+
+    # WebSocket strict-origin mode (review fix #14).
+    # False (default): missing-origin connections are allowed (covers TestClient,
+    # curl, and other non-browser clients used during local development).
+    # True: missing OR foreign origin → rejected with 1008 Policy Violation.
+    ws_strict_origin: bool = Field(default=False, alias="WS_STRICT_ORIGIN")
+
     def validate_required_credentials(self) -> None:
         """Raise ValueError listing every required credential that is missing.
 

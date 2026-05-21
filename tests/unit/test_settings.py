@@ -130,3 +130,16 @@ def test_validate_required_credentials_ignores_non_required_fields():
     s = _make_settings(LOG_LEVEL="")
     # Should not raise
     s.validate_required_credentials()
+
+
+# ---------------------------------------------------------------------------
+# New fields — chunk D polish batch (#9, #14)
+# ---------------------------------------------------------------------------
+
+
+def test_new_polish_fields_have_expected_defaults():
+    """webui_goto_timeout_ms and ws_strict_origin must match their spec defaults."""
+    with patch.dict(os.environ, {}, clear=True):
+        s = Settings(_env_file=None)
+    assert s.webui_goto_timeout_ms == 20_000
+    assert s.ws_strict_origin is False

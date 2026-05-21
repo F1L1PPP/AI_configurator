@@ -42,24 +42,31 @@ async def ws_agent(ws: WebSocket) -> None:
     # generally omit it.
     #
     # Policy:
-    #  - Origin missing  → allowed (covers TestClient + local debugging
-    #                     with curl --include-header). Logged at INFO
-    #                     so a sudden surge of non-browser connects is
-    #                     visible in the audit log.
+    #  - Origin missing  → allowed by default (covers TestClient + local
+    #                     debugging with curl). Logged at INFO so a surge
+    #                     of non-browser connects is visible in the audit
+    #                     log. When ws_strict_origin=True, missing origin
+    #                     is rejected with 1008 (same as foreign origin).
     #  - Origin foreign  → rejected with 1008 Policy Violation, the
     #                     equivalent of a CORS preflight failure.
     #  - Origin allowed  → proceeds normally.
     #
-    # If we later deploy beyond localhost, flip this to strict mode
-    # (reject missing OR foreign) and add a settings.ws_strict_origin
-    # toggle so the dev workflow doesn't break.
+    # Strict mode is opt-in via settings.ws_strict_origin (default False).
+    # Set WS_STRICT_ORIGIN=true in .env when deploying beyond localhost.
     origin = ws.headers.get("origin", "")
-    allowed = set(get_settings().allowed_origins)
+    settings = get_settings()
+    allowed = set(settings.allowed_origins)
+    strict = settings.ws_strict_origin
+
     if origin and origin not in allowed:
-        log.warning("ws_agent_origin_rejected", origin=origin)
+        log.warning("ws_agent_origin_rejected", origin=origin, strict=strict)
         await ws.close(code=_CLOSE_POLICY_VIOLATION, reason="origin not allowed")
         return
     if not origin:
+        if strict:
+            log.warning("ws_agent_origin_missing_rejected_strict")
+            await ws.close(code=_CLOSE_POLICY_VIOLATION, reason="origin header required")
+            return
         log.info("ws_agent_origin_missing", note="non-browser client or local debug tool")
 
     await ws.accept()

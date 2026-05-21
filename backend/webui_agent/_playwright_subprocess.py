@@ -884,11 +884,17 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                     _relogin_if_needed(page)
 
                     if op == "open":
+                        from backend.core.settings import get_settings  # noqa: PLC0415,I001 — lazy import
+
                         raw_path = str(msg["path"])
                         target = _resolve_target_url(page, raw_path)
                         # wait_until="domcontentloaded" so we don't time out on
                         # third-party network calls; Angular renders after.
-                        page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+                        page.goto(
+                            target,
+                            wait_until="domcontentloaded",
+                            timeout=get_settings().webui_goto_timeout_ms,
+                        )
                         # Label uses the path tail so screenshots stay scannable.
                         label_tail = raw_path.split("/")[-1] or "root"
                         ev.step(f"goto-{label_tail}", page)
