@@ -71,14 +71,31 @@ def test_chat_returns_503_on_overloaded_error(client):
 
 
 def _stub_planner_result():
-    """Minimal PlannerResult-shaped object for success-path tests."""
+    """Minimal PlannerResult-shaped object for success-path tests (no pending approval)."""
     from backend.orchestration.planner import PlannerResult
 
     return PlannerResult(final_text="ok", events=[], messages=[], stop_reason="end_turn")
 
 
+def _stub_planner_result_with_approval(action_id: str = "act_test_123"):
+    """PlannerResult with an awaiting_approval event — simulates propose_webui_configure."""
+    from backend.orchestration.planner import PlannerEvent, PlannerResult
+
+    approval_event = PlannerEvent(kind="awaiting_approval", data={"action_id": action_id})
+    return PlannerResult(
+        final_text="Proposed. Please approve.",
+        events=[approval_event],
+        messages=[],
+        stop_reason="end_turn",
+    )
+
+
 def test_chat_closes_sessions_on_success(client):
-    """Successful planner call → close_all_sessions must be invoked once."""
+    """Successful planner call with no pending approval → close_all_sessions called once.
+
+    Chunk A2: the conditional close must fire when awaiting_approval is None
+    (no proposal pending). This is the baseline non-proposal path.
+    """
     with (
         patch("backend.api.routes_chat.run_planner", return_value=_stub_planner_result()),
         patch("backend.api.routes_chat.close_all_sessions") as mock_close,
@@ -86,11 +103,15 @@ def test_chat_closes_sessions_on_success(client):
         response = client.post("/api/chat", json={"message": "hi", "history": []})
 
     assert response.status_code == 200
+    assert response.json()["awaiting_approval"] is None
     mock_close.assert_called_once()
 
 
 def test_chat_closes_sessions_on_exception(client):
-    """Planner raises → exception propagates as HTTP error AND close_all_sessions still called."""
+    """Planner raises → exception propagates as HTTP error AND close_all_sessions still called.
+
+    Exception path never sets keep_sessions_for_approval, so the finally always closes.
+    """
     with (
         patch(
             "backend.api.routes_chat.run_planner",
@@ -102,3 +123,24 @@ def test_chat_closes_sessions_on_exception(client):
 
     assert response.status_code == 503
     mock_close.assert_called_once()
+
+
+def test_chat_keeps_sessions_when_awaiting_approval(client):
+    """Planner returns a proposal with awaiting_approval → close_all_sessions NOT called.
+
+    Chunk A2: propose→execute multi-turn flow. The Playwright session opened
+    by propose_webui_configure must survive the /api/chat response so that
+    /api/execute can reuse it via the session_id stored in the action params.
+    """
+    with (
+        patch(
+            "backend.api.routes_chat.run_planner",
+            return_value=_stub_planner_result_with_approval("act_test_999"),
+        ),
+        patch("backend.api.routes_chat.close_all_sessions") as mock_close,
+    ):
+        response = client.post("/api/chat", json={"message": "configure dhcp", "history": []})
+
+    assert response.status_code == 200
+    assert response.json()["awaiting_approval"] == "act_test_999"
+    mock_close.assert_not_called()
