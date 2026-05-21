@@ -136,3 +136,37 @@ with portfast enabled.
 Total time on console: ~30 minutes including the laptop DHCP lease and WebUI
 walk. No surprises — clean baseline behaves exactly as planned.
 ```
+
+---
+
+## Hardware quirk: C1111-4P `Gi0/1/x` ports are L2-only
+
+The four `GigabitEthernet0/1/0` … `GigabitEthernet0/1/3` ports on the C1111-4P
+are **hardware switchports** — they are wired to the on-board EtherSwitch
+module, not the routing engine. They cannot carry an L3 `ip address` directly.
+IOS XE will reject `ip address` on these ports with `% Invalid input detected
+at '^' marker.` even when the syntax looks fine.
+
+The `set_interface_ip` write tool inserts `no switchport` ahead of `ip address`
+to convert the port to a routed L3 interface when the chassis allows it. On
+the C1111-4P that conversion is **not supported on `Gi0/1/x`** — the SSH
+session returns cleanly but the IP never lands. Surfaced 2026-05-18 (`Gi0/1/3`
+silently rejected during a `set_interface_ip` call); `_check_netmiko_output_
+for_errors` and `_verify_running_config` in `backend/cli_agent/write_tools.py`
+now catch this and raise `WriteRejectedError` instead of returning success.
+
+**Right pattern for the L2 ports on this chassis** — assign the address to
+the SVI, then put the port in that VLAN:
+
+```
+interface vlan 40
+ ip address 192.168.40.1 255.255.255.0
+ no shutdown
+!
+interface GigabitEthernet0/1/3
+ switchport mode access
+ switchport access vlan 40
+```
+
+Only `Gi0/0/0` (WAN) is a routed L3 port out of the box — that one takes
+`ip address` directly as expected.

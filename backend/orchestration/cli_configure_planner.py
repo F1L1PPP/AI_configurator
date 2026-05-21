@@ -198,7 +198,7 @@ def draft_cli_plan(
     Raises RuntimeError on LLM call failure or JSON parse failure.
     """
     if client is None:
-        client = Anthropic(api_key=get_settings().anthropic_api_key)
+        client = Anthropic(api_key=get_settings().anthropic_api_key, max_retries=5)
 
     chunks_blob = "\n\n".join(c.get("text", "") for c in rag_chunks)
 

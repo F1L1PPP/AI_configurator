@@ -7,7 +7,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.api import routes_approvals, routes_chat, routes_devices, routes_logs, routes_ws
+from backend.api import (
+    routes_approvals,
+    routes_chat,
+    routes_devices,
+    routes_logs,
+    routes_snapshots,
+    routes_suggestions,
+    routes_ws,
+)
 from backend.core.logging import configure_logging, get_logger
 from backend.core.settings import get_settings
 
@@ -38,6 +46,8 @@ app.include_router(routes_approvals.router)
 app.include_router(routes_chat.router)
 app.include_router(routes_ws.router)
 app.include_router(routes_devices.router)
+app.include_router(routes_snapshots.router)
+app.include_router(routes_suggestions.router)
 
 
 @app.get("/healthz")

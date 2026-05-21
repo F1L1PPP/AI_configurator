@@ -19,10 +19,12 @@ from __future__ import annotations
 import ipaddress
 import re
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from backend.cli_agent.connection import pool
 from backend.cli_agent.snapshots import take_snapshot
+from backend.core.eventbus import bus
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
 from backend.orchestration.confirmations import (
@@ -38,6 +40,26 @@ log = get_logger(__name__)
 # configs, short enough that a hung SSH session doesn't pin a FastAPI worker
 # indefinitely.
 CONFIG_READ_TIMEOUT_S = 30
+
+
+class WriteRejectedError(RuntimeError):
+    """Raised when an approved write didn't actually land on the device.
+
+    Two failure modes converge here:
+      1. IOS XE returned a `% ...` error line during the config push but the
+         SSH session itself returned cleanly (e.g. `ip address` on a hardware
+         L2-only switchport — Netmiko sees a clean return, the agent thinks
+         it succeeded, the router silently rejected the command).
+      2. The post-write `show running-config` / `show vlan brief` did not
+         contain the expected change (no_op write, race-rolled-back change,
+         or a feature licence gate the agent didn't know about).
+
+    On both paths: a forensic post-snapshot is captured, the action is
+    marked FAILED, and the exception propagates. Per CLAUDE.md "On any
+    error during the config push: log, mark the action FAILED, re-raise.
+    Never auto-retry a write." Recovery is a separate human-approved action.
+    """
+
 
 # Cisco IOS hostname grammar: 1-63 chars, must start with letter, then
 # letters/digits/hyphens. Rejects newlines, spaces, semicolons — the things
@@ -249,6 +271,92 @@ def _guard(action_id: str) -> None:
         )
 
 
+def _emit_cli_commands(
+    tool: str,
+    action_id: str,
+    commands: list[str],
+    mode: str = "config",
+) -> None:
+    """Publish one `cli_command_sent` event per CLI line so the chat live
+    event stream can show what the agent is typing at the IOS prompt.
+
+    Netmiko's `send_config_set` is a single round-trip — there's no actual
+    per-line wire delay we can hook into without rewriting the SSH layer.
+    Emitting the events here, just before the call, gives the operator
+    line-by-line visibility into the same buffered batch. Cosmetic
+    line-by-line pacing is applied client-side (see ChatProvider in
+    app.jsx).
+
+    `mode` is `"config"` for `send_config_set` calls and `"exec"` for
+    `send_command` / post-write verify reads.
+    """
+    total = len(commands)
+    ts_iso = datetime.now(UTC).isoformat()
+    for idx, cmd in enumerate(commands, start=1):
+        bus.publish(
+            {
+                "type": "cli_command_sent",
+                "ts": ts_iso,
+                "data": {
+                    "tool": tool,
+                    "action_id": action_id,
+                    "command": cmd,
+                    "command_index": idx,
+                    "command_total": total,
+                    "mode": mode,
+                },
+            }
+        )
+
+
+def _check_netmiko_output_for_errors(output: str) -> None:
+    """Raise WriteRejectedError if Netmiko config output contains IOS XE
+    error markers ('%' line prefix). IOS XE returns from the SSH session
+    cleanly even when individual config commands are rejected — so a clean
+    `send_config_set` return is NOT proof the change landed. Scan the
+    buffered output to surface silent rejections.
+
+    Mirrors the `%`-line extraction in `cli_configure` so the same family
+    of failure (e.g. router-id-in-use, ip-on-switchport, malformed param)
+    surfaces consistently across fast-path and AI-drafted writes.
+    """
+    errors = [line.strip() for line in (output or "").splitlines() if line.strip().startswith("%")]
+    if errors:
+        raise WriteRejectedError(
+            "device rejected one or more config commands: " + " | ".join(errors)
+        )
+
+
+def _verify_running_config(verify_command: str, verify_pattern: str, tool: str) -> str:
+    """Re-fetch the device state and assert `verify_pattern` matches.
+
+    `verify_command` is a `show ...` query run in EXEC mode (Netmiko's
+    send_config_set already exits config mode). `verify_pattern` is a
+    Python regex matched with `re.MULTILINE` so `^` / `$` work line-wise.
+
+    Raises WriteRejectedError on SSH failure during verify OR on regex
+    miss. Returns the verify output on success (for inclusion in the
+    tool's result dict).
+    """
+    # action_id isn't in scope here — emit with '-' so the live stream
+    # still shows what the verify is running, even if it can't cross-
+    # reference back to a specific action.
+    _emit_cli_commands(tool, "-", [verify_command], mode="exec")
+    try:
+        conn = _get_conn()
+        verify_output: str = conn.send_command(verify_command, read_timeout=60)
+    except Exception as exc:
+        raise WriteRejectedError(f"{tool} post-write verify SSH read failed: {exc}") from exc
+
+    if not re.search(verify_pattern, verify_output, re.MULTILINE):
+        raise WriteRejectedError(
+            f"{tool} post-write verify missed: `{verify_command}` did not "
+            f"contain expected change (pattern={verify_pattern!r}, "
+            f"output preview={verify_output[:200]!r})"
+        )
+    return verify_output
+
+
 # ---------------------------------------------------------------------------
 # Write tools
 # ---------------------------------------------------------------------------
@@ -268,13 +376,11 @@ def set_hostname(new_name: str, action_id: str) -> dict:
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    cmds = [f"hostname {new_name}"]
+    _emit_cli_commands("set_hostname", action_id, cmds, mode="config")
     try:
         conn = _get_conn()
-        output: str = conn.send_config_set(
-            [f"hostname {new_name}"],
-            read_timeout=CONFIG_READ_TIMEOUT_S,
-        )
-        ms = int((time.monotonic() - t0) * 1000)
+        output: str = conn.send_config_set(cmds, read_timeout=CONFIG_READ_TIMEOUT_S)
     except Exception as exc:
         mark_failed(action_id)
         log.error(
@@ -286,11 +392,32 @@ def set_hostname(new_name: str, action_id: str) -> dict:
         raise  # never auto-retry
 
     # Hostname change alters the router prompt. Invalidate the pooled
-    # connection so the next call reconnects and detects the new prompt.
+    # connection so the verify read (and any subsequent caller) reconnects
+    # against the new prompt.
     s = get_settings()
     pool.invalidate(s.router_host, s.router_ssh_user)
 
-    post_dir: Path = take_snapshot(action_id, "post")
+    try:
+        _check_netmiko_output_for_errors(output)
+        _verify_running_config(
+            verify_command="show running-config | include hostname",
+            verify_pattern=rf"^hostname {re.escape(new_name)}\s*$",
+            tool="set_hostname",
+        )
+    except WriteRejectedError as exc:
+        post_dir = take_snapshot(action_id, "post")  # preserve forensic diff
+        mark_failed(action_id)
+        log.error(
+            "write_rejected",
+            tool="set_hostname",
+            action_id=action_id,
+            snapshot_post=str(post_dir),
+            error=str(exc),
+        )
+        raise
+
+    ms = int((time.monotonic() - t0) * 1000)
+    post_dir = take_snapshot(action_id, "post")
     mark_executed(action_id)
 
     log.info(
@@ -339,18 +466,16 @@ def set_interface_ip(
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    cmds = [
+        f"interface {interface}",
+        " no switchport",
+        f" ip address {ip} {mask}",
+        " no shutdown",
+    ]
+    _emit_cli_commands("set_interface_ip", action_id, cmds, mode="config")
     try:
         conn = _get_conn()
-        output: str = conn.send_config_set(
-            [
-                f"interface {interface}",
-                " no switchport",
-                f" ip address {ip} {mask}",
-                " no shutdown",
-            ],
-            read_timeout=CONFIG_READ_TIMEOUT_S,
-        )
-        ms = int((time.monotonic() - t0) * 1000)
+        output: str = conn.send_config_set(cmds, read_timeout=CONFIG_READ_TIMEOUT_S)
     except Exception as exc:
         mark_failed(action_id)
         log.error(
@@ -361,7 +486,27 @@ def set_interface_ip(
         )
         raise
 
-    post_dir: Path = take_snapshot(action_id, "post")
+    try:
+        _check_netmiko_output_for_errors(output)
+        _verify_running_config(
+            verify_command=f"show running-config interface {interface}",
+            verify_pattern=rf"ip address {re.escape(ip)} {re.escape(mask)}",
+            tool="set_interface_ip",
+        )
+    except WriteRejectedError as exc:
+        post_dir = take_snapshot(action_id, "post")  # preserve forensic diff
+        mark_failed(action_id)
+        log.error(
+            "write_rejected",
+            tool="set_interface_ip",
+            action_id=action_id,
+            snapshot_post=str(post_dir),
+            error=str(exc),
+        )
+        raise
+
+    ms = int((time.monotonic() - t0) * 1000)
+    post_dir = take_snapshot(action_id, "post")
     mark_executed(action_id)
 
     log.info(
@@ -410,16 +555,14 @@ def set_access_vlan(vlan_id: int, vlan_name: str, action_id: str) -> dict:
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    cmds = [
+        f"vlan {vlan_id}",
+        f" name {vlan_name}",
+    ]
+    _emit_cli_commands("set_access_vlan", action_id, cmds, mode="config")
     try:
         conn = _get_conn()
-        output: str = conn.send_config_set(
-            [
-                f"vlan {vlan_id}",
-                f" name {vlan_name}",
-            ],
-            read_timeout=CONFIG_READ_TIMEOUT_S,
-        )
-        ms = int((time.monotonic() - t0) * 1000)
+        output: str = conn.send_config_set(cmds, read_timeout=CONFIG_READ_TIMEOUT_S)
     except Exception as exc:
         mark_failed(action_id)
         log.error(
@@ -430,7 +573,29 @@ def set_access_vlan(vlan_id: int, vlan_name: str, action_id: str) -> dict:
         )
         raise
 
-    post_dir: Path = take_snapshot(action_id, "post")
+    try:
+        _check_netmiko_output_for_errors(output)
+        # `show vlan brief` row format: `<id>   <name>   active   <ports>`
+        # Width-padded but whitespace-separated, so \s+ between fields.
+        _verify_running_config(
+            verify_command="show vlan brief",
+            verify_pattern=rf"^\s*{vlan_id}\s+{re.escape(vlan_name)}\s+active",
+            tool="set_access_vlan",
+        )
+    except WriteRejectedError as exc:
+        post_dir = take_snapshot(action_id, "post")  # preserve forensic diff
+        mark_failed(action_id)
+        log.error(
+            "write_rejected",
+            tool="set_access_vlan",
+            action_id=action_id,
+            snapshot_post=str(post_dir),
+            error=str(exc),
+        )
+        raise
+
+    ms = int((time.monotonic() - t0) * 1000)
+    post_dir = take_snapshot(action_id, "post")
     mark_executed(action_id)
 
     log.info(
@@ -481,6 +646,7 @@ def cli_configure(
     t0 = time.monotonic()
     pre_dir: Path = take_snapshot(action_id, "pre")
 
+    _emit_cli_commands("cli_configure", action_id, config_commands, mode="config")
     try:
         conn = _get_conn()
         config_output: str = conn.send_config_set(
@@ -500,6 +666,7 @@ def cli_configure(
     # Verify in EXEC mode. send_command isn't config mode, so we don't
     # need to drop out — Netmiko's send_config_set already exited config
     # by the time it returned.
+    _emit_cli_commands("cli_configure", action_id, [verify_command], mode="exec")
     try:
         verify_output: str = conn.send_command(verify_command, read_timeout=60)
     except Exception as exc:
@@ -528,7 +695,6 @@ def cli_configure(
 
     match = re.search(verify_pattern, verify_output)
     if match is None:
-        mark_failed(action_id)
         # Surface any device-reported errors from the config push. IOS XE
         # marks rejected commands with a leading '%' (e.g. "% Router-ID
         # 10.0.0.1 in use by ospf process 2"). Pull these out so the
@@ -547,18 +713,43 @@ def cli_configure(
             output_preview=verify_output[:300],
             device_errors=device_errors or None,
         )
-        return {
+        # Human-readable message for chat surface. The route handler at
+        # routes_approvals.py:222 reads `message` to build the HTTP detail;
+        # without it the user sees "no message" and has no idea what went
+        # wrong. Surface the verify_command + pattern, plus any device-side
+        # `%` errors (e.g. "% Router-ID 10.0.0.1 in use by ospf process 2")
+        # which usually pinpoint the real cause.
+        if device_errors:
+            message = (
+                f"Device rejected the config: {'; '.join(device_errors)}. "
+                f"Verify `{verify_command}` did not match `{verify_pattern}`."
+            )
+        else:
+            output_snippet = verify_output[:400].replace("\n", " | ").strip()
+            message = (
+                f"Verify `{verify_command}` ran but its output did not match "
+                f"`{verify_pattern}`. Output preview: {output_snippet!r}"
+            )
+        result: dict = {
             "error": "verify_failed",
+            "message": message,
             "tool": "cli_configure",
             "verify_command": verify_command,
             "verify_pattern": verify_pattern,
-            "verify_output_preview": verify_output[:1000],
+            "verify_output_preview": verify_output[:3000],
             "config_output": config_output,
             "device_errors": device_errors,
             "snapshot_pre": str(pre_dir),
             "snapshot_post": str(post_dir),
             "duration_ms": ms,
         }
+        # Pass result to mark_failed so debug_sweep can retrieve it later
+        # via get_action(action_id)["result"]. Without this, the action
+        # ends up FAILED with result=None and the auto-debug fallback in
+        # tool_registry.find_most_recent_failure filters it out, degrading
+        # the reactive diagnostic plan to a generic broad sweep.
+        mark_failed(action_id, result)
+        return result
 
     mark_executed(action_id)
 

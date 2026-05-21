@@ -110,6 +110,27 @@ def test_show_vlan_brief_returns_list(_mock_pool: MagicMock) -> None:
 
 
 # ---------------------------------------------------------------------------
+# show_running_config_interface
+# ---------------------------------------------------------------------------
+
+
+def test_show_running_config_interface_returns_raw_block(_mock_pool: MagicMock) -> None:
+    """No TextFSM parse on interface blocks — caller wants the raw text."""
+    block = (
+        "interface GigabitEthernet0/1/3\n switchport mode access\n switchport access vlan 1\nend\n"
+    )
+    _mock_pool.send_command.return_value = block
+    with patch("backend.cli_agent.read_tools.parse") as mock_parse:
+        result = rt.show_running_config_interface("GigabitEthernet0/1/3")
+    assert isinstance(result, str)
+    assert "switchport" in result
+    mock_parse.assert_not_called()
+    # Verify the command shape passed through to Netmiko.
+    sent = _mock_pool.send_command.call_args.args[0]
+    assert sent == "show running-config interface GigabitEthernet0/1/3"
+
+
+# ---------------------------------------------------------------------------
 # Logging side-effect: every tool call writes a JSONL line
 # ---------------------------------------------------------------------------
 

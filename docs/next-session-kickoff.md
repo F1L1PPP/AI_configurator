@@ -1,209 +1,224 @@
-# Next session kickoff — 2026-05-19+
+# Next session kickoff — 2026-05-22+
 
 Paste the block between **=== START ===** and **=== END ===** into the first message of a fresh chat. Then wait for "go" before any code change.
 
 === START ===
 
-You are joining the Cisco AI Config Agent project mid-stream. Read these five docs first, then summarise back in 6-8 sentences:
+You are joining the Cisco AI Config Agent project mid-stream. You are operating as the **Orchestrator / Head Architect** of an Engineering & Networking Team reporting to the Director (Filip).
 
-1. [docs/today-2026-05-15-summary.md](docs/today-2026-05-15-summary.md) — 2026-05-15 morning wrap (Phase 3.3+3.4+5 + Haiku-only swap)
-2. [docs/today-2026-05-15-evening-summary.md](docs/today-2026-05-15-evening-summary.md) — 2026-05-15 afternoon wrap (multi-propose chain + CLI configure + 4 real-router fixes, alpha.1/.2/.3 tags)
-3. [docs/today-2026-05-18-summary.md](docs/today-2026-05-18-summary.md) — 2026-05-18 wrap (settle-wait fix + alpha.4 tag + design handoff doc + ISIS retest blocked by Anthropic 529s)
-4. [docs/plan-ai-first-webui.md](docs/plan-ai-first-webui.md) — the v0.4.0 phase plan
-5. [docs/design-handoff.md](docs/design-handoff.md) — design redesign brief (parallel-track; designer working on mockups)
+**FIRST**: check whether the `director-blueprint` skill is available in your skill list (it should be — installed at `~/.claude/skills/director-blueprint/SKILL.md` on 2026-05-21). If yes, invoke it via the Skill tool BEFORE drafting your response. It captures the whole operating model that ran this project for the last 3 days (role split, communication style, per-chunk workflow, Sonnet briefing template, Haiku audit template, tag discipline, bug-fix loop, anti-patterns). If the skill loads, you don't need to re-read item 2 below — the skill content supersedes it.
 
-After reading, summarise:
-1. The state of `feature/bootstrap` at HEAD (`115fc2d`) — 500 tests passing, 5 v0.4.0-alpha.* tags on origin, ISIS retest pending due to Anthropic 529s
-2. What `_settle_page` does and which class of bug it solves (modal disappearance race between action and re-describe)
-3. The Anthropic 529 overload events on 2026-05-18 — why they blocked verification, why retry hardening is the FIRST chunk of this session
-4. The unverified-but-deployed fixes that need hardware retest: ISIS WebUI (alpha.4), OSPF WebUI (alpha.3)
-5. The design redesign is a parallel track — designer has [docs/design-handoff.md](design-handoff.md), no mockups yet, frontend stable
+Then read the project-specific references:
 
-Then wait for "go" before making any change. Don't propose re-planning — the plan is locked unless Filip asks.
+1. [CLAUDE.md](CLAUDE.md) — project tone, branch rules, commits, AND the **Communication style** section (team voice, tradeoffs first, no fluff).
+2. [~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md](~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md) — full Director Blueprint memory file (role split, communication, concrete flow per task, edge cases). Skip if the `director-blueprint` skill loaded successfully — the skill is the same content, kept in sync.
+3. [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — master 18-chunk roadmap from Filip's bug list. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED.
+4. The "What landed 2026-05-19" + "What landed 2026-05-20" + "What landed 2026-05-21" sections in **this** kickoff doc — chronological recap of the last three days.
 
-## Today's first chunk — Anthropic 529 retry hardening (~20 min)
+After reading, summarise back in 6-8 sentences:
 
-**Why FIRST**: yesterday's ISIS retest failed because Anthropic's API returned `OverloadedError` (HTTP 529) on the outer and inner planner LLM calls. The SDK's default `max_retries=2` ran out in ~2-3s, then the whole flow bombed out as `tool_failed`. Until this is hardened, we can't reliably retest ANY hardware flow during overload windows.
+1. `feature/bootstrap` at HEAD `d62963b`, 602 tests passing (+58 over the 544 baseline of 2026-05-20 morning), last tag `v0.5.6-phase-g-autodebug` at `d62963b`.
+2. The Director Blueprint operating directive (skill or memory file) — team voice ("Team recommendation:" / "We should…"), tradeoff tables BEFORE architectural decisions, Haiku as delegated read-fetcher, reject corporate fluff.
+3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED. Don't re-do.
+4. Phase G (`v0.5.6-phase-g-autodebug`) added reactive auto-debug: when a write returns `verify_failed`/`tool_failed`, the frontend auto-sends a diagnostic chat, Haiku drafts a focused `show` plan, the executor returns a plain-English digest rendered as an amber DIAGNOSIS block in chat. Required 4 follow-up commits to land cleanly — read the chunk 12 narrative in the recap before touching that code.
+5. Phase E (`v0.5.5-phase-e-preview-diff`) made the Config Preview's diff render for real via a new `/api/actions/{id}/snapshot/{phase}` endpoint that bridges the backend-stores-paths / frontend-expects-content gap that had been there since day one.
+6. The Opus → Sonnet → Haiku agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, Haiku audits deltas.
+7. Working tree: `README.md` updated by Filip for chunk 16 (uncommitted); `docs/next-session-kickoff.md` has the verified pre-demo hardening punch list section (uncommitted). Decide first thing whether to commit both as session-start housekeeping.
+8. Next candidate: chunks 14/14b/15/17/18 remain (Phase F mop-up + remaining Phase G), plus the pre-demo hardening punch list (verified items from `/review` + `/security-review` 2026-05-21). Skip the chunk-order question — it is locked unless Filip asks.
 
-**Three changes**:
-
-1. **Bump `max_retries=5`** at every `Anthropic()` client construction site:
-   - `backend/orchestration/planner.py` (the outer planner client)
-   - `backend/orchestration/configure_planner.py:draft_plan` (inner WebUI planner — currently constructs client lazily inside the function)
-   - `backend/orchestration/cli_configure_planner.py:draft_cli_plan` (inner CLI planner — same lazy construction)
-
-   The Anthropic SDK's exponential backoff with max_retries=5 gives roughly 0.5s + 1s + 2s + 4s + 8s = ~15s of retrying instead of ~2-3s. Most transient 529s clear within that window.
-
-2. **Friendly error wrapping** in `_webui_configure` and `_cli_configure` for `OverloadedError`:
-   ```python
-   from anthropic import OverloadedError
-   ...
-   except OverloadedError as exc:
-       return {
-           "error": "llm_overloaded",
-           "message": (
-               "Anthropic API temporarily overloaded — retry in 1-2 minutes. "
-               "Your action_id is preserved; clicking EXECUTE again will start fresh."
-           ),
-           "request_id": getattr(exc, "request_id", None),
-       }
-   ```
-   The chat UI's existing "✗ SERVER ERROR" panel will display the friendly message instead of the raw JSON traceback.
-
-3. **Same wrapping in `propose_webui_configure` and `propose_cli_configure`** — covers the case where the outer planner survives but the inner planner 529s during propose.
-
-**Tests**: mock `Anthropic.messages.create` to raise `OverloadedError`, assert each propose/configure tool returns `{"error": "llm_overloaded", ...}` instead of letting the exception propagate as `tool_failed`. ~3-5 regression tests across `test_configure_planner.py`, `test_cli_configure_planner.py`, `test_tool_registry_phase5.py`.
-
-**Tag after landing**: `v0.4.0-alpha.5-overload-retry`.
-
-## Second chunk — ISIS WebUI hardware retest (~15 min)
-
-**Why**: alpha.4's `_settle_page` is deployed but unverified end-to-end. The 2026-05-18 retest got blocked at the LLM layer (529s), not at the Playwright/modal layer. Need to confirm the settle wait actually keeps the ISIS Add modal open long enough for `describe_page` to capture the form.
-
-**Steps**:
-1. Confirm Anthropic API is healthy (https://status.anthropic.com).
-2. Restart uvicorn (alpha.4 is in HEAD; auto-reload should have picked it up but a clean restart removes any doubt).
-3. From chat: `Nakonfiguruj ISIS proces s názvom A cez WebUI`.
-4. Expected flow:
-   - propose_webui_configure → inner Haiku drafts `[click Add]`
-   - APPROVE → EXECUTE
-   - Iter 1: click Add → `_settle_page` waits → modal stable → re-describe captures form fields (Router ISIS textbox, Level dropdown, Net Area, Net IP Address, Apply to Device button)
-   - Iter 2: inner Haiku drafts fill plan: `Router ISIS=A`, `Net Area=49.0001`, `Net IP Address=0000.0000.0001.00`, click `Apply to Device`
-   - Verify "A" present in the ISIS table → `mark_executed`
-5. Verify on device: `show isis protocol | include System Id`. Should print `System Id: 0000.0000.0001`.
-
-**If iter 2 still gets `inner_plan_empty`**: the modal closes faster than the 500ms fallback handles. Bump `_SETTLE_FALLBACK_MS` to 1000ms in `_playwright_subprocess.py` and retest. Don't go above 2000ms without revisiting the per-step cost budget.
-
-**If iter 2 fills fields but the labels are weird** (e.g., "Net" is split across `Area` + `IP Address` columns and the spatial-label fix doesn't catch them as separate labelled fields): the issue is form-specific. Add an ISIS example to the inner WebUI prompt's field-mapping section showing how to split a NSAP address `49.0001.0000.0000.0001.00` into `Area=49.0001` + `IP Address=0000.0000.0001.00`.
-
-## Third chunk — OSPF WebUI hardware retest (~15 min)
-
-**Why**: alpha.3's click-Add rule was tested in unit tests but not on hardware for OSPF specifically. Yesterday's session moved straight to ISIS without revisiting OSPF.
-
-**Steps**:
-1. Check existing OSPF processes: `show ip ospf | include Routing Process`.
-2. Pick a process ID that doesn't clash (e.g., 8 or higher if 2/3/4/5/100 are in use). Pick a router-id that's NOT 10.0.0.1 (already in use by ospf 2).
-3. From chat: `Nakonfiguruj OSPF process 8 s router ID 10.0.0.8 cez WebUI`.
-4. Expected flow: same shape as ISIS — click Add → form opens → fill Process ID + router-id → Apply.
-5. Verify: `show ip ospf | include Routing Process` should now include `Routing Process "ospf 8"`.
-
-## Fourth chunk — router-id conflict pre-check (~45 min)
-
-**Why**: alpha.3's `device_errors` field surfaces Cisco rejections AFTER execute. Better UX: refuse at propose time when the operator picks a router-id already in use.
-
-**Fix path** (`backend/orchestration/cli_configure_planner.py:_INNER_SYSTEM_PROMPT`):
-
-Add a "Pre-flight conflict check" rule:
-> Before drafting `config_commands`, scan the provided running-config for conflicts with the intent's unique identifiers:
-> - **router-id**: if the intent specifies `router-id X.X.X.X`, grep running-config for existing `router-id X.X.X.X` lines. If found, return `config_commands: []` with `risk: "Conflict — router-id X.X.X.X already in use by <process>. Pick a different router-id or remove the existing process first."`.
-> - **interface IP**: similar grep for `ip address X.X.X.X` collisions.
-> - **VLAN ID**: similar grep for `vlan X` collisions.
-> - **OSPF/EIGRP/RIP process IDs**: similar grep.
-
-The outer Haiku Rule 8 already handles the FINAL signal — when propose_cli_configure returns `intent_not_mappable` (or a similar error), the chat surfaces the conflict message without retrying.
-
-**Tests**: mock `show_running_config` to return a config with `router ospf 2 / router-id 10.0.0.1`. Inner LLM (mocked) should refuse with empty config_commands + a conflict-flavored risk note. Add regression to `test_cli_configure_planner.py`.
-
-**Real-router validation**: ask `Configure OSPF process 9 with router-id 10.0.0.1` (intentional collision). Should refuse at propose time, NO action_id created, user sees the conflict message in chat.
-
-## Fifth chunk — consolidate to v0.4.0-alpha.1 milestone tag (~15 min)
-
-**Why**: CLAUDE.md §72 references the un-suffixed name `v0.4.0-alpha.1` for the scope-lock release. Five iterative alpha.* tags with suffixes exist; the formal milestone tag does not yet.
-
-**Steps**:
-1. Confirm chunks 1-4 above all landed and validated on hardware.
-2. Filip authorises milestone tag (CLAUDE.md tag rule — he creates them or explicitly authorises Claude to create).
-3. Tag the consolidated milestone:
-   ```
-   git tag -a v0.4.0-alpha.1 <HEAD> -m "v0.4.0-alpha.1: AI-first Cisco configure agent validated on hardware"
-   git push origin --tags
-   ```
-4. Update CLAUDE.md §72 — remove or move the scope-lock note now that the tag exists.
-
-## Open backlog (pick one if time permits)
-
-- **Resume from mid-flow on retry**: if iter 1 succeeded but iter 2's LLM call 529s, the next EXECUTE click could pick up from iter 2 instead of starting over. Requires persisting `executed_steps` to the action store. Bigger change — only do if 529s become a daily problem.
-- **Iteration cap evaluation**: cap=4 may be tight for complex flows (OSPF with multiple network statements + interface assignments). Bump to 6 if any flow hits the cap.
-- **`| section` → `| include` for BGP/route-map**: alpha.2 fixed OSPF; other features may have the same gotcha.
-- **Recorder catalog refresh**: re-run `scripts/record_webui_catalog.py` to capture the ISIS page elements properly. The outer nav map currently points at `/webui/#/isis` correctly but doesn't know about the per-protocol Add modals.
-- **Phase 6 — Vision on-demand** (canonical next phase after v0.4.0-alpha.1): `webui_visual_check(question)` tool with screenshot + bbox overlay + image content block. Would catch the shift-by-one-row class of bug AND verify modal-state checks. ~0.5 day. See [plan-ai-first-webui.md §201](plan-ai-first-webui.md).
-
-## Design redesign (parallel track, informational)
-
-Designer working on mockups. Has [docs/design-handoff.md](design-handoff.md) which covers the full UI map, component inventory, approve/execute flow, and design principles. Five open questions to resolve with the designer before committing to a final design:
-
-1. Live event stream placement (right panel current vs bottom drawer vs separate route).
-2. Action ID prominence (chip / expanded / hover-only).
-3. Chromium-during-execute as a separate OS window (current) or embedded.
-4. Failed-action info hierarchy (error → device_errors → snapshots → full output).
-5. Slovak/English UI strings.
-
-When mockups arrive: that's a separate chunk, separately scoped. Until then, the frontend is stable; no code work needed for the designer.
-
-## Operating notes
-
-- Worktree path: `C:\GIT\AI_configurator\.claude\worktrees\loving-villani-1fe4d5`
-- Worktree venv: `.venv\Scripts\python.exe` (Windows PowerShell)
-- Backend: `.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --port 8000`
-- Frontend: `npm run dev` from `frontend/` (port 3000)
-- Approval flow: INLINE in chat (no /preview round-trip)
-- Conventional Commits + `ruff check && mypy && pytest -q` before every commit
-- Pre-commit hook auto-formats — first commit may bounce; re-stage and re-commit (DO NOT `--amend`)
-- **Tags**: Filip authorises milestone tags. Daily `backup-YYYYMMDD-HHMM` tags are autonomous via `/checkpoint`. The harness classifier blocks unauthorised tag creation. Filip explicitly authorised the alpha.* tags created in this chain.
-- **Production LLM = Haiku 4.5 only** (memory rule, locked 2026-05-15)
-- **Per-turn propose quota** (locked 2026-05-15 evening): at most ONE call to each propose_* tool per turn. `verify_failed`/`empty_plan`/`unsafe_command` are FINAL.
-- **Settle-wait is load-bearing** (added 2026-05-18): every successful WebUI action gets a settle pass before re-describe. Networkidle 1500ms + 500ms fallback. Bump constants if a future Cisco page needs more.
+Then wait for "go" before making any change. **Do not propose re-planning the chunk order** — it is locked unless Filip asks.
 
 === END ===
 
-## Release tag chain on origin
+---
 
-| Tag | Commit | What it fixes |
-|---|---|---|
-| `v0.4.0-alpha.1-ai-configure` | `b5a88a4` | First hardware-validated cut: multi-propose chain + CLI configure + spatial-label fix + CIDR splitting + null-verify loop continuation |
-| `v0.4.0-alpha.2-retry-guard` | `50e09c3` | Per-turn propose quota + OSPF `\| section` → `\| include` |
-| `v0.4.0-alpha.3-add-button` | `be4e7fd` | Inner planner clicks Add when intent says add + `device_errors` surface % lines |
-| `v0.4.0-alpha.4-settle-wait` | `c96b653` | `_settle_page` between action and re-describe — survives Cisco's auto-dismiss modal race (ISIS) |
+## What landed 2026-05-19
 
-Next planned: `v0.4.0-alpha.5-overload-retry` after chunk 1 lands. Then consolidated `v0.4.0-alpha.1` (no suffix) once chunks 2-4 are hardware-validated.
+Nine commits, four tags, +21 regression tests (523 → 544 passing). All on `feature/bootstrap`.
 
-## Today's open testable surface
+### Roadmap reconstitution (morning)
 
-Filip can test these end-to-end RIGHT NOW (proven on the C1111 lab router this session series):
+Filip dropped `what to change.txt` listing bugs across Dashboard, Devices, AI Configuration, Config Preview. Three Explore agents in parallel mapped frontend mocks-vs-real, backend API gaps, and LLM language bias. Output: [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — 18 ordered chunks across 7 phases.
 
-**Fast-path CLI** (single command via chat):
-- `zmeň hostname na FOO` → propose_set_hostname → APPROVE → set_hostname → verify
-- `nastav IP 192.168.20.1/24 na Gi0/0/1` → propose_set_interface_ip → ...
-- `pridaj VLAN 30 s názvom OFFICE` → propose_set_access_vlan → ...
+### Chunk 1 — `WriteRejectedError` + post-write verify (`942f303`)
 
-**Fast-path WebUI**:
-- `zmeň hostname na BAR cez WebUI`
-- `pridaj VLAN 30 cez WebUI`
+Silent-failure bug from 2026-05-18: `set_interface_ip` on Gi0/1/3 looked successful in chat but the IP never reached the router (hardware L2-only port + no output validation + no show-back). Two-layer fix in [backend/cli_agent/write_tools.py](backend/cli_agent/write_tools.py):
+- `_check_netmiko_output_for_errors` — scans `send_config_set` output for `%` error lines, raises `WriteRejectedError`.
+- `_verify_running_config` — re-fetches `show running-config | include hostname` / `show running-config interface X` / `show vlan brief` and asserts the change actually landed.
 
-**Generic WebUI (multi-propose chain)** — VALIDATED:
-- Static route: `pridaj statickú trasu 10.99.99.0/24 cez 192.168.10.254 cez WebUI` ✅
+Forensic post-snapshot on failure; never auto-retries. +5 regression tests. Docs: [docs/router-prerequisites.md](docs/router-prerequisites.md) gets the C1111-4P Gi0/1/x L2-only quirk.
 
-**Generic WebUI** — PENDING hardware retest (alpha.3 + alpha.4 deployed, not verified):
-- ISIS: `Nakonfiguruj ISIS proces s názvom A cez WebUI`
-- OSPF: `Nakonfiguruj OSPF process N s router ID 10.0.0.N cez WebUI`
+### Chunk 1.5 — SVI auto-redirect (`c9bb895`)
 
-**Generic CLI (AI configure)** — VALIDATED:
-- Trunk port, OSPF process 100, hostname rename via generic path
+Director's expansion to chunk 1: instead of surfacing the L2-only failure as a hard error, the agent should re-route. `_propose_set_interface_ip` in [backend/orchestration/tool_registry.py](backend/orchestration/tool_registry.py) now does a `show running-config interface <name>` pre-check. If the port is a switchport, builds a deterministic 3-block SVI plan (VLAN N + SVI ip + switchport access vlan N) and routes through `cli_configure`. VLAN id derived from third octet of IP (192.168.40.1 → VLAN 40; falls back to 100 for VLAN-1/zero-octet cases). +6 regression tests. New helper `read_tools.show_running_config_interface`.
 
-**Read-only**:
-- Any `show *` request, any `ako sa konfiguruje X` question
+### Phase A — Dashboard goes real (`3d0f27c` + `849c210`)
 
-**Recorder**:
-- `.venv\Scripts\python.exe scripts\record_webui_catalog.py`
+Filip's bug #1: KPIs and Device Overview card were hardcoded HTML.
+- **Chunk 3**: [backend/api/routes_devices.py](backend/api/routes_devices.py) — `/api/devices` calls `read_tools.show_version()` and reads `settings.router_host`. Populates `ios`, `uptime`, `ip` with real values; SSH soft-fail to static fallback.
+- **Chunk 4**: New `GET /api/devices/<id>/last-backup` — scans `artifacts/device-snapshots/*/post` for freshest mtime. Returns `{action_id, taken_at, snapshot_path, count}` — `count` drives the "Configs saved" KPI.
+- **Chunk 5**: [frontend/screens-basic.jsx](frontend/screens-basic.jsx) `DashboardScreen` rewrite. KPIs, Device Overview card, and Connection Trace card all consume real data. New `relativeTime()` helper for "Xm ago" rendering. Connection Trace mirrors last 5 entries from `/api/logs/recent`. "Active sessions" KPI shows `—` (deferred; no CLI tool for `show users`/`show ssh` yet).
+- **Sidebar fix** ([frontend/chrome.jsx](frontend/chrome.jsx)): `ACTIVE DEVICE` card now fetches from `/api/devices` instead of hardcoded `192.168.1.1` / `ISR 4321`.
 
-## Out of scope until Phase 6+
++5 regression tests. **Tag: `v0.5.1-phase-a-dashboard`** (annotated). **Backup: `backup-20260519-0859`**.
 
-- Vision-on-demand (`webui_visual_check`)
-- Two-phase approval (intent then plan separately)
-- Selector allowlist enforcement
-- Multi-device targeting
-- Mid-flow CANCELLING state
-- Auto-rollback
-- Mid-flow LLM-failure resumption
+### Phase B — Chat UX (`059e668`)
 
-These are tracked in [plan-ai-first-webui.md](plan-ai-first-webui.md) Phase 5.1+ deferred list.
+Three chunks in one commit.
+
+- **Chunk 1 — language fix**: [backend/orchestration/planner.py:125-126](backend/orchestration/planner.py:125) — replaced *"Speak Slovak by default; switch to English if the user writes in English or asks for it."* with a symmetric *"Detect the language of the user's most recent message and reply in that same language."* Also translated the Slovak `**Bezpečnosť:**` safety paragraph. Kept Slovak intent-recognition keywords (`vykonaj`, `cez WebUI`, `schválená`) — those are USER input triggers, not output bias.
+- **Chunk 2 — chat persistence + reset button**: New `ChatProvider` in [frontend/app.jsx](frontend/app.jsx) lifts six chat state slices (`messages`, `pending`, `stream`, `phase`, `history`, `chatHistory`) plus the WS subscription into a Context at app root. Navigation between pages no longer drops the conversation. "Reset chat" chip in the chat header clears all six in one click; disabled mid-flow. Stream capped at 200 lines.
+- **Chunk 2b — live CLI command stream**: New `_emit_cli_commands` helper in [backend/cli_agent/write_tools.py](backend/cli_agent/write_tools.py) publishes one `cli_command_sent` event per IOS line via the eventbus, plus one for the post-write `show ...` verify (mode: `"config"` | `"exec"`). Frontend renders as `(config)# interface Gi0/1/3` and `# show vlan brief` terminal-style lines via a 120 ms client-side pacing queue. Reset chat drains the queue. New `.stream-line--cli` style.
+
++5 regression tests. **Tag: `v0.5.2-phase-b-chat`** (annotated, at HEAD after chunk 9). **Backup: `backup-20260519-0935`**.
+
+### Chunk 9 — WS origin allowlist (`cf3572d`)
+
+Surfaced when Phase B chunk 2b shipped and the live stream still showed "Waiting for agent activity." even though events were being published. Root cause: Filip's bookmarks use `http://127.0.0.1:8000/` but `settings.allowed_origins` only had `localhost` variants. Every WS handshake at `/ws/agent` got a 1008 policy-violation close. One-line fix in [backend/core/settings.py](backend/core/settings.py). Confirmed live: paced `(config)# hostname LAB` and `# show running-config | include hostname` now scroll in the right column on both fast-path and `cli_configure` flows (tested with hostname change + OSPF process 1).
+
+### Director Blueprint (`c0da7e3`)
+
+Filip's 2026-05-19 directive: the agents are not independent — they form a specialized engineering team reporting to the Director. Codified in two places:
+- [CLAUDE.md](CLAUDE.md) gets a new `## Communication style` section: team voice ("Team recommendation:" / "We should…"), tradeoff tables BEFORE architectural decisions, cross-reference to the memory file.
+- `~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md` (user-home, not in repo) — full rewrite as the Director Blueprint. Preserves the role-split flow + edge cases. Adds the four new rules. Director's React-vs-Next.js example included as the reference tradeoff-table format.
+
+---
+
+## What landed 2026-05-20
+
+24 commits across `feature/bootstrap` between morning HEAD `c0da7e3` and end-of-day HEAD `88bd731`. 6 tags pushed (3 phase milestones + 3 timestamped backups). Tests 544 → 588 (+44), 0 failed. Live-smoked on the C1111-4P throughout.
+
+### Phase C — Universal conflict pre-checks (`v0.5.3-phase-c-conflict-detect` at `f0d788a`)
+
+**Chunk 6 (`040affc`)** — `backend/orchestration/conflict_detector.py` with `find_existing_block(commands, running_config) -> {anchor, block, is_exact_match} | None`. Universal anchor algorithm handles indented stanzas (vlan/interface Vlan/router/route-map/etc.) AND single-line globals (hostname, ip route). Physical-interface guard, `no <X>` skip, `is_exact_match` for true no-op detection. 13 unit tests.
+
+**Chunk 7 (`558018e`)** — wired into all 5 CLI propose tools (`set_hostname`, `set_access_vlan`, `set_interface_ip` non-SVI branch, `cli_configure`, `webui_configure`). `configure_planner.draft_plan` extended with optional `running_config` + `equivalent_cli_commands` return so the WebUI inner Haiku also feeds the detector. 8 integration tests.
+
+**Chunk 8 (`cd135b0`)** — frontend: `synthesizeProposal` extracts conflict fields; `ProposalBubble` renders amber `REPLACES EXISTING` / stronger `IDENTICAL CONFIG — APPLYING WILL BE A NO-OP` block above the commands; CSS via `var(--warn)` tokens + `color-mix()` for the noop variant.
+
+### Phase D — Smart suggestion chips (`v0.5.4-phase-d-smart-suggestions` at `2b8dd5d`)
+
+**Chunk 11 (`2b8dd5d`)** — NEW `GET /api/suggestions` endpoint. `_build_digest` extracts hostname + VLAN list + interface IPs from running-config (caps at 2 KB). Haiku 4.5 drafts 4 short chips grounded on the digest. 30s per-device in-memory cache. Soft-fails to 4 static defaults on any failure (SSH down, Haiku overloaded, empty response). Frontend `useState`-seeded with the defaults so the UI is never empty during in-flight fetch. 6 unit tests.
+
+### Phase E — Config Preview real diff (`v0.5.5-phase-e-preview-diff` at `88bd731`)
+
+**Chunk 13 (`596be37`)** — NEW `GET /api/actions/{action_id}/snapshot/{phase}` returns `running-config.txt` content. Path-traversal guards (`^act_[A-Za-z0-9_-]+$` regex + phase ∈ `{pre, post}` literal check before any filesystem touch). `fetchPreview` parallel-fetches both snapshots via `Promise.all` and inlines content for the unchanged `adaptPreview` — so the diff finally renders for real. `screen-preview.jsx` drops the hardcoded `"Add VLAN 30 named OFFICE on Router-01"` demo, auto-fetches the most-recent action via `fetchLastBackup` when no `actionId` in route. Change Summary + Commands cards read from `action.params`. 5 unit tests. Plus 6 stacked CSS fixes from live smoke (empty-state monospace + 20px alignment to match card title + viewport-anchor wave via `margin-top: auto`).
+
+### Carryover chunks pulled forward
+
+**Chunk 10 (`dcbe9de`)** — Anthropic 529 hardening. `max_retries=5` on all three Anthropic clients (planner + cli_configure_planner + configure_planner). `routes_chat.py` catches `OverloadedError` specifically → HTTP 503 with `"Claude API is temporarily overloaded (HTTP 529). Already retried 5 times via the SDK. Please wait a minute and try again. request_id: req_..."`. Propose tools wrap inner-LLM overloads into `{"error": "llm_overloaded", ...}` structured dicts that the executor maps to 503. 5 unit tests. **Live-verified** during Anthropic's actual overload window today.
+
+### Bug-fix commits stacked on Phase C/E (lessons learned)
+
+- `9fcaa9d` — `preview_meta` separated from `action.params` (executor splat broke `set_hostname` when chunk 7 stuffed conflict fields into params; architectural fix, not pragmatic patch).
+- `bc10d5a` — `commands` routed through `awaiting_approval` event instead of `tool_call.input` (frontend was reading the wrong event source).
+- `d204e3f` — `_event_to_dict` emits `{type, data}` instead of `{kind, data}` to match the WS convention. **Latent since day one** — `synthesizeProposal` had never found any awaiting_approval event before this; my Phase C work made the symptom visible.
+- `a21ee79` — `synthesizeProposal` type-checks `preview` before assigning to summary string (cli_configure + SVI return preview as a DICT, which crashed React with "Objects are not valid as a React child" — also latent, surfaced after the event-key fix).
+- `3873dba` — `/api/devices` enrichment now extracts `hostname` from `show_version`; AI Config page header wires to `/api/devices` instead of hardcoded `"Router-01 · 192.168.1.1"`.
+- `3e81818` + `68a50f3` — C1111-4P specific: VLAN definitions live in vlan.dat and don't appear in `show running-config` as a clean stanza, so the universal detector misses them. Added `show_vlan_brief` fallback inside `_propose_set_access_vlan` (later refactored into shared `_detect_vlan_conflict` helper). Also fixed `vlan_name` field name (ntc-templates emits `vlan_name` not `name` — same gotcha the WebUI verify layer had already documented).
+- `f0d788a` — `_detect_hostname_conflict` + `_detect_vlan_conflict` extracted as shared helpers so CLI fast-path AND WebUI fast-path (`webui_set_hostname` + `webui_add_access_vlan`) use identical detection logic. Adds `commands` field to WebUI fast-path returns so the IOS XE commands block renders for WebUI proposals too.
+- `219a7dc` — `cli_configure` verify_failed now includes a human-readable `message` field (incidental from a smoke test where the chat showed "no message").
+
+### Architectural lessons captured
+
+- **`params` dict is splatted into the executor — never put display-only fields there.** Use `preview_meta` (added to `propose_action` in `confirmations.py`) for propose-time metadata that the UI needs but the write tool doesn't.
+- **Event-payload key names must match what the frontend reads.** Chat-reply events now use `type` everywhere (matches `/ws/agent` convention).
+- **Mocks must match real parser output.** Three bugs surfaced from mocks using `name` instead of `vlan_name` (ntc-templates field).
+- **The CLAUDE.md "tags hands-off" rule was overridden 3× today** with explicit Filip authorisation per phase. Default remains: don't tag unless he says so.
+
+## What landed 2026-05-21
+
+10 commits, 2 milestone tags, +14 tests (588 → 602). Phase G chunk 12 shipped + chunk 16 (README + screenshots) + the `director-blueprint` skill installed globally.
+
+### Phase G chunk 12 — auto-debug on write failure (`v0.5.6-phase-g-autodebug` at `d62963b`)
+
+**Initial implementation (`5975b33`)** — NEW `backend/orchestration/debug_planner.py` with three modes (focused via `draft_debug_plan`, broad via `draft_debug_sweep`, digest via `draft_debug_summary`). NEW `_propose_debug_sweep` + `_debug_sweep` in tool_registry; `debug_sweep` added to `WRITE_TOOLS` for the two-click contract. `mark_failed(action_id, result=None)` extended in confirmations.py to persist the result dict on the action for later retrieval. `routes_approvals` execute path passes the structured error result. Planner system prompt amended (rule 8) to instruct the LLM to call `propose_debug_sweep` on `verify_failed`/`tool_failed`. Frontend `onExecute` catch auto-sends `"Please diagnose action_id=X..."` when err contains `verify_failed`/`tool_failed`. `verify_output_preview` cap bumped 1000 → 3000 chars and inline snippet 200 → 400. "Diagnose router state" added to suggestion seed. 11 new unit tests. Haiku audit: PASS.
+
+**Live smoke surfaced 4 cascading bugs over 4 follow-up commits** — read these in order if you're touching the auto-debug code:
+
+- `3a682cf` — frontend wasn't surfacing the `_debug_sweep` digest. `onExecute` was throwing away the execute response; result message only rendered `pending.summary` (propose intent) not `resp.result.summary` (Haiku digest). Fix: capture response, extract `result.summary`, add `digest` field to result message, render in new amber DIAGNOSIS block (`.result-digest` CSS). Plus strengthened the `propose_debug_sweep` tool description to mandate `failure_action_id` extraction from auto-debug user messages.
+- `14c1ce7` — even with the stronger tool description, Haiku didn't reliably pass `failure_action_id` from the user message. Server-side fallback added: NEW `find_most_recent_failure()` in confirmations.py scans `_actions` for the most-recent FAILED action with a stored result; `_propose_debug_sweep` calls this when the kwarg is omitted. +2 tests lock the fallback.
+- `d62963b` — the **load-bearing** fix. `find_most_recent_failure()` was still returning None in live smoke. Root cause: `write_tools.cli_configure` calls `mark_failed(action_id)` (no result) BEFORE returning the verify_failed dict, transitioning state to FAILED. Then `routes_approvals.py:213` checks `get_state == "EXECUTING"` and SKIPS its own `mark_failed(action_id, result)` because state already changed. Action ends up FAILED with `result=None`; fallback filters it out; broad sweep wins. Fix: restructure `write_tools.cli_configure` to build the result dict FIRST, then call `mark_failed(action_id, result)` — so the result is stored from the source. Other write tools' `mark_failed(action_id)` exception-handler calls stay as-is (different code path; those raise rather than return structured dicts).
+
+After all four fixes, live smoke on the static-route failure (`ip route 5.5.5.5 255.255.255.0 6.6.6.6` → `%Inconsistent address and mask`) produces a focused diagnostic plan (`show ip route static | include 5.5.5` + `show running-config | include ip route`) and a Haiku digest that explicitly explains the host-bits-set error and recommends `5.5.5.0/24` as the fix. End-to-end in ~5 seconds.
+
+### Chunk 16 — README refresh + 5 screenshots (Filip-driven)
+
+Filip updated `README.md` himself with a refreshed top description, a 5-screenshot walkthrough (Dashboard, AI Configuration, Config Preview, Devices, Settings), and a polished Install/Configure/Run/Troubleshooting block. Screenshots saved to `docs/screenshots/`. Both still uncommitted in the working tree — next session should commit them as opening housekeeping along with the kickoff doc update.
+
+### NEW skill: `director-blueprint`
+
+Installed at `~/.claude/skills/director-blueprint/SKILL.md`. Captures the whole 3-day operating model: role split (Director / Opus / Sonnet / Haiku), communication style (team voice, tradeoffs first, no fluff), per-chunk workflow (Plan → Sonnet briefing → Haiku audit → commit → smoke → tag), Sonnet briefing template, Haiku audit template, tag discipline (hands-off + backup pair), bug-fix loop, anti-patterns. Auto-triggers in any project that has a chunked roadmap. Future Opus instances should invoke it via the Skill tool on message #1 — supersedes re-reading the memory file.
+
+### Pre-demo hardening punch list (verified)
+
+Two slash-command reviews (`/review` + `/security-review`) ran against `v0.5.5` on 2026-05-21. Both concluded "ship as-is for alpha-1 demo." Verified findings + corrections added to the "Pre-demo hardening" section below — pick up before cutting `v0.4.0-alpha.1` (chunk 18) or any external sharing.
+
+### Architectural lessons captured (2026-05-21 additions)
+
+- **`mark_failed(action_id)` vs `mark_failed(action_id, result)` — the call ORDER matters.** When write_tools and routes_approvals both call `mark_failed`, whichever fires FIRST transitions the state. The second caller's structured result gets dropped because the state check guards against duplicate transitions. Pass the result from the source.
+- **Server-side fallbacks beat fighting the LLM.** Haiku ignored the strong tool description mandating `failure_action_id` extraction. Adding a 5-line server-side scan of FAILED actions in confirmations was more reliable than 5 iterations of prompt-tuning.
+- **Live smoke surfaces architectural defects unit tests miss.** Chunk 12 needed 4 follow-up commits despite all unit tests passing. Each fix improved a real defect, not just a symptom. Plan for this rhythm on UX-heavy chunks.
+
+## Remaining chunks (one-line each)
+
+| # | Chunk | Phase | Est | Pri |
+|---|---|---|---|---|
+| 14 | WebUI speed pass — trim `_settle_page` waits, retest on live router | G | ~60 min | LOW |
+| 14b | Self-training WebUI vision fallback — Claude Vision + learned selectors | G | ~4 h | MED |
+| 15 | Hardware retests — ISIS + OSPF WebUI on live router | F | ~30 min | MED |
+| 17 | Cosmetic prototype-label sweep | F | ~10 min | LOW |
+| 18 | Cut clean `v0.4.0-alpha.1` consolidation tag | F | ~15 min | — |
+| — | Pre-demo hardening (MED + LOW batches — see below) | mixed | ~2 h | mixed |
+
+## Notes / housekeeping
+
+- **First thing in the new session: commit the working tree.** `README.md` + `docs/next-session-kickoff.md` + `docs/screenshots/*.png` are all uncommitted from 2026-05-21. Suggested single commit: `git add README.md docs/next-session-kickoff.md docs/screenshots/ && git commit -m "docs: README refresh + screenshots + kickoff doc update (chunks 16 + session wrap)"`.
+- `frontend-design-backup/` sweep is its own commit later in the week (after Phase C feels stable).
+- `tools/check_vectorstore.py` and `tools/query_rag.py` flagged in 2026-05-19 dead-code audit as worth a follow-up review — not blocking.
+- Director Blueprint applies from message #1 of the next chat. **Prefer invoking the `director-blueprint` skill** over re-reading the memory file — same content, kept in sync.
+- The plan file `~/.claude/plans/10-commits-4-tags-atomic-widget.md` is outside the repo; safe to delete after the next session starts since the roadmap and per-chunk briefings live in `docs/`. (Same applies to any older plan files in that directory.)
+
+## Post-roadmap polish (after all phases land)
+
+Items deferred until the main roadmap (chunks 14 → 18) is complete. None blocking — pick up only when there's appetite for polish work.
+
+- **Wire `device.id` selection into `fetchSuggestions`** — `frontend/screen-ai.jsx:232-244` currently calls `window.api.fetchSuggestions()` with no argument, so the server defaults to `device_id="router-01"`. Today this is correct (single-device C1111-4P lab; sidebar reads `fetchDevices()[0]`, no picker UI). When/if multi-device discovery lands, the device-picker chunk should ALSO wire its selected `device.id` into `fetchSuggestions(deviceId)` and add the selected device to the `useEffect` dependency array so chips refresh on device switch. The cache key in `backend/api/routes_suggestions.py` is already keyed by `device_id`, so backend is forward-compatible. Source: spawned-task chip from chunk 11 implementation; reviewed and deferred 2026-05-20 — premise required a device-selection UI that doesn't exist yet.
+- **Tighten Haiku suggestion grounding** — Phase D chip "Enable OSPF routing protocol on this router" surfaced live even though OSPF process 1 is already configured. The `_build_digest` in `routes_suggestions.py` includes `router ospf 1` lines but Haiku doesn't always treat them as exclusions. Consider an explicit `OSPF: process N active` digest line (similar to how VLANs get `vlan N name X`) so the inner system prompt's "avoid suggesting things already present" rule has a clearer signal. ~15 min when revisited.
+
+## Pre-demo hardening (verified findings from `/review` + `/security-review` on 2026-05-21 at v0.5.5)
+
+Two slash-command reviews ran against `v0.5.5-phase-e-preview-diff`. Both concluded **ship as-is for the alpha-1 demo — nothing attacker-reachable on single-operator localhost** — but flagged ~8 hardening items totalling ~2 hours of work. Each was verified against the actual code on 2026-05-21; corrections noted where the report missed nuance. Pick up as a dedicated "Pre-demo hardening" chunk before cutting `v0.4.0-alpha.1` (chunk 18) or any external sharing.
+
+### MEDIUM — do before any public demo / non-local deployment
+
+- **[SEC-A] `routes_snapshots.py` belt-and-suspenders path containment** — current regex `^act_[A-Za-z0-9_-]+$` + `phase ∈ {pre, post}` literal check is tight, but no `.resolve().is_relative_to(settings.artifacts_dir)` check after path construction. Add the defence-in-depth check around `routes_snapshots.py:47`. ~10 min + 1 test.
+- **[SEC-B] Document `_build_digest` allowlist intent** — the `/review` flagged this as a "deny-list" but it's actually already a positive allowlist (only `hostname X` / `vlan N name X` / `interface X ip Y Z` are extracted; `enable secret` / `snmp-server community` / AAA never match). Worth adding an explicit `# SECURITY: This is a POSITIVE ALLOWLIST...` comment in `routes_suggestions.py:69` so future contributors don't accidentally extend it to a wildcard extraction. ~5 min. No tests needed.
+- **[QUAL-2] Cache `_verify_running_config` SSH round-trip** — unconditional SSH call per write (`write_tools.py:344`). On Filip's lab adds ~400 ms per write; on chassis with WAN-distance routers could be seconds. Either skip when prior `_check_netmiko_output_for_errors` was clean (config errored = verify-failed already), OR shorten the SSH read timeout from 60 s to 5 s on the success path. ~20 min + adjusted tests.
+
+### LOW — defer or batch with other small wins
+
+- **[QUAL-3] PreviewScreen Back/Approve/Apply buttons console.warn** — `frontend/screen-preview.jsx:123-125` has three placeholder buttons that just log. Either wire them (Back navigates to AI Configuration, Approve+Apply call the same `/api/approve` + `/api/execute` endpoints the AI Config sticky-bar uses) OR delete them so the preview page doesn't have dead controls. ~15 min if wired, ~2 min if deleted.
+- **[QUAL/SEC-4 + D] Cache `/api/devices` enrichment** — `routes_devices.py:_enrich_with_show_version` does an SSH `show version` per request. Dashboard + sidebar both poll every few seconds → 6-10 SSH calls/min on idle. Add a 30 s cache (mirror the `routes_suggestions._cache` pattern). ~15 min + 1 test for cache hit/miss.
+- **[QUAL-5] Test gap: deeper BGP `address-family ipv4 vrf X` nesting in `_extract_stanza_block`** — existing `tests/unit/test_conflict_detector.py:110-129` covers main `router bgp` + `exit-address-family`. Add one more test for `address-family ipv4 vrf <name>` nested inside the BGP stanza to confirm the walker doesn't terminate early on `exit-address-family`. ~10 min.
+- **[SEC-C] Redact raw IOS `%` error lines from chat error events** — `write_tools.py` verify_failed message embeds `device_errors` directly. In prod could leak hostnames / interface names / VRF names via error responses. Either redact `%` lines down to error-category-only ("config rejected — see logs for full text"), OR send the raw text to `log.error` only and surface a sanitised version to chat. ~15 min.
+- **[SEC-E] Cap snapshot JSON response size** — `routes_snapshots.py:59` reads full file content unbounded. Lab configs are ~6 KB but chassis switches could be 100+ KB. Add `len(content) > MAX_SNAPSHOT_BYTES` (e.g. 64 KB) → truncate + return `{truncated: true, bytes_total: <N>}` so the frontend can show a "truncated, view on disk" message. ~10 min + 1 test.
+- **[SEC-G] Move Anthropic `request_id` from HTTP body to log** — `routes_chat.py:111` (from chunk 10) includes the Anthropic request ID in the 503 detail string. Intentional for support tickets but exposes internal IDs. Could keep `request_id` in `log.warning` and replace the user-facing message with a redacted ID like `req_***` + advice "check server logs for full ID". ~5 min.
+- **[QUAL-1 + SEC-F] Documentation: `cli_command_sent` events are intent stream not wire trace** — `_emit_cli_commands` fires BEFORE the SSH `send_config_set` in all 4 write tools (`write_tools.py:380, 475, 562, 344`). The live event stream column shows what the agent INTENDS to send, not confirmation it was sent. Add a one-line doc comment in `_emit_cli_commands` definition and a note in `docs/how-it-works.md`. ~5 min, no behavior change.
+
+### Reviewer's false alarms (verified — no action needed)
+
+- **[QUAL-6] Test gap: `_derive_svi_vlan_id`** — reviewer claimed no tests; actually `tests/unit/test_tool_registry.py:286-295` has two tests (`test_derive_svi_vlan_id_uses_third_octet` + `_falls_back_to_100_for_zero_or_default_vlan`). Coverage exists. No action.
+
+### Out of scope for this pre-demo pass
+
+- **[SEC-H] WebUI driver pre-existing threats** (origin allowlist, sensitive-element deny-list, secret redaction, `propose_webui_configure` scope) from the prior security review window — needs a separate WebUI hardening pass, likely paired with chunk 14b (vision fallback) since both touch `backend/webui_agent/`.
+
+### Recommended bundling
+
+Two parent-chunks before cutting `v0.4.0-alpha.1`:
+
+- **"Pre-demo hardening — MED" chunk**: SEC-A + SEC-B + QUAL-2. ~45 min, three small edits + 2 tests, single commit.
+- **"Pre-demo hardening — LOW batch" chunk**: QUAL-3 (delete the dead buttons), QUAL-4/D (devices cache), QUAL-5 (BGP nested test), SEC-C (redact `%`), SEC-E (snapshot cap), SEC-G (request_id log-only), QUAL-1 + SEC-F (intent-stream docs). ~75 min total, batched into one commit per the LOW priority.
+
+Total: ~2 hours, fits before the `v0.4.0-alpha.1` consolidation tag. Or fold piecewise into existing chunks 14, 14b, 15, 17 as opportunistic clean-up.

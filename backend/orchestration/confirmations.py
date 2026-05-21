@@ -68,8 +68,14 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def propose_action(tool: str, params: dict) -> str:
-    """Register a new action and return its action_id."""
+def propose_action(tool: str, params: dict, preview_meta: dict | None = None) -> str:
+    """Register a new action and return its action_id.
+
+    ``preview_meta`` carries propose-time conflict-detection fields
+    (existing_entity, existing_block, is_exact_match) that are needed by
+    the UI but must NOT appear in ``params``, because ``params`` is splatted
+    directly into the executor function via ``func(**params)``.
+    """
     now = _now()
     action_id = f"act_{datetime.now(UTC).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
     with _lock:
@@ -77,6 +83,7 @@ def propose_action(tool: str, params: dict) -> str:
             "action_id": action_id,
             "tool": tool,
             "params": params,
+            "preview_meta": copy.deepcopy(preview_meta) if preview_meta is not None else None,
             "state": ActionState.PROPOSED,
             "created_at": now,
             "updated_at": now,
@@ -193,8 +200,17 @@ def mark_executed(action_id: str) -> dict:
     return _transition(action_id, ActionState.EXECUTED)
 
 
-def mark_failed(action_id: str) -> dict:
-    return _transition(action_id, ActionState.FAILED)
+def mark_failed(action_id: str, result: dict | None = None) -> dict:
+    """Transition to FAILED. Optionally persist a result dict on the action
+    so that debug_sweep can retrieve it later via get_action(action_id)["result"].
+
+    Backward-compatible: existing callers that pass no `result` get the old behaviour.
+    """
+    transitioned = _transition(action_id, ActionState.FAILED)
+    with _lock:
+        if action_id in _actions:
+            _actions[action_id]["result"] = copy.deepcopy(result) if result is not None else None
+    return transitioned
 
 
 def is_approved(action_id: str) -> bool:
@@ -209,6 +225,31 @@ def is_approved(action_id: str) -> bool:
         if action is None:
             return False
         return action["state"] in (ActionState.APPROVED, ActionState.EXECUTING)
+
+
+def find_most_recent_failure() -> dict | None:
+    """Return the (deepcopied) result dict of the most recently FAILED action
+    that has a stored result, or None if no such action exists.
+
+    Used by ``_propose_debug_sweep`` as a server-side fallback for the
+    auto-debug flow: when the LLM doesn't extract ``failure_action_id``
+    from a "Please diagnose action_id=X failed" user message, this
+    function recovers the failure context anyway so the diagnostic plan
+    stays focused instead of degrading to a broad sweep.
+
+    Returns the result deepcopied so callers can't mutate stored state.
+    """
+    with _lock:
+        candidates = [
+            a for a in _actions.values() if a.get("state") == ActionState.FAILED and a.get("result")
+        ]
+        if not candidates:
+            return None
+        # Most recently updated wins. `updated_at` is set by every transition
+        # (including mark_failed), so the most-recent FAILED action is the
+        # one whose updated_at is highest.
+        candidates.sort(key=lambda a: a.get("updated_at", ""), reverse=True)
+        return copy.deepcopy(candidates[0]["result"])
 
 
 def get_action(action_id: str) -> dict:

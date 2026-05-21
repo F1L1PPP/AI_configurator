@@ -34,6 +34,12 @@ class Settings(BaseSettings):
             "http://localhost:3000",
             "http://localhost:3001",
             "http://localhost:8000",
+            # 127.0.0.1 is the same machine as `localhost` to the OS but a
+            # DIFFERENT origin to the browser. Filip's bookmarks use
+            # 127.0.0.1:8000, so without this entry the WS handshake at
+            # /ws/agent gets a 1008 policy-violation close and the live
+            # event stream silently shows "Waiting for agent activity."
+            "http://127.0.0.1:8000",
         ],
         alias="ALLOWED_ORIGINS",
     )

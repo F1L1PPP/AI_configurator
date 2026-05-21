@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from anthropic._exceptions import APIStatusError, OverloadedError
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from netmiko.exceptions import (
@@ -48,7 +49,11 @@ class ChatResponse(BaseModel):
 
 
 def _event_to_dict(ev: PlannerEvent) -> dict[str, Any]:
-    return {"kind": ev.kind, "data": ev.data}
+    # Frontend reads `ev.type` (matches the /ws/agent convention used by
+    # adapterEventToStreamLine + synthesizeProposal). The PlannerEvent
+    # dataclass uses `kind` internally — rename at the wire boundary so
+    # both transports look identical to the React consumer.
+    return {"type": ev.kind, "data": ev.data}
 
 
 def _pending_approval(events: list[PlannerEvent]) -> str | None:
@@ -93,6 +98,38 @@ async def chat(req: ChatRequest) -> ChatResponse:
         # debugging when the chain was: SSH error → wrapped as ValueError.
         log.warning("chat_validation_error", error=str(exc), exc_info=True)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OverloadedError as exc:
+        # HTTP 529 — Anthropic API overloaded. SDK already retried 5 times
+        # with exponential backoff before raising. Surface a user-friendly 503.
+        request_id = getattr(exc, "request_id", None)
+        log.warning("chat_anthropic_overloaded", request_id=request_id)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Claude API is temporarily overloaded (HTTP 529). "
+                "Already retried 5 times via the SDK. "
+                f"Please wait a minute and try again. request_id: {request_id}"
+            ),
+        ) from exc
+    except APIStatusError as exc:
+        # Belt-and-suspenders: catch any other 529 that surfaces as
+        # APIStatusError rather than the subclassed OverloadedError.
+        if exc.status_code == 529:
+            request_id = getattr(exc, "request_id", None)
+            log.warning("chat_anthropic_overloaded_status", request_id=request_id)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Claude API is temporarily overloaded (HTTP 529). "
+                    "Already retried 5 times via the SDK. "
+                    f"Please wait a minute and try again. request_id: {request_id}"
+                ),
+            ) from exc
+        log.error("chat_anthropic_api_error", status_code=exc.status_code, error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Anthropic API error (HTTP {exc.status_code}): {exc}",
+        ) from exc
     except Exception as exc:
         log.error("planner_failed", error=str(exc), exc_type=type(exc).__name__)
         raise HTTPException(

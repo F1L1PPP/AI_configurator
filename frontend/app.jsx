@@ -1,5 +1,104 @@
 // Top-level App + Tweaks integration
 
+// ---------------------------------------------------------------------------
+// Chat persistence (chunk 2 of the 2026-05-19 roadmap)
+//
+// All chat state lives in a Context that wraps the App, so navigating
+// between Dashboard / Devices / AI Configuration / Preview doesn't unmount
+// the conversation. The WebSocket subscription also lives here — events
+// that arrive while the user is on another page still accumulate into the
+// live stream instead of being dropped on every unmount/remount cycle.
+//
+// The Reset chat button in screen-ai.jsx calls `reset()` on this context.
+// ---------------------------------------------------------------------------
+
+const CHAT_STREAM_MAX_LINES = 200;
+const ChatContext = React.createContext(null);
+window.ChatContext = ChatContext;
+
+function ChatProvider({ children }) {
+  const [messages, setMessages] = React.useState([]);
+  const [pending, setPending] = React.useState(null);
+  const [stream, setStream] = React.useState([]);
+  const [phase, setPhase] = React.useState("idle");
+  const [history, setHistory] = React.useState([]);
+  const [chatHistory, setChatHistory] = React.useState([]);
+
+  // Pacing queue for cli_command_sent events. The backend emits all
+  // commands in a tight burst right before send_config_set (which is a
+  // single SSH round-trip). For a terminal-scroll feel, we drain the
+  // queue one line every 120 ms instead of dumping the burst at once.
+  // Other event types render immediately — pacing applies only to
+  // cli_command_sent.
+  const cliQueueRef = React.useRef({ items: [], timer: null });
+  const CLI_PACING_MS = 120;
+
+  const appendStreamLine = React.useCallback((line) => {
+    setStream((s) => {
+      const next = [...s, line];
+      return next.length > CHAT_STREAM_MAX_LINES ? next.slice(-CHAT_STREAM_MAX_LINES) : next;
+    });
+  }, []);
+
+  const drainCliQueue = React.useCallback(() => {
+    const q = cliQueueRef.current;
+    if (q.timer || q.items.length === 0) return;
+    q.timer = setTimeout(() => {
+      const next = q.items.shift();
+      if (next) appendStreamLine(next);
+      q.timer = null;
+      drainCliQueue();
+    }, CLI_PACING_MS);
+  }, [appendStreamLine]);
+
+  // WS subscription lives at app lifetime, not per-page. `adapterEventToStreamLine`
+  // is a top-level function in screen-ai.jsx and becomes a global at script load.
+  React.useEffect(() => {
+    if (typeof window.api === "undefined" || typeof adapterEventToStreamLine !== "function") {
+      return;
+    }
+    const handle = window.api.connectAgentWs((ev) => {
+      const line = adapterEventToStreamLine(ev);
+      if (ev.type === "cli_command_sent") {
+        cliQueueRef.current.items.push(line);
+        drainCliQueue();
+      } else {
+        appendStreamLine(line);
+      }
+    });
+    return () => handle.close();
+  }, [appendStreamLine, drainCliQueue]);
+
+  const reset = React.useCallback(() => {
+    // Drain any in-flight cli_command_sent pacing queue so reset is truly
+    // clean — otherwise queued lines would appear AFTER the user clicked
+    // reset and confuse them.
+    const q = cliQueueRef.current;
+    if (q.timer) {
+      clearTimeout(q.timer);
+      q.timer = null;
+    }
+    q.items = [];
+    setMessages([]);
+    setPending(null);
+    setStream([]);
+    setPhase("idle");
+    setHistory([]);
+    setChatHistory([]);
+  }, []);
+
+  const value = {
+    messages, setMessages,
+    pending, setPending,
+    stream, setStream,
+    phase, setPhase,
+    history, setHistory,
+    chatHistory, setChatHistory,
+    reset,
+  };
+  return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
+}
+
 const DEFAULTS = /*EDITMODE-BEGIN*/{
   "dark": false,
   "accent": "#1e6cff",
@@ -49,7 +148,7 @@ function App() {
   }, []);
 
   return (
-    <>
+    <ChatProvider>
       <div className="bg-mesh">
         <MeshScatter width={1600} height={1200} count={tweaks.meshIntensity ? Math.round(40 + tweaks.meshIntensity * 0.8) : 0} opacity={1} />
       </div>
@@ -101,7 +200,7 @@ function App() {
           <TweakButton onClick={() => setRoute("preview")}>Config Preview</TweakButton>
         </TweakSection>
       </TweaksPanel>
-    </>
+    </ChatProvider>
   );
 }
 

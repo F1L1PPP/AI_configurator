@@ -29,6 +29,9 @@ function synthesizeProposal(reply) {
       verify: "",
       affects: "",
       note: "",
+      existingEntity: null,
+      existingBlock: null,
+      isExactMatch: false,
     };
   }
 
@@ -36,27 +39,48 @@ function synthesizeProposal(reply) {
   const transport = toolName.includes("webui") ? "webui" : "cli";
   const input = lastToolCall.input || {};
 
-  // summary: prefer last awaiting_approval event's data.preview, else final_text
+  // summary / preview_meta / commands all come from the awaiting_approval
+  // event's data, NOT the tool_call event's input. The tool_call's input is
+  // the propose tool's CALL args (e.g. {new_name: "X"}); these three fields
+  // are on the propose RESULT, surfaced by planner.py as dedicated event keys.
+  //
+  // Note on preview shape: fast-path proposes (set_hostname, set_access_vlan,
+  // non-SVI set_interface_ip) emit a STRING preview. cli_configure + SVI
+  // auto-redirect emit a DICT preview (intent / config_commands / verify /
+  // risk / evidence). React can't render an object as a child — coerce to
+  // the dict's `intent` string when we see a dict, else keep reply.final_text.
   let summary = reply.final_text;
+  let previewMeta = null;
+  let eventCommands = null;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
-    if (ev.type === "awaiting_approval" && ev.data && ev.data.preview) {
-      summary = ev.data.preview;
+    if (ev.type === "awaiting_approval" && ev.data) {
+      const p = ev.data.preview;
+      if (typeof p === "string" && p) {
+        summary = p;
+      } else if (p && typeof p === "object" && typeof p.intent === "string") {
+        summary = p.intent;
+      }
+      if (ev.data.preview_meta) previewMeta = ev.data.preview_meta;
+      if (Array.isArray(ev.data.commands)) eventCommands = ev.data.commands;
       break;
     }
   }
 
-  const commands = input.commands || (input.params && input.params.commands) || [];
+  const commands = eventCommands || input.commands || (input.params && input.params.commands) || [];
   const risk = input.risk || "low";
   const verify = input.verify_pattern || "";
   const affects = input.affects || "";
   const note = input.note || "";
+  const existingEntity = previewMeta && previewMeta.existing_entity || null;
+  const existingBlock = previewMeta && previewMeta.existing_block || null;
+  const isExactMatch = Boolean(previewMeta && previewMeta.is_exact_match);
 
-  return { actionId, summary, risk, transport, commands, verify, affects, note };
+  return { actionId, summary, risk, transport, commands, verify, affects, note, existingEntity, existingBlock, isExactMatch };
 }
 
 // Maps a backend WebSocket event ({type, ts, data}) to the {line, kind} shape
-// the stream column renders. All 7 backend event types handled; unknown types
+// the stream column renders. All 8 backend event types handled; unknown types
 // get a defensive "info" fallback so one unknown event never crashes the render.
 function adapterEventToStreamLine(ev) {
   const d = ev.data || {};
@@ -75,36 +99,55 @@ function adapterEventToStreamLine(ev) {
       return { line: "✓ verified", kind: "verify" };
     case "error":
       return { line: "✗ " + (d.message ?? ""), kind: "fail" };
+    case "cli_command_sent": {
+      // Per-command event from backend/cli_agent/write_tools.py (chunk 2b).
+      // Renders like a terminal scroll: `(config)#` for `mode: "config"`,
+      // `#` for `mode: "exec"` (post-write `show ...` verify reads).
+      const prompt = d.mode === "exec" ? "#" : "(config)#";
+      return { line: prompt + " " + (d.command ?? ""), kind: "cli" };
+    }
     default:
       return { line: "· " + (ev.type || "unknown"), kind: "info" };
   }
 }
 
 function ChatScreen({ pushPreview }) {
-  const [messages, setMessages] = React.useState([]);
+  // Persisted chat state lives in window.ChatContext (provided by ChatProvider
+  // in app.jsx) so navigating away and back keeps the conversation alive.
+  // The WS subscription also lives at the provider, so live-stream events
+  // that arrive while the user is on another page aren't dropped.
+  const ctx = React.useContext(window.ChatContext);
+  const {
+    messages, setMessages,
+    pending, setPending,
+    stream,
+    phase, setPhase,
+    setHistory,
+    chatHistory, setChatHistory,
+    reset,
+  } = ctx;
+
+  // Input + typing + scroll are not worth persisting — they're transient
+  // and would be confusing if they survived a page navigation.
   const [input, setInput] = React.useState("");
   const [typing, setTyping] = React.useState(false);
-  const [pending, setPending] = React.useState(null); // current awaiting-approval proposal
-  const [stream, setStream] = React.useState([]); // live event stream lines
-  const [phase, setPhase] = React.useState("idle"); // idle | thinking | awaiting | executing | done
-  const [history, setHistory] = React.useState([]); // completed-actions log (pre-existing prototype semantic)
-  const [chatHistory, setChatHistory] = React.useState([]); // multi-turn context passed to POST /api/chat
   const scrollRef = React.useRef(null);
+
+  // Active device for the chat header — same /api/devices the sidebar reads.
+  // Cheap to fetch twice; the alternative (lift to ChatProvider context) buys
+  // nothing yet since no other ChatScreen-scoped state shares it.
+  const [device, setDevice] = React.useState(null);
+  React.useEffect(() => {
+    window.api.fetchDevices().then((rows) => {
+      if (rows && rows.length) setDevice(rows[0]);
+    });
+  }, []);
 
   React.useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, typing]);
-
-  // WebSocket subscription — connect once for the screen lifetime.
-  // WS drives the live event stream column; cleanup closes on unmount.
-  React.useEffect(() => {
-    const handle = window.api.connectAgentWs(
-      (ev) => setStream(s => [...s, adapterEventToStreamLine(ev)])
-    );
-    return () => handle.close();
-  }, []);
 
   // Auto-grow stream during certain phases
   async function send(text) {
@@ -160,7 +203,14 @@ function ChatScreen({ pushPreview }) {
     if (!pending) return;
     setPhase("executing");
     try {
-      await window.api.executeAction(pending.actionId);
+      const resp = await window.api.executeAction(pending.actionId);
+      // For debug_sweep, the execute response carries a plain-English digest
+      // in resp.result.summary that the operator needs to see — without it
+      // the auto-debug flow is invisible. For regular write tools, no digest
+      // exists and we keep the propose's preview text as the title.
+      const digest = resp && resp.result && typeof resp.result.summary === "string"
+        ? resp.result.summary
+        : null;
       setMessages(m => [
         ...m,
         {
@@ -170,6 +220,7 @@ function ChatScreen({ pushPreview }) {
           actionId: pending.actionId,
           summary: pending.summary,
           verify: pending.verify,
+          digest: digest,
         },
       ]);
       setHistory(h => [{ ...pending, doneAt: new Date() }, ...h]);
@@ -177,8 +228,19 @@ function ChatScreen({ pushPreview }) {
       setPhase("done");
       setTimeout(() => setPhase("idle"), 1200);
     } catch (err) {
-      setMessages(m => [...m, { role: "system", text: "Execute failed: " + (err?.message || String(err)) }]);
+      var msg = err?.message || String(err);
+      setMessages(m => [...m, { role: "system", text: "Execute failed: " + msg }]);
       setPhase("idle");
+      // Reactive auto-debug: if the failure is one of the structured error
+      // keys we know how to diagnose, automatically kick off a follow-up
+      // chat that surfaces a diagnostic proposal. Limited to verify_failed
+      // and tool_failed so generic 500s / network errors don't loop.
+      if (typeof msg === "string" && (msg.indexOf("verify_failed") >= 0 || msg.indexOf("tool_failed") >= 0)) {
+        var failedActionId = pending && pending.actionId;
+        if (failedActionId) {
+          send("Please diagnose action_id=" + failedActionId + " which failed at execute time: " + msg);
+        }
+      }
     }
   };
 
@@ -186,12 +248,24 @@ function ChatScreen({ pushPreview }) {
     if (pending) pushPreview(pending);
   };
 
-  const suggestions = [
+  // Suggestion chips below the chat input. Initialized to a static fallback
+  // so the UI is never empty during the first fetch. /api/suggestions
+  // returns Haiku-drafted, context-aware chips based on running-config;
+  // it soft-fails to the same static list when the LLM is overloaded or
+  // SSH is down, so this React fallback is a pure UX nicety for the
+  // in-flight render window.
+  const [suggestions, setSuggestions] = React.useState([
     "add VLAN 30 named OFFICE",
     "change hostname to LAB-R1",
     "set GigabitEthernet0/1 to 192.168.10.1/24",
     "how do I configure a trunk port?",
-  ];
+    "Diagnose router state",
+  ]);
+  React.useEffect(() => {
+    window.api.fetchSuggestions().then((chips) => {
+      if (chips && chips.length) setSuggestions(chips);
+    });
+  }, []);
 
   return (
     <div className={"screen screen--ai" + (pending ? " has-sticky" : "")}>
@@ -207,7 +281,7 @@ function ChatScreen({ pushPreview }) {
               Session SES-0042
             </div>
             <div className="chat-head-meta">
-              <span>Router-01 · 192.168.1.1</span>
+              <span>{device ? device.name + " · " + device.ip : "— · —"}</span>
               <span className={"chat-phase chat-phase--" + phase}>
                 {phase === "idle" && "Idle"}
                 {phase === "thinking" && "Thinking…"}
@@ -215,6 +289,15 @@ function ChatScreen({ pushPreview }) {
                 {phase === "executing" && "Executing"}
                 {phase === "done" && "Complete"}
               </span>
+              <button
+                type="button"
+                className="chat-reset-btn"
+                onClick={reset}
+                disabled={typing || phase === "executing"}
+                title="Clear messages, history, and live event stream"
+              >
+                Reset chat
+              </button>
             </div>
           </div>
 
@@ -377,6 +460,12 @@ function Message({ m }) {
               <div className="result-id">{m.actionId}</div>
             </div>
           </div>
+          {m.digest && (
+            <div className="result-digest">
+              <div className="result-digest-label">Diagnosis</div>
+              <div className="result-digest-text">{m.digest}</div>
+            </div>
+          )}
           <div className="result-body">
             <div className="result-row"><span>Verify</span><code>{m.verify}</code></div>
             <div className="result-row"><span>Snapshots</span><code>artifacts/device-snapshots/{m.actionId}/</code></div>
@@ -398,6 +487,21 @@ function ProposalBubble({ proposal }) {
         </div>
         <div className="prop-summary">{proposal.summary}</div>
         <div className="prop-note">{proposal.note}</div>
+        {proposal.existingEntity && (
+          <div className={"prop-block prop-existing-block" + (proposal.isExactMatch ? " prop-existing-block--noop" : "")}>
+            <div className="prop-block-title">
+              {proposal.isExactMatch
+                ? "IDENTICAL CONFIG — APPLYING WILL BE A NO-OP"
+                : "REPLACES EXISTING — " + proposal.existingEntity}
+            </div>
+            <pre className="codeblock">{proposal.existingBlock}</pre>
+            {proposal.isExactMatch && (
+              <div className="prop-existing-noop-hint">
+                Approve to confirm the redundant write, or reject to cancel.
+              </div>
+            )}
+          </div>
+        )}
         <div className="prop-block">
           <div className="prop-block-title">
             {proposal.transport === "cli" ? "IOS XE commands" : "WebUI steps"}

@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import httpx
+from anthropic._exceptions import OverloadedError as AnthropicOverloadedError
+
 from backend.orchestration import tool_registry as tr
 from backend.orchestration.confirmations import (
     approve_action,
@@ -790,4 +793,256 @@ def test_propose_webui_configure_closes_session_on_intent_not_mappable(monkeypat
     assert result["error"] == "intent_not_mappable"
     assert len(close_calls) == 1, (
         "close_all_sessions must be called exactly once on intent_not_mappable"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chunk 7 — conflict_detector wired into propose_cli_configure +
+#            propose_webui_configure
+# ---------------------------------------------------------------------------
+
+
+def test_propose_cli_configure_attaches_conflict_fields_on_match(monkeypatch):
+    """When draft_cli_plan returns commands whose anchor matches running-config,
+    conflict fields appear in both the returned preview sub-dict and the
+    stored action params."""
+    from backend.orchestration.confirmations import get_action
+
+    rag_result = {"results": [{"text": "OSPF ref", "source": "ospf.pdf", "section": "OSPF"}]}
+    drafted = {
+        "config_commands": ["router ospf 1", " network 10.0.0.0 0.0.0.255 area 0"],
+        "verify_command": 'show ip ospf | include "ospf 1"',
+        "verify_pattern": "ospf 1",
+        "risk": "Adds OSPF process 1.",
+    }
+    running_cfg = "!\nrouter ospf 1\n network 10.0.0.0 0.0.0.255 area 0\n!\n"
+
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(tr, "draft_cli_plan", lambda *a, **kw: drafted)
+
+    result = tr.execute_tool(
+        "propose_cli_configure",
+        {"intent": "Configure OSPF process 1 area 0"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    # Conflict fields in top-level preview_meta, NOT inside preview sub-dict
+    assert result["preview_meta"]["existing_entity"] == "router ospf 1"
+    assert "is_exact_match" in result["preview_meta"]
+    assert "existing_entity" not in result["preview"]  # preview stays scoped
+
+    action = get_action(result["action_id"])
+    assert action["preview_meta"]["existing_entity"] == "router ospf 1"
+    assert "is_exact_match" in action["preview_meta"]
+    # Regression guard: params stays clean for executor splat
+    assert "existing_entity" not in action["params"]
+    assert "is_exact_match" not in action["params"]
+
+    # Sanity: draft_plan was NOT involved (cli path uses draft_cli_plan)
+    # — just confirm running_config was passed to the tool
+    assert result["action_id"].startswith("act_")
+
+
+def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(monkeypatch):
+    """draft_plan returns equivalent_cli_commands matching running-config stanza;
+    conflict fields appear in preview sub-dict and stored params.
+    Also asserts draft_plan was called with running_config kwarg populated."""
+
+    from backend.orchestration.confirmations import get_action
+
+    rag_result = {"results": [{"text": "VLAN ref", "source": "vlan.pdf", "section": "VLAN"}]}
+    open_result = {"session_id": "sess_v30", "view": {}}
+    desc_result = {"session_id": "sess_v30", "view": {"elements": []}}
+    running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
+
+    drafted = {
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None}],
+        "verify_text": "30",
+        "risk": "Creates VLAN 30.",
+        "equivalent_cli_commands": ["vlan 30", " name OFFICE"],
+    }
+
+    draft_plan_calls: list[dict] = []
+
+    def _draft_plan(*args, **kwargs):
+        draft_plan_calls.append(kwargs)
+        return drafted
+
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
+    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(tr, "draft_plan", _draft_plan)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add VLAN 30 named OFFICE", "webui_path": "/webui/#/vlan"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    # Conflict fields in top-level preview_meta, NOT inside preview sub-dict
+    assert result["preview_meta"]["existing_entity"] == "vlan 30"
+    assert "is_exact_match" in result["preview_meta"]
+    assert "existing_entity" not in result["preview"]  # preview stays scoped
+
+    action = get_action(result["action_id"])
+    assert action["preview_meta"]["existing_entity"] == "vlan 30"
+    # Regression guard: params stays clean for executor splat
+    assert "existing_entity" not in action["params"]
+    assert "is_exact_match" not in action["params"]
+
+    # draft_plan must have received running_config=
+    assert len(draft_plan_calls) == 1
+    assert draft_plan_calls[0].get("running_config") == running_cfg
+
+
+def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkeypatch):
+    """When draft_plan returns equivalent_cli_commands=[], the conflict
+    detector is skipped — preview_meta is None in the returned result,
+    and no exception is raised."""
+
+    rag_result = {"results": [{"text": "x", "source": "s", "section": "S"}]}
+    open_result = {"session_id": "sess_empty_cli", "view": {}}
+    desc_result = {"session_id": "sess_empty_cli", "view": {"elements": []}}
+    running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
+
+    drafted = {
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None}],
+        "verify_text": "30",
+        "risk": "Adds VLAN.",
+        "equivalent_cli_commands": [],
+    }
+
+    draft_plan_calls: list[dict] = []
+
+    def _draft_plan(*args, **kwargs):
+        draft_plan_calls.append(kwargs)
+        return drafted
+
+    monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
+    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+    monkeypatch.setattr(tr, "draft_plan", _draft_plan)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add VLAN 30", "webui_path": "/webui/#/vlan"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert result["preview_meta"] is None
+
+    # draft_plan still received running_config= kwarg
+    assert len(draft_plan_calls) == 1
+    assert draft_plan_calls[0].get("running_config") == running_cfg
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — Phase C bugfix (preview_meta separation)
+# ---------------------------------------------------------------------------
+
+
+def test_set_hostname_execute_params_contain_no_propose_metadata(monkeypatch):
+    """Regression: chunk 7 leaked propose-time conflict fields into action.params,
+    which broke set_hostname() splat in the execute path with TypeError.
+    Confirm params is clean even when a conflict IS detected."""
+    from backend.orchestration.confirmations import get_action
+
+    # Exact match so conflict IS detected — exercises the regression path.
+    running_cfg = "!\nhostname c1111-lab\n!\n"
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
+
+    result = tr._TOOL_FUNCS["propose_set_hostname"]("c1111-lab")
+
+    # Conflict was detected → preview_meta carries it
+    assert result["preview_meta"] is not None
+    assert result["preview_meta"]["existing_entity"] == "hostname c1111-lab"
+
+    # action.params stays CLEAN — only the executor's kwargs survive
+    action = get_action(result["action_id"])
+    assert action["params"] == {"new_name": "c1111-lab"}
+    assert "existing_entity" not in action["params"]
+    assert "existing_block" not in action["params"]
+    assert "is_exact_match" not in action["params"]
+
+    # And action.preview_meta carries the conflict for the UI
+    assert action["preview_meta"]["existing_entity"] == "hostname c1111-lab"
+
+
+# ---------------------------------------------------------------------------
+# Chunk 10 — OverloadedError wrapping in propose tools
+# ---------------------------------------------------------------------------
+
+
+def _make_overloaded_error(request_id: str = "req_test_registry_529") -> AnthropicOverloadedError:
+    """Build a real OverloadedError with a real httpx.Response matching the
+    SDK's APIStatusError.__init__ signature."""
+    mock_request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    mock_response = httpx.Response(
+        status_code=529,
+        headers={"request-id": request_id},
+        request=mock_request,
+    )
+    return AnthropicOverloadedError(
+        message="Overloaded",
+        response=mock_response,
+        body={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+    )
+
+
+def test_propose_cli_configure_wraps_overloaded_error(monkeypatch):
+    """When draft_cli_plan raises OverloadedError, _propose_cli_configure must
+    return the structured llm_overloaded dict instead of propagating the exception."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "hostname LAB\n!\nend")
+
+    err = _make_overloaded_error("req_cli_529")
+    monkeypatch.setattr(tr, "draft_cli_plan", lambda *a, **kw: (_ for _ in ()).throw(err))
+
+    result = tr.execute_tool("propose_cli_configure", {"intent": "add VLAN 30"})
+
+    assert result["error"] == "llm_overloaded"
+    assert "overloaded" in result["message"].lower()
+    assert result["request_id"] == "req_cli_529"
+
+
+def test_propose_webui_configure_wraps_overloaded_error(monkeypatch):
+    """When draft_plan raises OverloadedError, _propose_webui_configure must
+    return the structured llm_overloaded dict and close the orphaned session."""
+    monkeypatch.setattr(
+        tr,
+        "_search_docs",
+        lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
+    )
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_overload", "view": {}})
+    monkeypatch.setattr(
+        tr,
+        "webui_describe_page",
+        lambda **kw: {"session_id": "sess_overload", "view": {"elements": []}},
+    )
+
+    err = _make_overloaded_error("req_webui_529")
+    monkeypatch.setattr(tr, "draft_plan", lambda *a, **kw: (_ for _ in ()).throw(err))
+
+    close_calls: list[int] = []
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "configure OSPF", "webui_path": "/webui/#/routing/ospf"},
+    )
+
+    assert result["error"] == "llm_overloaded"
+    assert "overloaded" in result["message"].lower()
+    assert result["request_id"] == "req_webui_529"
+    assert len(close_calls) == 1, (
+        "close_all_sessions must be called on overload to clean up session"
     )

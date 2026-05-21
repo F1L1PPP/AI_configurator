@@ -192,6 +192,24 @@
   Object.assign(window, {
     api: {
 
+      // GET /api/suggestions?device_id=X → array of suggestion strings, [] on failure.
+      // device_id defaults to "router-01" on the server; pass undefined to use that default.
+      fetchSuggestions: async function (deviceId) {
+        try {
+          var qs = deviceId ? "?device_id=" + encodeURIComponent(deviceId) : "";
+          var res = await fetch(url("/api/suggestions" + qs));
+          if (!res.ok) {
+            console.error("[api] fetchSuggestions HTTP " + res.status);
+            return [];
+          }
+          var data = await res.json();
+          return Array.isArray(data.suggestions) ? data.suggestions : [];
+        } catch (err) {
+          console.error("[api] fetchSuggestions network error:", err);
+          return [];
+        }
+      },
+
       // GET /api/devices → parsed array, [] on failure.
       fetchDevices: async function () {
         try {
@@ -204,6 +222,39 @@
         } catch (err) {
           console.error("[api] fetchDevices network error:", err);
           return [];
+        }
+      },
+
+      // GET /api/devices/{id}/last-backup → {action_id, taken_at, snapshot_path, count}.
+      // Returns null fields + count 0 when no snapshots exist yet.
+      fetchLastBackup: async function (deviceId) {
+        try {
+          var res = await fetch(url("/api/devices/" + encodeURIComponent(deviceId) + "/last-backup"));
+          if (!res.ok) {
+            console.error("[api] fetchLastBackup HTTP " + res.status);
+            return { action_id: null, taken_at: null, snapshot_path: null, count: 0 };
+          }
+          return res.json();
+        } catch (err) {
+          console.error("[api] fetchLastBackup network error:", err);
+          return { action_id: null, taken_at: null, snapshot_path: null, count: 0 };
+        }
+      },
+
+      // GET /api/actions/{id}/snapshot/{phase} → running-config text, null on any failure.
+      // phase must be "pre" or "post". 404/422/network all collapse to null — caller
+      // renders the empty-state placeholder uniformly.
+      fetchSnapshot: async function (actionId, phase) {
+        try {
+          var res = await fetch(url("/api/actions/" + encodeURIComponent(actionId) + "/snapshot/" + encodeURIComponent(phase)));
+          if (!res.ok) {
+            return null;
+          }
+          var data = await res.json();
+          return typeof data.running_config === "string" ? data.running_config : null;
+        } catch (err) {
+          console.error("[api] fetchSnapshot network error:", err);
+          return null;
         }
       },
 
@@ -226,11 +277,25 @@
       },
 
       // GET /api/actions/{actionId} → {action, before, after, addedSet, commands, note}.
+      // Also parallel-fetches pre/post snapshot content so adaptPreview can build a real diff.
       fetchPreview: async function (actionId) {
-        var res = await fetch(url("/api/actions/" + encodeURIComponent(actionId)));
-        if (!res.ok) await throwFromResponse(res);
-        var action = await res.json();
-        return adaptPreview(action);
+        try {
+          var res = await fetch(url("/api/actions/" + encodeURIComponent(actionId)));
+          if (!res.ok) return null;
+          var action = await res.json();
+          // Pull both snapshots in parallel. Returns null on any failure path; the
+          // adaptPreview's existing null-guard renders the empty-state cleanly.
+          var snapshots = await Promise.all([
+            this.fetchSnapshot(actionId, "pre"),
+            this.fetchSnapshot(actionId, "post"),
+          ]);
+          action.snapshot_pre = snapshots[0];
+          action.snapshot_post = snapshots[1];
+          return adaptPreview(action);
+        } catch (err) {
+          console.error("[api] fetchPreview network error:", err);
+          return null;
+        }
       },
 
       // POST /api/chat {message, history} → full ChatResponse; throws on non-2xx.

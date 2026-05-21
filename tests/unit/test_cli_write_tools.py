@@ -11,6 +11,7 @@ import backend.cli_agent.write_tools as wt
 from backend.orchestration.confirmations import (
     NotApproved,
     approve_action,
+    get_action,
     propose_action,
 )
 
@@ -26,6 +27,19 @@ from backend.orchestration.confirmations import (
 def _mock_pool(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     mock_conn = MagicMock()
     mock_conn.send_config_set.return_value = "config applied"
+    # Default verify-read output satisfies the post-write `_verify_running_config`
+    # patterns for set_hostname / set_interface_ip / set_access_vlan happy-path
+    # tests below. Tests that exercise verify-miss override this per-test.
+    mock_conn.send_command.return_value = (
+        "hostname R1\n"
+        "hostname NEW-NAME\n"
+        "hostname LAB-R1\n"
+        "interface GigabitEthernet0/1/2\n"
+        " no switchport\n"
+        " ip address 10.1.1.1 255.255.255.0\n"
+        " no shutdown\n"
+        "40   OFFICE                           active\n"
+    )
     mock_pool = MagicMock()
     mock_pool.get_connection.return_value = mock_conn
     monkeypatch.setattr(wt, "pool", mock_pool)
@@ -280,6 +294,176 @@ def test_set_access_vlan_accepts_valid_names(_mock_pool, _mock_snapshot):
     approve_action(aid)
     for ok in ("OFFICE", "lab-vlan-1", "DMZ_INTERNAL", "v" * 32):
         wt._validate_vlan_name(ok)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# Post-write validation — % error scanner + show-back verify
+# (Regression suite for the 2026-05-18 silent-failure bug: `set_interface_ip`
+# on Gi0/1/3 returned success but the IP never landed because the hardware-
+# L2 port silently rejected `ip address`. Until write_tools validate their
+# own work, every fast-path CLI write is suspect.)
+# ---------------------------------------------------------------------------
+
+
+def test_check_netmiko_output_for_errors_passes_clean_output():
+    """No '%' lines → returns None, no exception."""
+    wt._check_netmiko_output_for_errors("Building configuration...\nhostname R1\n")
+
+
+def test_check_netmiko_output_for_errors_raises_on_invalid_input():
+    """The exact line IOS XE emits when an `ip address` lands on a switchport."""
+    output = (
+        "interface GigabitEthernet0/1/3\n"
+        " ip address 10.0.0.1 255.255.255.0\n"
+        "% Invalid input detected at '^' marker.\n"
+        " no shutdown\n"
+    )
+    with pytest.raises(wt.WriteRejectedError, match="Invalid input detected"):
+        wt._check_netmiko_output_for_errors(output)
+
+
+def test_set_interface_ip_raises_when_device_silently_rejects(_mock_pool, _mock_snapshot):
+    """The 2026-05-18 bug: send_config_set returned cleanly but the device
+    emitted '% Invalid input' for the `ip address` on a L2-only port. Tool
+    must raise WriteRejectedError + mark the action FAILED instead of
+    reporting success."""
+    _mock_pool.send_config_set.return_value = (
+        "interface GigabitEthernet0/1/3\n"
+        " no switchport\n"
+        "          ^\n"
+        "% Invalid input detected at '^' marker.\n"
+        " ip address 192.168.40.1 255.255.255.0\n"
+        " no shutdown\n"
+    )
+    aid = propose_action("set_interface_ip", {})
+    approve_action(aid)
+
+    with pytest.raises(wt.WriteRejectedError, match="Invalid input"):
+        wt.set_interface_ip("Gi0/1/3", "192.168.40.1", "255.255.255.0", action_id=aid)
+
+    assert get_action(aid)["state"] == "FAILED"
+    # Forensic post-snapshot was still taken so the operator can diff.
+    snap_phases = [c.args[1] for c in _mock_snapshot.call_args_list]
+    assert "pre" in snap_phases and "post" in snap_phases
+
+
+def test_set_hostname_raises_when_running_config_missing_new_hostname(_mock_pool, _mock_snapshot):
+    """send_config_set clean, no '%' errors, but the show-back doesn't
+    contain the new hostname → verify miss → WriteRejectedError + FAILED."""
+    _mock_pool.send_config_set.return_value = "config applied"
+    _mock_pool.send_command.return_value = "hostname OLD-NAME\n"  # new name not present
+
+    aid = propose_action("set_hostname", {"name": "BRAND-NEW"})
+    approve_action(aid)
+
+    with pytest.raises(wt.WriteRejectedError, match="post-write verify missed"):
+        wt.set_hostname("BRAND-NEW", action_id=aid)
+
+    assert get_action(aid)["state"] == "FAILED"
+
+
+def test_set_access_vlan_raises_when_vlan_brief_missing_new_row(_mock_pool, _mock_snapshot):
+    """`show vlan brief` doesn't list the new VLAN → verify miss → FAILED."""
+    _mock_pool.send_config_set.return_value = "config applied"
+    _mock_pool.send_command.return_value = (
+        "VLAN Name                             Status    Ports\n"
+        "1    default                          active    Gi0/1/0\n"
+        # VLAN 99 was supposed to be created but is missing from the output
+    )
+
+    aid = propose_action("set_access_vlan", {"vlan_id": 99, "vlan_name": "ABSENT"})
+    approve_action(aid)
+
+    with pytest.raises(wt.WriteRejectedError, match="post-write verify missed"):
+        wt.set_access_vlan(99, "ABSENT", action_id=aid)
+
+    assert get_action(aid)["state"] == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Live CLI command stream (chunk 2b 2026-05-19)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_cli_commands_publishes_one_event_per_command(monkeypatch):
+    """Each command in the list should generate a `cli_command_sent` event
+    with the right index/total + mode. Powers the chat live event stream's
+    terminal-scroll view."""
+    published: list[dict] = []
+    monkeypatch.setattr(wt.bus, "publish", lambda ev: published.append(ev))
+
+    wt._emit_cli_commands(
+        "set_interface_ip",
+        "act_abc",
+        ["interface Gi0/1/3", " no switchport", " ip address 10.0.0.1 255.255.255.0"],
+        mode="config",
+    )
+
+    assert len(published) == 3
+    for i, ev in enumerate(published):
+        assert ev["type"] == "cli_command_sent"
+        assert ev["data"]["tool"] == "set_interface_ip"
+        assert ev["data"]["action_id"] == "act_abc"
+        assert ev["data"]["command_index"] == i + 1
+        assert ev["data"]["command_total"] == 3
+        assert ev["data"]["mode"] == "config"
+    assert published[0]["data"]["command"] == "interface Gi0/1/3"
+    assert published[2]["data"]["command"] == " ip address 10.0.0.1 255.255.255.0"
+
+
+def test_set_interface_ip_emits_cli_commands_before_send_config_set(
+    _mock_pool, _mock_snapshot, monkeypatch
+):
+    """The eventbus must see all 4 cli_command_sent events BEFORE Netmiko
+    is called (operator sees what's about to run before the SSH lands).
+    Values match the `_mock_pool` fixture default `send_command.return_value`
+    so the post-write verify passes and we exercise the full happy path."""
+    call_order: list[str] = []
+    monkeypatch.setattr(
+        wt.bus,
+        "publish",
+        lambda ev: call_order.append("emit:" + ev["data"]["command"])
+        if ev["type"] == "cli_command_sent"
+        else None,
+    )
+    _mock_pool.send_config_set.side_effect = lambda *a, **kw: (
+        call_order.append("send_config_set") or "config applied"
+    )
+
+    aid = propose_action("set_interface_ip", {})
+    approve_action(aid)
+    wt.set_interface_ip("GigabitEthernet0/1/2", "10.1.1.1", "255.255.255.0", action_id=aid)
+
+    # All 4 emits must precede the single send_config_set call.
+    send_idx = call_order.index("send_config_set")
+    assert call_order[:send_idx] == [
+        "emit:interface GigabitEthernet0/1/2",
+        "emit: no switchport",
+        "emit: ip address 10.1.1.1 255.255.255.0",
+        "emit: no shutdown",
+    ]
+
+
+def test_set_access_vlan_emits_both_config_and_verify_commands(
+    _mock_pool, _mock_snapshot, monkeypatch
+):
+    """Both phases stream: 2 config-mode emits during send_config_set, then
+    1 exec-mode emit when _verify_running_config runs `show vlan brief`."""
+    published: list[dict] = []
+    monkeypatch.setattr(wt.bus, "publish", lambda ev: published.append(ev))
+
+    aid = propose_action("set_access_vlan", {"vlan_id": 40, "vlan_name": "OFFICE"})
+    approve_action(aid)
+    wt.set_access_vlan(40, "OFFICE", action_id=aid)
+
+    cli_events = [e for e in published if e["type"] == "cli_command_sent"]
+    config_events = [e for e in cli_events if e["data"]["mode"] == "config"]
+    exec_events = [e for e in cli_events if e["data"]["mode"] == "exec"]
+    assert len(config_events) == 2
+    assert config_events[0]["data"]["command"] == "vlan 40"
+    assert config_events[1]["data"]["command"] == " name OFFICE"
+    assert len(exec_events) == 1
+    assert exec_events[0]["data"]["command"] == "show vlan brief"
 
 
 # ---------------------------------------------------------------------------

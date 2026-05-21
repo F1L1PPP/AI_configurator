@@ -653,6 +653,7 @@ button { font-family: inherit; }
 }
 .mini-stream .ms-time { color: var(--ink-4); }
 .mini-stream .ms-ok { color: var(--ok); font-size: 9px; }
+.mini-stream .ms-warn { color: var(--fail); font-size: 9px; }
 .quick-actions { display: grid; gap: 6px; }
 .qa-btn {
   display: grid;
@@ -696,6 +697,7 @@ button { font-family: inherit; }
 }
 .mini-stream .ms-time { color: var(--ink-4); }
 .mini-stream .ms-ok { color: var(--ok); font-size: 9px; }
+.mini-stream .ms-warn { color: var(--fail); font-size: 9px; }
 .device-overview-art {
   width: 100%;
   aspect-ratio: 1.162;
@@ -916,6 +918,22 @@ button { font-family: inherit; }
 .chat-phase--executing { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); animation: pulse 1.6s ease-in-out infinite; }
 .chat-phase--done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
 
+.chat-reset-btn {
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.chat-reset-btn:hover:not(:disabled) { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 40%, transparent); }
+.chat-reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 @keyframes pulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.5; } }
 
 .chat-scroll {
@@ -1047,6 +1065,35 @@ button { font-family: inherit; }
   color: var(--ink-3);
 }
 
+.prop-existing-block {
+  /* Amber/warn tone — informational, NOT a danger refusal */
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+  padding-left: 12px;
+}
+
+.prop-existing-block .prop-block-title {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.prop-existing-block--noop {
+  /* Stronger emphasis: this is a no-op, the operator should pause */
+  border-left-color: color-mix(in srgb, var(--warn) 140%, var(--fail) 20%);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.prop-existing-block--noop .prop-block-title {
+  color: color-mix(in srgb, var(--warn) 130%, var(--fail) 10%);
+}
+
+.prop-existing-noop-hint {
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: var(--warn);
+  font-style: italic;
+}
+
 .codeblock {
   font-family: var(--mono);
   font-size: 12.5px;
@@ -1089,6 +1136,30 @@ button { font-family: inherit; }
 .result-row { display: flex; gap: 12px; font-family: var(--mono); font-size: 11.5px; }
 .result-row span { color: var(--ink-4); min-width: 92px; }
 .result-row code { color: var(--ink-2); }
+/* Plain-English diagnostic digest from debug_sweep — multi-paragraph text,
+   not monospace (it's English prose, not config). Sits between the title
+   and the Verify/Snapshots metadata. */
+.result-digest {
+  margin: 10px 0 12px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--accent-soft) 50%, transparent);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+}
+.result-digest-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+}
+.result-digest-text {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink-1);
+  white-space: pre-wrap;
+}
 
 /* chat input */
 .chat-input-wrap {
@@ -1178,6 +1249,15 @@ button { font-family: inherit; }
 .stream-line--step { color: var(--ink-2); }
 .stream-line--fail { color: var(--fail); }
 .stream-line--info { color: var(--ink-4); }
+.stream-line--cli {
+  color: var(--ink-1);
+  font-family: var(--mono);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  padding: 2px 6px;
+  border-left: 2px solid var(--accent);
+  border-radius: 2px;
+  white-space: pre-wrap;
+}
 .stream-foot {
   border-top: 1px solid var(--line-softer);
   padding: 12px 18px;
@@ -1284,6 +1364,24 @@ button { font-family: inherit; }
 
 .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .card--diff .card-body { padding: 0 0 14px; }
+.card--diff .muted {
+  /* Sit flush with the card title's left edge: match `.card-head`'s 20px
+     horizontal padding so the empty-state text reads as a peer of the
+     "RUNNING CONFIG — BEFORE/AFTER" title above it. */
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  padding: 14px 20px;
+}
+/* Summary + Commands card empty-state placeholders — match their populated
+   states' monospace styling. Position inherits from .card-body's default
+   padding (14px 20px 20px), so no padding override needed. */
+.card--summary .muted,
+.card--commands .muted {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-3);
+}
 .diff {
   font-family: var(--mono);
   font-size: 12.5px;
@@ -1723,9 +1821,21 @@ button { font-family: inherit; }
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 100%);
   mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 100%);
 }
+/* Anchor the foot wave to the viewport bottom even when the four preview
+   cards are short (e.g. all in empty/Loading state). Two parts:
+   1. .screen--preview gets min-height so it always fills the viewport.
+   2. .preview-foot-wave uses margin-top:auto inside the flex column to
+      sit at the bottom of that container instead of flush below the cards.
+   Without this, the wave dangles in the middle of the page with a tall
+   white gap below. */
+.screen--preview {
+  position: relative;
+  flex: 1;
+  min-height: calc(100vh - var(--topbar-h) - var(--pad) * 2);
+}
 .preview-foot-wave {
   position: relative;
-  margin: -40px calc(var(--pad) * -1) calc(var(--pad) * -1);
+  margin: auto calc(var(--pad) * -1) calc(var(--pad) * -1);
   height: 280px;
   background: transparent;
   border: 0;

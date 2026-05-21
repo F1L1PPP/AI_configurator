@@ -16,10 +16,14 @@ Design notes:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from typing import Any
+
+from anthropic._exceptions import OverloadedError as AnthropicOverloadedError
 
 from backend.cli_agent import read_tools, write_tools
 from backend.cli_agent.write_tools import (
@@ -40,6 +44,7 @@ from backend.orchestration.confirmations import (
     is_approved,
     propose_action,
 )
+from backend.orchestration.conflict_detector import find_existing_block
 from backend.webui_agent.flows.add_access_vlan import add_access_vlan_via_webui
 from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 from backend.webui_agent.generic_driver import (
@@ -122,6 +127,11 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         # CLI AI configure — Haiku drafts IOS XE commands, denylist + human
         # approval gate, Netmiko applies, regex-verifies post-state.
         "cli_configure",
+        # Chunk 12 — diagnostic sweep executor. Read-only (show commands only),
+        # but gated behind the same two-click Approve+Execute contract so the
+        # operator sees and controls every sweep. propose_debug_sweep →
+        # APPROVE → debug_sweep.
+        "debug_sweep",
     }
 )
 _REQUIRES_APPROVAL = WRITE_TOOLS
@@ -498,12 +508,157 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["action_id"],
         },
     },
+    {
+        "name": "propose_debug_sweep",
+        "description": (
+            "Propose a diagnostic show plan. Two modes — pick based on the user's "
+            "most recent message:\n\n"
+            "(1) REACTIVE: when the user message looks like 'Please diagnose "
+            "action_id=act_XXX which failed at execute time: ...' (this is the "
+            "frontend's auto-debug trigger), you MUST extract the action_id token "
+            "(`act_YYYYMMDD_NNNNNN`) from the message and pass it as "
+            "`failure_action_id=act_XXX`. Drafts 1-3 NARROWED `show` commands "
+            "that re-query the specific failed change (e.g. for a failed `ip route` "
+            "write, the plan should include `show ip route static | include <prefix>` "
+            "— NOT a broad sweep). Failing to pass failure_action_id falls through "
+            "to a broad sweep, which loses the focused diagnosis the operator needs.\n\n"
+            "(2) ON-DEMAND: when the user explicitly asks for a broad sweep "
+            "(e.g. 'diagnose router state', 'debug my config', 'what's wrong'), "
+            "call with NO arguments. Drafts a broader 4-6 command health sweep.\n\n"
+            "Returns awaiting_approval; operator APPROVE+EXECUTE. All commands "
+            "are read-only `show` commands. After execution, returns a "
+            "plain-English digest synthesized by Haiku."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "failure_action_id": {
+                    "type": "string",
+                    "description": (
+                        "action_id of the failed action to diagnose, in the form "
+                        "`act_YYYYMMDD_NNNNNN`. MUST be extracted from the user's "
+                        "auto-debug message when one is present (e.g. message "
+                        "'Please diagnose action_id=act_20260521_ed8207 which "
+                        'failed...\' → pass `failure_action_id="act_20260521_ed8207"`). '
+                        "Omit ONLY for genuinely broad on-demand sweeps with no "
+                        "specific failure context."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "debug_sweep",
+        "description": (
+            "Execute a previously-approved diagnostic show plan. Requires an "
+            "action_id from a propose_debug_sweep call that has been APPROVED by "
+            "the human. Runs each show command via SSH, collects raw outputs, and "
+            "asks Haiku to synthesize a plain-English digest. Read-only — never "
+            "modifies the router."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action_id": {
+                    "type": "string",
+                    "description": "Action ID from the matching propose_debug_sweep call.",
+                },
+            },
+            "required": ["action_id"],
+        },
+    },
 ]
 
 
 # ---------------------------------------------------------------------------
 # Dispatch table — tool name → callable
 # ---------------------------------------------------------------------------
+
+
+def _detect_hostname_conflict(new_name: str) -> dict | None:
+    """Shared propose-time conflict check for hostname changes.
+
+    Called by both CLI (_propose_set_hostname) and WebUI
+    (_propose_webui_set_hostname) fast-path tools so behaviour can't drift.
+    Returns a `preview_meta` dict (with existing_entity / existing_block /
+    is_exact_match) when a conflict is found, or None if SSH soft-fails or
+    no existing hostname line matches the proposed one.
+    """
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("hostname_conflict_precheck_read_failed", error=str(exc))
+    if not running_config:
+        return None
+    existing = find_existing_block([f"hostname {new_name}"], running_config)
+    if not existing:
+        return None
+    return {
+        "existing_entity": existing["anchor"],
+        "existing_block": existing["block"],
+        "is_exact_match": existing["is_exact_match"],
+    }
+
+
+def _detect_vlan_conflict(vlan_id: int, vlan_name: str) -> dict | None:
+    """Shared propose-time conflict check for VLAN add/rename.
+
+    Called by both CLI (_propose_set_access_vlan) and WebUI
+    (_propose_webui_add_access_vlan) fast-path tools so the C1111-4P
+    vlan.dat fallback applies to both. Returns a `preview_meta` dict or
+    None. The fallback path queries `show vlan brief` when the universal
+    detector misses the stanza in running-config — VLAN definitions on
+    the embedded switch live in vlan.dat and don't always appear in
+    `show running-config` as a clean `vlan N / name X` stanza.
+    """
+    would_be_commands = [f"vlan {vlan_id}", f" name {vlan_name}"]
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("vlan_conflict_precheck_read_failed", vlan_id=vlan_id, error=str(exc))
+
+    existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    if existing:
+        return {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
+
+    # Fallback: show_vlan_brief is authoritative for VLAN existence + name on
+    # C1111-4P style devices where VLAN config lives in vlan.dat only.
+    try:
+        vlans = read_tools.show_vlan_brief()
+    except Exception as exc:
+        log.warning("vlan_conflict_vlan_brief_failed", vlan_id=vlan_id, error=str(exc))
+        return None
+    for v in vlans:
+        if not isinstance(v, dict):
+            continue
+        if str(v.get("vlan_id", "")).strip() != str(vlan_id):
+            continue
+        # ntc-templates emits `vlan_name` (NOT `name`) for the
+        # cisco_ios_show_vlan_brief template. See
+        # backend/webui_agent/verify.py:49 for the same gotcha.
+        existing_name = (v.get("vlan_name") or "").strip()
+        synthetic_block = (
+            f"vlan {vlan_id}\n name {existing_name}" if existing_name else f"vlan {vlan_id}"
+        )
+        log.info(
+            "vlan_conflict_vlan_brief_match",
+            vlan_id=vlan_id,
+            existing_name=existing_name,
+            requested_name=vlan_name,
+        )
+        return {
+            "existing_entity": f"vlan {vlan_id}",
+            "existing_block": synthetic_block,
+            "is_exact_match": existing_name == vlan_name,
+        }
+    return None
 
 
 def _propose_set_hostname(new_name: str) -> dict:
@@ -513,11 +668,13 @@ def _propose_set_hostname(new_name: str) -> dict:
     # re-run server-side — defense-in-depth, but the user-facing failure
     # mode is the cheap one.
     _validate_hostname(new_name)
-    # Store the param under the same key the write tool's signature expects
-    # (`set_hostname(new_name: str, action_id: str)`), so the new
-    # `/api/execute/{action_id}` endpoint can dispatch via {**params,
-    # action_id=...} without a name-translation step.
-    action_id = propose_action("set_hostname", {"new_name": new_name})
+
+    # params contains ONLY the executor's kwargs — no propose-time metadata.
+    # (`set_hostname(new_name: str, action_id: str)`)
+    params: dict[str, Any] = {"new_name": new_name}
+    preview_meta = _detect_hostname_conflict(new_name)
+
+    action_id = propose_action("set_hostname", params, preview_meta=preview_meta)
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
@@ -525,16 +682,162 @@ def _propose_set_hostname(new_name: str) -> dict:
         "execute_tool": "set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": _NEXT_STEP_INLINE + " No need to open another screen.",
+        "commands": [f"hostname {new_name}"],
+        "preview_meta": preview_meta,
+    }
+
+
+_SWITCHPORT_RE = re.compile(r"^\s*switchport(\s|$)", re.MULTILINE)
+
+
+def _derive_svi_vlan_id(ip: str) -> int:
+    """Pick a VLAN id for the auto-redirected SVI plan.
+
+    Heuristic: third octet of the requested IP — works for the common
+    `192.168.<N>.<host>/24` lab layout (192.168.40.1 -> VLAN 40). When
+    the third octet is 0 or 1 (e.g. 10.0.0.x, anything on VLAN 1), fall
+    back to 100 so we never collide with the default VLAN or produce an
+    out-of-range id. Operator can rename/re-VLAN later if they want.
+    """
+    try:
+        third_octet = int(ip.split(".")[2])
+    except (IndexError, ValueError):
+        return 100
+    if 2 <= third_octet <= 4094:
+        return third_octet
+    return 100
+
+
+def _build_svi_redirect_proposal(interface: str, ip: str, mask: str) -> dict:
+    """When `interface` is a hardware switchport, propose an SVI plan
+    instead of the direct `set_interface_ip` write.
+
+    Three IOS XE blocks bundled into one approval:
+      1. `vlan <N>` + `name auto-vlan-<N>` (idempotent — re-applies if exists)
+      2. `interface Vlan<N>` + `ip address <ip> <mask>` + `no shutdown`
+      3. `interface <port>` + `switchport mode access` + `switchport access vlan <N>`
+
+    Returns the same `awaiting_approval` shape as `_propose_cli_configure`
+    so the chat/UI render it identically and execute via `cli_configure`.
+    """
+    vlan_id = _derive_svi_vlan_id(ip)
+    vlan_name = f"auto-vlan-{vlan_id}"
+
+    config_commands = [
+        f"vlan {vlan_id}",
+        f" name {vlan_name}",
+        "exit",
+        f"interface Vlan{vlan_id}",
+        f" ip address {ip} {mask}",
+        " no shutdown",
+        "exit",
+        f"interface {interface}",
+        " switchport mode access",
+        f" switchport access vlan {vlan_id}",
+        " no shutdown",
+    ]
+    verify_command = f"show ip interface brief | include Vlan{vlan_id}"
+    # `show ip interface brief` columns are width-padded; \s+ between
+    # interface name and the address handles whatever spacing IOS XE uses.
+    verify_pattern = rf"Vlan{vlan_id}\s+{re.escape(ip)}\s+"
+    risk = (
+        f"{interface} is a hardware switchport on the C1111-4P and cannot take "
+        f"`ip address` directly. Applying via VLAN {vlan_id} SVI: creates VLAN "
+        f"{vlan_id} if absent (named {vlan_name!r}); assigns {ip}/{mask} to "
+        f"`interface Vlan{vlan_id}`; sets {interface} to "
+        f"`switchport mode access` + `switchport access vlan {vlan_id}`. Any "
+        f"prior trunk/voice/extra config on {interface} will be replaced; if "
+        f"VLAN {vlan_id} already exists with a different SVI IP, that IP is "
+        f"overwritten."
+    )
+
+    # Defense-in-depth — same validators every cli_configure plan goes through.
+    _validate_config_commands(config_commands)
+    _validate_verify_command(verify_command)
+    _validate_verify_pattern(verify_pattern)
+
+    intent = (
+        f"Set {ip}/{mask} on {interface} (re-routed: port is L2-only on "
+        f"this chassis, applying via VLAN {vlan_id} SVI)"
+    )
+    evidence = [
+        {"source": "docs/router-prerequisites.md", "section": "C1111-4P Gi0/1/x L2-only"},
+    ]
+    action_id = propose_action(
+        tool="cli_configure",
+        params={
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+        },
+    )
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "cli_configure",
+        "preview": {
+            "intent": intent,
+            "config_commands": config_commands,
+            "verify_command": verify_command,
+            "verify_pattern": verify_pattern,
+            "risk": risk,
+            "evidence": evidence,
+            "command_count": len(config_commands),
+        },
+        "next_step": _NEXT_STEP_INLINE,
+        "commands": config_commands,
     }
 
 
 def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
     _validate_interface(interface)
     _validate_interface_ip_and_mask(ip, mask)
-    action_id = propose_action(
-        "set_interface_ip",
-        {"interface": interface, "ip": ip, "mask": mask},
-    )
+
+    # Hardware pre-check: if the port is a switchport, `ip address` will be
+    # rejected at write time. Re-route to a 3-step SVI plan that the operator
+    # approves in one go. Snapshot-driven so it works across chassis without
+    # a hardcoded port list. SSH failure (router down, unit tests) is a soft
+    # miss — fall through to the direct propose; chunk-1's write-tool verify
+    # still catches the silent-failure case at execute time.
+    iface_block = ""
+    try:
+        iface_block = read_tools.show_running_config_interface(interface)
+    except Exception as exc:
+        log.warning(
+            "propose_set_interface_ip_precheck_read_failed",
+            interface=interface,
+            error=str(exc),
+        )
+
+    if iface_block and _SWITCHPORT_RE.search(iface_block):
+        return _build_svi_redirect_proposal(interface, ip, mask)
+
+    would_be_commands = [f"interface {interface}", f" ip address {ip} {mask}"]
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning(
+            "propose_set_interface_ip_conflict_read_failed",
+            interface=interface,
+            error=str(exc),
+        )
+
+    # params contains ONLY the executor's kwargs — no propose-time metadata.
+    params: dict[str, Any] = {"interface": interface, "ip": ip, "mask": mask}
+    existing = find_existing_block(would_be_commands, running_config) if running_config else None
+    preview_meta: dict[str, Any] | None = None
+    if existing:
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
+
+    action_id = propose_action("set_interface_ip", params, preview_meta=preview_meta)
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
@@ -547,13 +850,20 @@ def _propose_set_interface_ip(interface: str, ip: str, mask: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_INLINE,
+        "commands": would_be_commands,
+        "preview_meta": preview_meta,
     }
 
 
 def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     _validate_vlan_id(vlan_id)
     _validate_vlan_name(vlan_name)
-    action_id = propose_action("set_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name})
+
+    # params contains ONLY the executor's kwargs — no propose-time metadata.
+    params: dict[str, Any] = {"vlan_id": vlan_id, "vlan_name": vlan_name}
+    preview_meta = _detect_vlan_conflict(vlan_id, vlan_name)
+
+    action_id = propose_action("set_access_vlan", params, preview_meta=preview_meta)
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
@@ -567,14 +877,24 @@ def _propose_set_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_INLINE,
+        "commands": [f"vlan {vlan_id}", f" name {vlan_name}"],
+        "preview_meta": preview_meta,
     }
 
 
 def _propose_webui_set_hostname(new_name: str) -> dict:
     _validate_hostname(new_name)
+    # Conflict detection runs against the same running-config the CLI fast-path
+    # checks — the operator gets the same warning regardless of which transport
+    # the LLM picks. `commands` field carries the IOS-equivalent so the
+    # frontend's `IOS XE commands` block renders meaningfully even though the
+    # actual write goes via WebUI clicks.
+    preview_meta = _detect_hostname_conflict(new_name)
     # Store under `new_name` to match the flow function's kwarg name
     # (change_hostname_via_webui(new_name, action_id)).
-    action_id = propose_action("webui_set_hostname", {"new_name": new_name})
+    action_id = propose_action(
+        "webui_set_hostname", {"new_name": new_name}, preview_meta=preview_meta
+    )
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
@@ -582,14 +902,21 @@ def _propose_webui_set_hostname(new_name: str) -> dict:
         "execute_tool": "webui_set_hostname",
         "execute_params": {"new_name": new_name, "action_id": action_id},
         "next_step": _NEXT_STEP_WEBUI,
+        "commands": [f"hostname {new_name}"],
+        "preview_meta": preview_meta,
     }
 
 
 def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
     _validate_vlan_id(vlan_id)
     _validate_vlan_name(vlan_name)
+    # Same VLAN conflict detection as the CLI fast-path — includes the
+    # vlan.dat fallback via show_vlan_brief for C1111-4P style devices.
+    preview_meta = _detect_vlan_conflict(vlan_id, vlan_name)
     action_id = propose_action(
-        "webui_add_access_vlan", {"vlan_id": vlan_id, "vlan_name": vlan_name}
+        "webui_add_access_vlan",
+        {"vlan_id": vlan_id, "vlan_name": vlan_name},
+        preview_meta=preview_meta,
     )
     return {
         "status": "awaiting_approval",
@@ -606,6 +933,8 @@ def _propose_webui_add_access_vlan(vlan_id: int, vlan_name: str) -> dict:
             "action_id": action_id,
         },
         "next_step": _NEXT_STEP_WEBUI,
+        "commands": [f"vlan {vlan_id}", f" name {vlan_name}"],
+        "preview_meta": preview_meta,
     }
 
 
@@ -643,6 +972,14 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
     # 3. Inner Haiku drafts the plan
     try:
         drafted = draft_cli_plan(intent, rag_chunks, running_config)
+    except AnthropicOverloadedError as exc:
+        request_id = getattr(exc, "request_id", None)
+        log.warning("propose_cli_configure_llm_overloaded", intent=intent, request_id=request_id)
+        return {
+            "error": "llm_overloaded",
+            "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+            "request_id": request_id,
+        }
     except RuntimeError as exc:
         log.error("propose_cli_configure_draft_failed", intent=intent, error=str(exc))
         return {"error": "draft_failed", "message": str(exc)}
@@ -690,32 +1027,46 @@ def _propose_cli_configure(**kwargs: Any) -> dict:
         }
 
     evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
-    action_id = propose_action(
-        tool="cli_configure",
-        params={
-            "intent": intent,
-            "config_commands": config_commands,
-            "verify_command": verify_command,
-            "verify_pattern": verify_pattern,
-            "risk": risk,
-            "evidence": evidence,
-        },
-    )
+
+    # Conflict detection — preview_meta carries conflict fields separately from
+    # cli_params so executor's func(**params) never receives unexpected kwargs.
+    existing = find_existing_block(config_commands, running_config)
+    cli_params: dict[str, Any] = {
+        "intent": intent,
+        "config_commands": config_commands,
+        "verify_command": verify_command,
+        "verify_pattern": verify_pattern,
+        "risk": risk,
+        "evidence": evidence,
+    }
+    preview_meta: dict[str, Any] | None = None
+    if existing:
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
+
+    action_id = propose_action(tool="cli_configure", params=cli_params, preview_meta=preview_meta)
+
+    preview: dict[str, Any] = {
+        "intent": intent,
+        "config_commands": config_commands,
+        "verify_command": verify_command,
+        "verify_pattern": verify_pattern,
+        "risk": risk,
+        "evidence": evidence,
+        "command_count": len(config_commands),
+    }
 
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "execute_tool": "cli_configure",
-        "preview": {
-            "intent": intent,
-            "config_commands": config_commands,
-            "verify_command": verify_command,
-            "verify_pattern": verify_pattern,
-            "risk": risk,
-            "evidence": evidence,
-            "command_count": len(config_commands),
-        },
+        "preview": preview,
         "next_step": _NEXT_STEP_INLINE,
+        "preview_meta": preview_meta,
+        "commands": config_commands,
     }
 
 
@@ -780,9 +1131,26 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         return desc_result
     view = desc_result["view"]
 
+    # 3b. Fetch running-config for conflict detection. Soft-fail: if SSH is
+    # down or any other error, we still proceed without conflict info.
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:
+        log.warning("propose_webui_configure_running_config_read_failed", error=str(exc))
+
     # 4. Inner LLM drafts the plan
     try:
-        drafted = draft_plan(intent, rag_chunks, view)
+        drafted = draft_plan(intent, rag_chunks, view, running_config=running_config)
+    except AnthropicOverloadedError as exc:
+        request_id = getattr(exc, "request_id", None)
+        log.warning("propose_webui_configure_llm_overloaded", intent=intent, request_id=request_id)
+        close_all_sessions()
+        return {
+            "error": "llm_overloaded",
+            "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+            "request_id": request_id,
+        }
     except RuntimeError as exc:
         log.error("propose_webui_configure_draft_failed", intent=intent, error=str(exc))
         # Close the orphaned session — propose failed before propose_action
@@ -794,6 +1162,7 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     plan = drafted["plan"]
     verify_text = drafted["verify_text"]
     risk = drafted["risk"]
+    equivalent_cli = drafted.get("equivalent_cli_commands") or []
 
     if not plan:
         # Inner LLM said it can't map the intent. Surface to the planner.
@@ -806,34 +1175,52 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
             ],
         }
 
-    # 5. Register the action
+    # 5. Conflict detection using equivalent CLI commands (soft-fail if either
+    # side is empty — avoid false positives from an LLM that couldn't infer).
+    existing = None
+    if equivalent_cli and running_config:
+        existing = find_existing_block(equivalent_cli, running_config)
+
+    # 6. Register the action — preview_meta carries conflict fields separately
+    # from webui_params so executor's func(**params) never receives unexpected kwargs.
     evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
+    webui_params: dict[str, Any] = {
+        "intent": intent,
+        "webui_path": webui_path,
+        "plan": plan,
+        "verify_text": verify_text,
+        "risk": risk,
+        "evidence": evidence,
+        "session_id": session_id,
+    }
+    preview_meta: dict[str, Any] | None = None
+    if existing:
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
+
     action_id = propose_action(
-        tool="webui_configure",
-        params={
-            "intent": intent,
-            "webui_path": webui_path,
-            "plan": plan,
-            "verify_text": verify_text,
-            "risk": risk,
-            "evidence": evidence,
-            "session_id": session_id,
-        },
+        tool="webui_configure", params=webui_params, preview_meta=preview_meta
     )
+
+    webui_preview: dict[str, Any] = {
+        "intent": intent,
+        "plan": plan,
+        "verify_text": verify_text,
+        "risk": risk,
+        "evidence": evidence,
+        "step_count": len(plan),
+    }
 
     return {
         "status": "awaiting_approval",
         "action_id": action_id,
         "execute_tool": "webui_configure",
-        "preview": {
-            "intent": intent,
-            "plan": plan,
-            "verify_text": verify_text,
-            "risk": risk,
-            "evidence": evidence,
-            "step_count": len(plan),
-        },
+        "preview": webui_preview,
         "next_step": _NEXT_STEP_WEBUI,
+        "preview_meta": preview_meta,
     }
 
 
@@ -1038,6 +1425,23 @@ def _webui_configure(**kwargs: Any) -> dict:
                 new_view,
                 previous_steps=executed_steps,
             )
+        except AnthropicOverloadedError as exc:
+            request_id = getattr(exc, "request_id", None)
+            log.warning(
+                "webui_configure_llm_overloaded",
+                action_id=action_id,
+                iteration=iteration,
+                request_id=request_id,
+            )
+            mark_failed(action_id)
+            close_all_sessions()
+            return {
+                "error": "llm_overloaded",
+                "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+                "request_id": request_id,
+                "iteration": iteration,
+                "completed_steps": executed_steps,
+            }
         except RuntimeError as exc:
             mark_failed(action_id)
             close_all_sessions()
@@ -1109,6 +1513,154 @@ def _webui_configure(**kwargs: Any) -> dict:
         plan = next_plan
 
 
+def _propose_debug_sweep(**kwargs: Any) -> dict:
+    """Propose a diagnostic show plan. Reactive (failure context found) or
+    on-demand (no recent failure). Returns awaiting_approval shape.
+
+    Reactive failure context comes from one of three sources (tried in order):
+    1. `failure_action_id` kwarg passed by the LLM (ideal).
+    2. The most-recently-FAILED action in confirmations (server-side fallback).
+       This catches the auto-debug case where the LLM didn't extract the
+       action_id from the user's "Please diagnose action_id=X..." message.
+    3. None → broad on-demand sweep.
+
+    The fallback is what keeps reactive diagnosis focused even when Haiku
+    omits the kwarg. Without it the sweep degrades to a generic health check
+    that misses the actual failure the operator wanted explained.
+    """
+    from backend.orchestration.confirmations import find_most_recent_failure, get_action
+    from backend.orchestration.debug_planner import draft_debug_plan, draft_debug_sweep
+
+    failure_action_id: str | None = kwargs.get("failure_action_id") or None
+
+    failure_context: dict | None = None
+    if failure_action_id:
+        try:
+            failed_action = get_action(failure_action_id)
+        except KeyError:
+            return {
+                "error": "unknown_action",
+                "message": f"no action {failure_action_id!r}",
+            }
+        # Pull the stored result dict (set by mark_failed extension)
+        failure_context = failed_action.get("result") or None
+        if failure_context is None:
+            # Action exists but no result stored (e.g. action never failed).
+            # Surface cleanly rather than drafting a diagnosis for nothing.
+            return {
+                "error": "no_failure_to_diagnose",
+                "message": f"action {failure_action_id!r} has no stored failure context",
+            }
+    else:
+        # Server-side fallback: LLM didn't pass failure_action_id, but there
+        # may STILL be a recent failure worth focused diagnosis. Pull the
+        # most-recently FAILED action's stored result. If none exists, we
+        # fall through naturally to broad-sweep mode below.
+        failure_context = find_most_recent_failure()
+        if failure_context:
+            log.info(
+                "propose_debug_sweep_fallback_used",
+                error_key=failure_context.get("error"),
+                tool=failure_context.get("tool"),
+            )
+
+    try:
+        drafted = draft_debug_plan(failure_context) if failure_context else draft_debug_sweep()
+    except Exception as exc:
+        log.error("propose_debug_sweep_draft_failed", error=str(exc))
+        return {"error": "draft_failed", "message": str(exc)}
+
+    commands = drafted.get("commands") or []
+    if not commands:
+        return {
+            "error": "no_diagnostic_plan",
+            "message": drafted.get("summary_intent") or "Could not draft a diagnostic plan",
+        }
+
+    # Validate each command starts with `show ` for safety (defense in depth)
+    for cmd in commands:
+        if not isinstance(cmd, str) or not cmd.strip().lower().startswith("show "):
+            return {
+                "error": "unsafe_command",
+                "message": f"diagnostic plan included non-show command: {cmd!r}",
+            }
+
+    params = {
+        "commands": commands,
+        "failure_action_id": failure_action_id,  # may be None for on-demand
+    }
+    action_id = propose_action("debug_sweep", params, preview_meta=None)
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "debug_sweep",
+        "preview": {
+            "intent": drafted.get("summary_intent", "Diagnose router state"),
+            "commands": commands,
+            "risk": drafted.get("risk", "low — read-only show commands"),
+        },
+        "next_step": _NEXT_STEP_INLINE,
+        "commands": commands,
+        "preview_meta": None,
+    }
+
+
+def _debug_sweep(**kwargs: Any) -> dict:
+    """Execute the approved diagnostic show plan. Runs each show via
+    read_tools._run, collects outputs, hands them + failure context to
+    Haiku for a digest. Returns the digest as the chat reply text."""
+    from backend.orchestration.confirmations import get_action
+    from backend.orchestration.debug_planner import draft_debug_summary
+
+    action_id = kwargs.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        return {"error": "bad_parameters", "message": "action_id required"}
+    try:
+        action = get_action(action_id)
+    except KeyError:
+        return {"error": "unknown_action", "message": f"no action {action_id!r}"}
+
+    params = action.get("params", {})
+    commands = params.get("commands") or []
+    failure_action_id = params.get("failure_action_id")
+
+    # Pull the original failure context if reactive
+    failure_context = None
+    if failure_action_id:
+        with contextlib.suppress(KeyError):
+            failure_context = (get_action(failure_action_id).get("result")) or None
+
+    # Run each show command via _run (use_textfsm=False — diagnostic
+    # plans want the raw text, not parsed dicts). Cap individual output
+    # at 4000 chars to keep prompt cost bounded.
+    outputs: dict[str, str] = {}
+    for cmd in commands:
+        try:
+            raw = read_tools._run(cmd, use_textfsm=False)
+            outputs[cmd] = str(raw)[:4000]
+        except Exception as exc:
+            outputs[cmd] = f"<execution failed: {exc}>"
+
+    try:
+        digest = draft_debug_summary(outputs, failure_context)
+    except Exception as exc:
+        log.error("debug_sweep_summary_failed", error=str(exc))
+        digest = (
+            "Diagnostic outputs collected but the summary LLM call failed. "
+            "Raw outputs follow:\n\n" + "\n\n".join(f"{c}:\n{o}" for c, o in outputs.items())
+        )
+
+    return {
+        "tool": "debug_sweep",
+        "summary": digest,
+        "raw_outputs": outputs,
+        # No snapshot_post — debug_sweep is read-only. The applied-event
+        # heuristic in planner.py checks snapshot_post so it naturally
+        # won't emit `applied` for this tool. That's correct — the
+        # digest IS the operator-visible result.
+    }
+
+
 _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "show_version": read_tools.show_version,
     "show_ip_interface_brief": read_tools.show_ip_interface_brief,
@@ -1135,6 +1687,11 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     # at propose AND execute time.
     "propose_cli_configure": _propose_cli_configure,
     "cli_configure": _cli_configure,
+    # Chunk 12 — diagnostic sweep. propose_debug_sweep drafts the plan
+    # (reactive: failure_action_id set, or on-demand: no arg). debug_sweep
+    # executes the approved show commands and returns a Haiku digest.
+    "propose_debug_sweep": _propose_debug_sweep,
+    "debug_sweep": _debug_sweep,
 }
 
 
