@@ -173,6 +173,37 @@ When in doubt → deep. Production backend LLM still stays Haiku 4.5 — model-r
 - `~/.claude/skills/director-blueprint/SKILL.md` — 7 sections (frontmatter description, role-split table, role-split rationale, workflow diagram, briefing-template rationale, audit section + new "Why Opus audits" rationale paragraph, reference paragraph).
 - This file (kickoff doc) — summarise-back checklist line + this recap entry.
 
+### External review pass (PM) — 4 chunks shipped, 9 findings fixed
+
+A second external code review surfaced a 15-item summary table after `15de1dd`. Verified each finding via Haiku Explore agent: **11 real, 4 misread or already-fixed**. Bundled into 4 chunks by severity.
+
+| Chunk | Commit | Findings | Tier | Tests |
+|---|---|---|---|---|
+| **A** | [`f8fe1d5`](https://github.com/) | #1 Chromium sessions never closed (CRITICAL) | Deep | +2 (604) |
+| **B** | [`a60592e`](https://github.com/) | #3 Empty cred defaults + #2 Action-store TTL (HIGH×2) | Deep | +8 (612) |
+| **C** | [`f51e6d9`](https://github.com/) | #5 TOCTOU race + #7 Param signature guard + #6 mypy cleanup (MEDIUM×3) | Deep | +6 (618) |
+| **D** | [`9012b6e`](https://github.com/) | #9 WebUI goto timeout + #11 Eventbus log throttle + #14 WS strict-origin toggle (LOW×3) | Deep (escalated, #14 security-touching) | +5 (623) |
+
+**Total: 4 commits, +21 tests (602 → 623), all 4 Opus 4.7 deep audits returned PASS.**
+
+**Key fixes:**
+- **A:** `try/except/finally` wrap in `routes_chat.chat()` so `close_all_sessions()` runs after every turn. Atexit hook becomes backup, not primary.
+- **B:** `Settings.validate_required_credentials()` method called from main.py lifespan — fails at boot with all 7 missing creds listed (not a Pydantic `model_validator` — would burden every test). Lazy 24h TTL purge in `propose_action` removes terminal actions older than cutoff.
+- **C:** New atomic primitive `try_mark_failed_if_executing(action_id, result)` replaces the two-`get_state` TOCTOU. `execute_tool` adds `inspect.signature` guard that returns `bad_parameters` error on extra splat keys. Two mypy `ignore_errors` overrides cleared (`backend.core.logging`, `backend.webui_agent.selectors`); 5 remain.
+- **D:** `webui_goto_timeout_ms` + `ws_strict_origin` settings added. Eventbus throttles backpressure warnings to one per 5s with aggregated `drops_since_last_log` count. WS strict-origin opt-in defaults to False (dev workflow unchanged); flip to True for non-localhost deployment.
+
+**Deferred from this pass:**
+- **#8 — Name-based redaction misses renamed secret fields.** Fix is `pydantic.SecretStr` migration for `anthropic_api_key`, `router_ssh_password`, `router_webui_password` + ~15 call-site updates to `.get_secret_value()`. Scope too large for the MEDIUM batch; tracked as a follow-up chunk before `v0.4.0-alpha.1`.
+
+**Misread / already-fixed (no work):**
+- **#4** — validators are centralized in `write_tools.py` and imported into `tool_registry.py`; not duplicated.
+- **#10** — PyTorch CPU install IS documented in a comment block in `requirements.txt` (just not in a standalone doc).
+- **#12** — `WriteRejectedError` is actively used in 3 handlers, not dead.
+- **#13** — Static mount is already last with explicit "keep this LAST" comment.
+- **#15** — `test_close_all_sessions_closes_every_cached_session` already exists in `tests/unit/test_generic_driver.py`.
+
+**Audit rule worked end-to-end.** Tiered rule (Haiku light / Opus 4.7 deep, set earlier today) was applied: A/B/C/D all routed to Opus 4.7 deep because of security-touching surfaces (routes, settings boot guard, WS origin). One audit (Chunk D) was tier-escalated mid-flight when the WS strict-origin scope clarified — orchestrator's call, per the rule.
+
 ### Pre-demo hardening punch list (verified)
 
 Two slash-command reviews (`/review` + `/security-review`) ran against `v0.5.5` on 2026-05-21. Both concluded "ship as-is for alpha-1 demo." Verified findings + corrections added to the "Pre-demo hardening" section below — pick up before cutting `v0.4.0-alpha.1` (chunk 18) or any external sharing.
