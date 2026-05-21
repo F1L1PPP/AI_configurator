@@ -227,6 +227,31 @@ def is_approved(action_id: str) -> bool:
         return action["state"] in (ActionState.APPROVED, ActionState.EXECUTING)
 
 
+def find_most_recent_failure() -> dict | None:
+    """Return the (deepcopied) result dict of the most recently FAILED action
+    that has a stored result, or None if no such action exists.
+
+    Used by ``_propose_debug_sweep`` as a server-side fallback for the
+    auto-debug flow: when the LLM doesn't extract ``failure_action_id``
+    from a "Please diagnose action_id=X failed" user message, this
+    function recovers the failure context anyway so the diagnostic plan
+    stays focused instead of degrading to a broad sweep.
+
+    Returns the result deepcopied so callers can't mutate stored state.
+    """
+    with _lock:
+        candidates = [
+            a for a in _actions.values() if a.get("state") == ActionState.FAILED and a.get("result")
+        ]
+        if not candidates:
+            return None
+        # Most recently updated wins. `updated_at` is set by every transition
+        # (including mark_failed), so the most-recent FAILED action is the
+        # one whose updated_at is highest.
+        candidates.sort(key=lambda a: a.get("updated_at", ""), reverse=True)
+        return copy.deepcopy(candidates[0]["result"])
+
+
 def get_action(action_id: str) -> dict:
     """Return a deep copy of the action dict (safe to read outside lock)."""
     with _lock:

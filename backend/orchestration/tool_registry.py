@@ -1514,9 +1514,21 @@ def _webui_configure(**kwargs: Any) -> dict:
 
 
 def _propose_debug_sweep(**kwargs: Any) -> dict:
-    """Propose a diagnostic show plan. Reactive (failure_action_id set) or
-    on-demand (None). Returns awaiting_approval shape."""
-    from backend.orchestration.confirmations import get_action
+    """Propose a diagnostic show plan. Reactive (failure context found) or
+    on-demand (no recent failure). Returns awaiting_approval shape.
+
+    Reactive failure context comes from one of three sources (tried in order):
+    1. `failure_action_id` kwarg passed by the LLM (ideal).
+    2. The most-recently-FAILED action in confirmations (server-side fallback).
+       This catches the auto-debug case where the LLM didn't extract the
+       action_id from the user's "Please diagnose action_id=X..." message.
+    3. None → broad on-demand sweep.
+
+    The fallback is what keeps reactive diagnosis focused even when Haiku
+    omits the kwarg. Without it the sweep degrades to a generic health check
+    that misses the actual failure the operator wanted explained.
+    """
+    from backend.orchestration.confirmations import find_most_recent_failure, get_action
     from backend.orchestration.debug_planner import draft_debug_plan, draft_debug_sweep
 
     failure_action_id: str | None = kwargs.get("failure_action_id") or None
@@ -1539,6 +1551,18 @@ def _propose_debug_sweep(**kwargs: Any) -> dict:
                 "error": "no_failure_to_diagnose",
                 "message": f"action {failure_action_id!r} has no stored failure context",
             }
+    else:
+        # Server-side fallback: LLM didn't pass failure_action_id, but there
+        # may STILL be a recent failure worth focused diagnosis. Pull the
+        # most-recently FAILED action's stored result. If none exists, we
+        # fall through naturally to broad-sweep mode below.
+        failure_context = find_most_recent_failure()
+        if failure_context:
+            log.info(
+                "propose_debug_sweep_fallback_used",
+                error_key=failure_context.get("error"),
+                tool=failure_context.get("tool"),
+            )
 
     try:
         drafted = draft_debug_plan(failure_context) if failure_context else draft_debug_sweep()
