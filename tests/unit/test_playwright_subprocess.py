@@ -625,7 +625,7 @@ def test_settle_page_returns_when_networkidle_fires():
     with patch("time.sleep") as mock_sleep:
         _settle_page(page)
 
-    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=1500)
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=800)
     mock_sleep.assert_not_called()  # idle fired → no fallback
 
 
@@ -641,8 +641,8 @@ def test_settle_page_falls_back_to_sleep_on_networkidle_timeout():
     with patch("time.sleep") as mock_sleep:
         _settle_page(page)
 
-    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=1500)
-    mock_sleep.assert_called_once_with(0.5)  # 500ms fallback
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=800)
+    mock_sleep.assert_called_once_with(0.25)  # 250ms fallback
 
 
 def test_settle_page_swallows_other_exceptions():

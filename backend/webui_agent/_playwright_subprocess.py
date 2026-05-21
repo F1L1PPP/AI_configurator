@@ -296,8 +296,8 @@ _ACT_TIMEOUT_MS = 5000
 # (covers Cisco's chatty Angular XHR bursts), and if the page never reaches
 # idle within the window, falls back to a small fixed sleep (covers pages with
 # polling timers that prevent networkidle from ever firing).
-_SETTLE_NETWORKIDLE_MS = 1500
-_SETTLE_FALLBACK_MS = 500
+_SETTLE_NETWORKIDLE_MS = 800
+_SETTLE_FALLBACK_MS = 250
 
 
 def _settle_page(page: Any) -> None:
@@ -310,17 +310,19 @@ def _settle_page(page: Any) -> None:
     inner LLM sees a blank view and returns empty plan.
 
     Strategy:
-      1. Try ``page.wait_for_load_state("networkidle", timeout=1500)`` —
+      1. Try ``page.wait_for_load_state("networkidle", timeout=800)`` —
          Cisco's Angular modals usually finish their open animation when
          network is quiet. Fast-out path: most healthy pages return in
-         well under 1.5s.
+         well under 800ms.
       2. If networkidle never fires (some Cisco pages have polling timers
-         that keep the network busy indefinitely), sleep 500ms as a
-         fixed fallback. That's enough for the typical Angular fade-in
-         (~300ms) to complete.
+         that keep the network busy indefinitely), sleep 250ms as a
+         fixed fallback. That's enough for the dismiss-on-blur fade
+         (~200ms) — the full enter animation is slower (~300ms) but if a
+         modal doesn't open in time the next describe will fail loudly
+         rather than silently.
 
-    Cost: ~500ms-1.5s per successful action. On a 5-step static-route
-    flow that's ~3-7s extra — acceptable given the correctness win.
+    Cost: ~250-800ms per successful action. On a 5-step static-route
+    flow that's ~1.25-4s extra — acceptable given the correctness win.
     Best-effort: any exception is swallowed; we still try to describe
     and let the planner decide.
     """
