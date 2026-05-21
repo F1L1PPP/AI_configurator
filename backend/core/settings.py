@@ -58,6 +58,40 @@ class Settings(BaseSettings):
     rag_chunk_tokens: int = Field(default=250, alias="RAG_CHUNK_TOKENS")
     rag_chunk_overlap: int = Field(default=30, alias="RAG_CHUNK_OVERLAP")
 
+    # WebUI Playwright timeout — promote from hardcoded 20 s so slow routers
+    # or flaky networks can be tuned via env without a code change.
+    webui_goto_timeout_ms: int = Field(default=20_000, alias="WEBUI_GOTO_TIMEOUT_MS")
+
+    # WebSocket strict-origin mode (review fix #14).
+    # False (default): missing-origin connections are allowed (covers TestClient,
+    # curl, and other non-browser clients used during local development).
+    # True: missing OR foreign origin → rejected with 1008 Policy Violation.
+    ws_strict_origin: bool = Field(default=False, alias="WS_STRICT_ORIGIN")
+
+    def validate_required_credentials(self) -> None:
+        """Raise ValueError listing every required credential that is missing.
+
+        Called from main.py lifespan at startup. Failing fast at boot with
+        a clear list beats failing at first router/Anthropic call with a
+        cryptic auth error.
+        """
+        required = [
+            ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+            ("router_host", "ROUTER_HOST"),
+            ("router_ssh_user", "ROUTER_SSH_USER"),
+            ("router_ssh_password", "ROUTER_SSH_PASSWORD"),
+            ("router_webui_user", "ROUTER_WEBUI_USER"),
+            ("router_webui_password", "ROUTER_WEBUI_PASSWORD"),
+            ("router_webui_base_url", "ROUTER_WEBUI_BASE_URL"),
+        ]
+        missing = [env_name for attr, env_name in required if not getattr(self, attr)]
+        if missing:
+            raise ValueError(
+                "Required credentials missing from .env (or shadowed by an empty "
+                f"shell export): {', '.join(missing)}. Check .env.example for the "
+                "required keys."
+            )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -625,7 +625,7 @@ def test_settle_page_returns_when_networkidle_fires():
     with patch("time.sleep") as mock_sleep:
         _settle_page(page)
 
-    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=1500)
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=800)
     mock_sleep.assert_not_called()  # idle fired → no fallback
 
 
@@ -641,8 +641,8 @@ def test_settle_page_falls_back_to_sleep_on_networkidle_timeout():
     with patch("time.sleep") as mock_sleep:
         _settle_page(page)
 
-    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=1500)
-    mock_sleep.assert_called_once_with(0.5)  # 500ms fallback
+    page.wait_for_load_state.assert_called_once_with("networkidle", timeout=800)
+    mock_sleep.assert_called_once_with(0.25)  # 250ms fallback
 
 
 def test_settle_page_swallows_other_exceptions():
@@ -706,3 +706,113 @@ def test_do_act_calls_settle_on_success_path(monkeypatch):
     assert reply["ok"] is True
     assert len(settle_calls) == 1, "must settle exactly once on the success path"
     assert settle_calls[0] is page
+
+
+# ---------------------------------------------------------------------------
+# _describe_with_retry tests
+# ---------------------------------------------------------------------------
+
+import backend.webui_agent._playwright_subprocess as _sub_mod  # noqa: E402
+
+
+def _make_view(*, populated: bool, view_id: str = "v1") -> dict:
+    """Return a minimal view dict with or without elements."""
+    return {
+        "view_id": view_id,
+        "url": "https://lab/",
+        "title": "T",
+        "elements": [{"eid": "e_001", "role": "button", "name": "Apply"}] if populated else [],
+        "modals": [],
+        "errors": [],
+    }
+
+
+def test_describe_with_retry_returns_first_when_populated(monkeypatch):
+    """When describe_page returns a populated view, no retry and no settle."""
+    populated_view = _make_view(populated=True, view_id="v_first")
+    locator_map = {"e_001": MagicMock()}
+
+    describe_calls: list[int] = []
+    settle_calls: list[int] = []
+
+    def fake_describe(page):
+        describe_calls.append(1)
+        return populated_view, locator_map
+
+    monkeypatch.setattr(_sub_mod, "_settle_page", lambda page: settle_calls.append(1))
+    monkeypatch.setattr(
+        "backend.webui_agent.semantic_dom.describe_page",
+        fake_describe,
+    )
+
+    page = MagicMock()
+    view, lmap = _sub_mod._describe_with_retry(page, max_attempts=2)
+
+    assert view["view_id"] == "v_first"
+    assert lmap is locator_map
+    assert len(describe_calls) == 1, "describe_page must be called exactly once"
+    assert len(settle_calls) == 0, "_settle_page must NOT be called when first view is populated"
+
+
+def test_describe_with_retry_retries_when_view_empty(monkeypatch):
+    """Empty first view triggers a settle + retry; returns the populated second view."""
+    empty_view = _make_view(populated=False, view_id="v_empty")
+    populated_view = _make_view(populated=True, view_id="v_populated")
+    locator_map_pop = {"e_001": MagicMock()}
+
+    call_sequence: list[str] = []
+    describe_call_count: list[int] = [0]
+
+    def fake_describe(page):
+        describe_call_count[0] += 1
+        call_sequence.append("describe")
+        if describe_call_count[0] == 1:
+            return empty_view, {}
+        return populated_view, locator_map_pop
+
+    def fake_settle(page):
+        call_sequence.append("settle")
+
+    monkeypatch.setattr(_sub_mod, "_settle_page", fake_settle)
+    monkeypatch.setattr(
+        "backend.webui_agent.semantic_dom.describe_page",
+        fake_describe,
+    )
+
+    page = MagicMock()
+    view, lmap = _sub_mod._describe_with_retry(page, max_attempts=2)
+
+    assert view["view_id"] == "v_populated"
+    assert lmap is locator_map_pop
+    describe_count = call_sequence.count("describe")
+    settle_count = call_sequence.count("settle")
+    assert describe_count == 2, f"expected 2 describe calls, got {describe_count}"
+    assert settle_count == 1, f"expected 1 settle call, got {settle_count}"
+    # settle must happen between the two describes
+    assert call_sequence == ["describe", "settle", "describe"]
+
+
+def test_describe_with_retry_returns_empty_after_max_attempts(monkeypatch):
+    """When all attempts return empty, return the last empty view — no exception."""
+    empty_view = _make_view(populated=False, view_id="v_empty")
+
+    describe_calls: list[int] = []
+    settle_calls: list[int] = []
+
+    def fake_describe(page):
+        describe_calls.append(1)
+        return empty_view, {}
+
+    monkeypatch.setattr(_sub_mod, "_settle_page", lambda page: settle_calls.append(1))
+    monkeypatch.setattr(
+        "backend.webui_agent.semantic_dom.describe_page",
+        fake_describe,
+    )
+
+    page = MagicMock()
+    view, lmap = _sub_mod._describe_with_retry(page, max_attempts=2)
+
+    assert view["view_id"] == "v_empty"
+    assert lmap == {}
+    assert len(describe_calls) == 2, "must attempt describe twice before giving up"
+    assert len(settle_calls) == 1, "_settle_page must be called once between attempts"

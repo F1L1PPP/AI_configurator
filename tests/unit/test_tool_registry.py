@@ -354,6 +354,40 @@ def test_propose_set_hostname_ssh_read_failure_soft_falls(monkeypatch):
     assert result["preview_meta"] is None
 
 
+# ---------------------------------------------------------------------------
+# Signature guard — review fix #7
+# ---------------------------------------------------------------------------
+
+
+def test_execute_tool_rejects_unexpected_params(monkeypatch):
+    """Stub accepting only (a, b) + unexpected extra key → bad_parameters."""
+
+    def _stub(a: int, b: int) -> dict:
+        return {"sum": a + b}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "show_version", _stub)
+    result = tr.execute_tool("show_version", {"a": 1, "b": 2, "extra_field": "boom"})
+    assert result["error"] == "bad_parameters"
+    assert "extra_field" in result["message"]
+
+
+def test_execute_tool_accepts_extras_for_kwargs_tools(monkeypatch):
+    """Tool using **kwargs must NOT be rejected — extras are fine."""
+
+    def _stub(**kwargs: object) -> dict:
+        return {"received": list(kwargs.keys())}
+
+    monkeypatch.setitem(tr._TOOL_FUNCS, "show_version", _stub)
+    result = tr.execute_tool("show_version", {"a": 1, "unexpected": "ok"})
+    assert "error" not in result or result.get("error") != "bad_parameters"
+    assert "received" in result
+
+
+# ---------------------------------------------------------------------------
+# Existing conflict_detector tests (unchanged)
+# ---------------------------------------------------------------------------
+
+
 def test_propose_set_interface_ip_existing_attaches_conflict_fields(monkeypatch):
     """Non-SVI path: when running-config contains a matching interface stanza,
     conflict fields appear in preview_meta on both the returned dict and stored
@@ -382,3 +416,64 @@ def test_propose_set_interface_ip_existing_attaches_conflict_fields(monkeypatch)
     # Regression guard: params stays clean for executor splat
     assert "existing_entity" not in action["params"]
     assert "is_exact_match" not in action["params"]
+
+
+# ---------------------------------------------------------------------------
+# webui_configure describe_failed message propagation
+# ---------------------------------------------------------------------------
+
+
+def test_describe_failed_propagates_inner_message(monkeypatch):
+    """describe_failed result must carry the inner message from webui_describe_page.
+
+    Regression for act_20260521_921e52: describe_failed returned no message
+    field (chat showed 'describe_failed: no message') because the wrap block
+    in _webui_configure dropped the inner result's message field.
+    """
+    from backend.orchestration.confirmations import approve_action, propose_action
+
+    # Build a minimal approved action so _webui_configure can get past
+    # the HITL gate and into the loop.
+    action_id = propose_action(
+        "webui_configure",
+        {
+            "session_id": "sess_test",
+            "intent": "configure DHCP",
+            "plan": [
+                {
+                    "intent": {"role": "button", "name": "Apply"},
+                    "action": "click",
+                    "value": None,
+                }
+            ],
+            "verify_text": None,
+            "evidence": [],
+        },
+    )
+    approve_action(action_id)
+
+    # webui_act_by_intent returns success so the batch runs clean.
+    monkeypatch.setattr(
+        tr,
+        "webui_act_by_intent",
+        lambda session_id, intent, action_id: {"ok": True},
+    )
+
+    # webui_describe_page returns a describe error with an inner message.
+    inner_error = {
+        "error": "webui_describe_failed",
+        "message": "session timed out",
+        "exc_type": "TimeoutError",
+        "session_id": "sess_test",
+    }
+    monkeypatch.setattr(tr, "webui_describe_page", lambda session_id: inner_error)
+
+    # close_all_sessions is a no-op in unit tests.
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    result = tr._webui_configure(action_id=action_id)
+
+    assert result["error"] == "describe_failed"
+    assert result["message"] == "session timed out", (
+        f"inner message was not propagated; got: {result.get('message')!r}"
+    )

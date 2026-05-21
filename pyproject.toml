@@ -65,12 +65,10 @@ show_error_codes = true
 # as they're cleaned up. Don't add new files here — fix the types instead.
 [[tool.mypy.overrides]]
 module = [
-    "backend.core.logging",
     "backend.knowledge_agent.ingest",
     "backend.orchestration.planner",
     "backend.webui_agent.browser",
     "backend.webui_agent.pages.hostname_page",
     "backend.webui_agent.pages.vlan_page",
-    "backend.webui_agent.selectors",
 ]
 ignore_errors = true

@@ -22,7 +22,7 @@ After reading, summarise back in 6-8 sentences:
 3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED. Don't re-do.
 4. Phase G (`v0.5.6-phase-g-autodebug`) added reactive auto-debug: when a write returns `verify_failed`/`tool_failed`, the frontend auto-sends a diagnostic chat, Haiku drafts a focused `show` plan, the executor returns a plain-English digest rendered as an amber DIAGNOSIS block in chat. Required 4 follow-up commits to land cleanly — read the chunk 12 narrative in the recap before touching that code.
 5. Phase E (`v0.5.5-phase-e-preview-diff`) made the Config Preview's diff render for real via a new `/api/actions/{id}/snapshot/{phase}` endpoint that bridges the backend-stores-paths / frontend-expects-content gap that had been there since day one.
-6. The Opus → Sonnet → Haiku agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, Haiku audits deltas.
+6. The Opus → Sonnet → tiered-audit agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, a fresh sub-agent audits deltas — Haiku 4.5 for light (trivial, 1–3 files, no new contracts) or Opus 4.7 for deep (new contracts, multi-file, security, error paths). Tier picked by orchestrator. Haiku 4.5 also used for one-question reads during Sonnet implementation.
 7. Working tree: `README.md` updated by Filip for chunk 16 (uncommitted); `docs/next-session-kickoff.md` has the verified pre-demo hardening punch list section (uncommitted). Decide first thing whether to commit both as session-start housekeeping.
 8. Next candidate: chunks 14/14b/15/17/18 remain (Phase F mop-up + remaining Phase G), plus the pre-demo hardening punch list (verified items from `/review` + `/security-review` 2026-05-21). Skip the chunk-order question — it is locked unless Filip asks.
 
@@ -149,6 +149,60 @@ Filip updated `README.md` himself with a refreshed top description, a 5-screensh
 ### NEW skill: `director-blueprint`
 
 Installed at `~/.claude/skills/director-blueprint/SKILL.md`. Captures the whole 3-day operating model: role split (Director / Opus / Sonnet / Haiku), communication style (team voice, tradeoffs first, no fluff), per-chunk workflow (Plan → Sonnet briefing → Haiku audit → commit → smoke → tag), Sonnet briefing template, Haiku audit template, tag discipline (hands-off + backup pair), bug-fix loop, anti-patterns. Auto-triggers in any project that has a chunked roadmap. Future Opus instances should invoke it via the Skill tool on message #1 — supersedes re-reading the memory file.
+
+### Audit model: three iterations on 2026-05-21, settled on tiered split
+
+The audit role moved through three rules on the same day:
+
+1. **Morning (start of day):** Haiku 4.5 always (legacy from 2026-05-19 Director Blueprint).
+2. **Mid-day:** Opus 4.7 always. Trigger: chunk 12 needed 4 follow-up fixes despite a Haiku PASS on the initial commit — Haiku's surface check missed the `mark_failed(action_id)` vs `mark_failed(action_id, result)` call-order contract violation that produced clean unit tests but live-smoke failures.
+3. **Evening (current rule):** **Tiered split** per Director directive — Haiku 4.5 for light audits, Opus 4.7 for deep audits. Reason: Opus on every typo-fix audit is ~50× overkill.
+
+**Audit tier rule:**
+
+| Tier | When to use | Auditor model | Cost | Latency |
+|---|---|---|---|---|
+| **Light** | 1–3 files, pure cleanup/docs/cosmetic/typo/rename, no new contracts, no new tool wiring | Haiku 4.5 | ~$0.01 | ~30s |
+| **Deep** | 4+ files OR new contracts OR new tool wiring OR security-touching OR error paths OR live-smoke-gated | Opus 4.7 | ~$0.40–0.60 | ~60–90s |
+
+When in doubt → deep. Production backend LLM still stays Haiku 4.5 — model-role-split is dev-time only.
+
+**Files updated (docs commit):**
+- [CLAUDE.md:27](CLAUDE.md:27) — role split line.
+- `~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md` — 7 sections (frontmatter, Opus role bullet, Haiku role bullet, audit step, audit-report step, edge cases, Why-this-split paragraph).
+- `~/.claude/skills/director-blueprint/SKILL.md` — 7 sections (frontmatter description, role-split table, role-split rationale, workflow diagram, briefing-template rationale, audit section + new "Why Opus audits" rationale paragraph, reference paragraph).
+- This file (kickoff doc) — summarise-back checklist line + this recap entry.
+
+### External review pass (PM) — 4 chunks shipped, 9 findings fixed
+
+A second external code review surfaced a 15-item summary table after `15de1dd`. Verified each finding via Haiku Explore agent: **11 real, 4 misread or already-fixed**. Bundled into 4 chunks by severity.
+
+| Chunk | Commit | Findings | Tier | Tests |
+|---|---|---|---|---|
+| **A** | [`f8fe1d5`](https://github.com/) | #1 Chromium sessions never closed (CRITICAL) | Deep | +2 (604) |
+| **B** | [`a60592e`](https://github.com/) | #3 Empty cred defaults + #2 Action-store TTL (HIGH×2) | Deep | +8 (612) |
+| **C** | [`f51e6d9`](https://github.com/) | #5 TOCTOU race + #7 Param signature guard + #6 mypy cleanup (MEDIUM×3) | Deep | +6 (618) |
+| **D** | [`9012b6e`](https://github.com/) | #9 WebUI goto timeout + #11 Eventbus log throttle + #14 WS strict-origin toggle (LOW×3) | Deep (escalated, #14 security-touching) | +5 (623) |
+
+**Total: 4 commits, +21 tests (602 → 623), all 4 Opus 4.7 deep audits returned PASS.**
+
+**Key fixes:**
+- **A:** `try/except/finally` wrap in `routes_chat.chat()` so `close_all_sessions()` runs after every turn. Atexit hook becomes backup, not primary.
+- **B:** `Settings.validate_required_credentials()` method called from main.py lifespan — fails at boot with all 7 missing creds listed (not a Pydantic `model_validator` — would burden every test). Lazy 24h TTL purge in `propose_action` removes terminal actions older than cutoff.
+- **C:** New atomic primitive `try_mark_failed_if_executing(action_id, result)` replaces the two-`get_state` TOCTOU. `execute_tool` adds `inspect.signature` guard that returns `bad_parameters` error on extra splat keys. Two mypy `ignore_errors` overrides cleared (`backend.core.logging`, `backend.webui_agent.selectors`); 5 remain.
+- **D:** `webui_goto_timeout_ms` + `ws_strict_origin` settings added. Eventbus throttles backpressure warnings to one per 5s with aggregated `drops_since_last_log` count. WS strict-origin opt-in defaults to False (dev workflow unchanged); flip to True for non-localhost deployment.
+
+**Deferred from this pass:**
+- **#8 — Name-based redaction misses renamed secret fields.** Fix is `pydantic.SecretStr` migration for `anthropic_api_key`, `router_ssh_password`, `router_webui_password` + ~15 call-site updates to `.get_secret_value()`. Scope too large for the MEDIUM batch; tracked as a follow-up chunk before `v0.4.0-alpha.1`.
+
+**Misread / already-fixed (no work):**
+- **#4** — validators are centralized in `write_tools.py` and imported into `tool_registry.py`; not duplicated.
+- **#10** — PyTorch CPU install IS documented in a comment block in `requirements.txt` (just not in a standalone doc).
+- **#12** — `WriteRejectedError` is actively used in 3 handlers, not dead.
+- **#13** — Static mount is already last with explicit "keep this LAST" comment.
+- **#15** — `test_close_all_sessions_closes_every_cached_session` already exists in `tests/unit/test_generic_driver.py`.
+
+**Audit rule worked end-to-end.** Tiered rule (Haiku light / Opus 4.7 deep, set earlier today) was applied: A/B/C/D all routed to Opus 4.7 deep because of security-touching surfaces (routes, settings boot guard, WS origin). One audit (Chunk D) was tier-escalated mid-flight when the WS strict-origin scope clarified — orchestrator's call, per the rule.
 
 ### Pre-demo hardening punch list (verified)
 

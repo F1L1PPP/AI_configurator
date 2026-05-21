@@ -24,12 +24,13 @@ from backend.orchestration.confirmations import (
     WrongState,
     approve_action,
     get_action,
-    get_state,
     mark_failed,
     reject_action,
     try_begin_execution,
+    try_mark_failed_if_executing,
 )
 from backend.orchestration.tool_registry import execute_tool
+from backend.webui_agent.generic_driver import close_all_sessions
 
 log = get_logger(__name__)
 
@@ -105,13 +106,19 @@ async def approve(action_id: str) -> dict:
 @router.post("/reject/{action_id}")
 async def reject(action_id: str) -> dict:
     try:
-        return reject_action(action_id)
-    except KeyError as exc:
-        raise _key_error_to_404(action_id, exc) from exc
-    except WrongState as exc:
-        # Tried to reject something that's already executing/executed/failed.
-        log.info("reject_wrong_state", action_id=action_id, current=exc.current.value)
-        raise _wrong_state_to_409(exc) from exc
+        try:
+            return reject_action(action_id)
+        except KeyError as exc:
+            raise _key_error_to_404(action_id, exc) from exc
+        except WrongState as exc:
+            # Tried to reject something that's already executing/executed/failed.
+            log.info("reject_wrong_state", action_id=action_id, current=exc.current.value)
+            raise _wrong_state_to_409(exc) from exc
+    finally:
+        # Rejection is a terminal state — the WebUI session associated with
+        # this action is no longer needed. close_all_sessions is idempotent
+        # and safe to call when no sessions exist.
+        close_all_sessions()
 
 
 @router.get("/actions/{action_id}")
@@ -162,69 +169,79 @@ async def execute(action_id: str) -> dict:
          - tool raised → 500 + mark FAILED.
     """
     try:
-        action = try_begin_execution(action_id)
-    except KeyError as exc:
-        raise _key_error_to_404(action_id, exc) from exc
-    except WrongState as exc:
-        log.info(
-            "execute_wrong_state",
-            action_id=action_id,
-            current=exc.current.value,
-        )
-        raise _wrong_state_to_409(exc) from exc
+        try:
+            action = try_begin_execution(action_id)
+        except KeyError as exc:
+            raise _key_error_to_404(action_id, exc) from exc
+        except WrongState as exc:
+            log.info(
+                "execute_wrong_state",
+                action_id=action_id,
+                current=exc.current.value,
+            )
+            raise _wrong_state_to_409(exc) from exc
 
-    tool = action["tool"]
-    params = {**action["params"], "action_id": action_id}
-    log.info("execute_dispatch", action_id=action_id, tool=tool)
+        tool = action["tool"]
+        params = {**action["params"], "action_id": action_id}
+        log.info("execute_dispatch", action_id=action_id, tool=tool)
 
-    try:
-        result = await run_in_threadpool(execute_tool, tool, params)
-    except Exception as exc:
-        # execute_tool catches most exceptions itself and returns an
-        # error dict (handled below). Anything that escapes here is a
-        # real programming bug — log loudly, mark FAILED, return 500.
-        with contextlib.suppress(KeyError):
-            mark_failed(action_id)
-        log.error(
-            "execute_unhandled_exception",
-            action_id=action_id,
-            tool=tool,
-            error=str(exc),
-            exc_type=type(exc).__name__,
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"execute_tool({tool}) raised: {type(exc).__name__}: {exc}",
-        ) from exc
-
-    # Structured-error path: dispatcher returned {"error": "<key>", ...}.
-    # The write tool's own except-block already calls mark_failed for
-    # the cases it owns, but for failures upstream of the tool (unknown
-    # tool, dispatcher's layer-1 not_approved, propose-time validators)
-    # nothing transitions the state. Do it here so the store can't be
-    # stuck in EXECUTING with no way out.
-    err_key = _result_is_error(result)
-    if err_key is not None:
-        # Only flip to FAILED if we're still in EXECUTING. The write
-        # tool's mark_failed may have already moved us — be idempotent.
-        # Pass the structured result dict so debug_sweep can retrieve it
-        # later via get_action(action_id)["result"].
-        if get_state(action_id) is not None and get_state(action_id).value == "EXECUTING":
+        try:
+            result = await run_in_threadpool(execute_tool, tool, params)
+        except Exception as exc:
+            # execute_tool catches most exceptions itself and returns an
+            # error dict (handled below). Anything that escapes here is a
+            # real programming bug — log loudly, mark FAILED, return 500.
             with contextlib.suppress(KeyError):
-                mark_failed(action_id, result if isinstance(result, dict) else None)
-        status = _ERROR_TO_STATUS.get(err_key, 500)
-        message = result.get("message") if isinstance(result, dict) else None
-        log.warning(
-            "execute_tool_error",
-            action_id=action_id,
-            tool=tool,
-            error_key=err_key,
-            status=status,
-        )
-        raise HTTPException(
-            status_code=status,
-            detail=f"execute_tool({tool}) -> {err_key}: {message or 'no message'}",
-        )
+                mark_failed(action_id)
+            log.error(
+                "execute_unhandled_exception",
+                action_id=action_id,
+                tool=tool,
+                error=str(exc),
+                exc_type=type(exc).__name__,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"execute_tool({tool}) raised: {type(exc).__name__}: {exc}",
+            ) from exc
 
-    return {"action_id": action_id, "tool": tool, "result": result}
+        # Structured-error path: dispatcher returned {"error": "<key>", ...}.
+        # The write tool's own except-block already calls mark_failed for
+        # the cases it owns, but for failures upstream of the tool (unknown
+        # tool, dispatcher's layer-1 not_approved, propose-time validators)
+        # nothing transitions the state. Do it here so the store can't be
+        # stuck in EXECUTING with no way out.
+        err_key = _result_is_error(result)
+        if err_key is not None:
+            # Only flip to FAILED if we're still in EXECUTING. The write
+            # tool's mark_failed may have already moved us — be idempotent.
+            # Pass the structured result dict so debug_sweep can retrieve it
+            # later via get_action(action_id)["result"].
+            try_mark_failed_if_executing(
+                action_id,
+                result if isinstance(result, dict) else None,
+            )
+            status = _ERROR_TO_STATUS.get(err_key, 500)
+            message = result.get("message") if isinstance(result, dict) else None
+            log.warning(
+                "execute_tool_error",
+                action_id=action_id,
+                tool=tool,
+                error_key=err_key,
+                status=status,
+            )
+            raise HTTPException(
+                status_code=status,
+                detail=f"execute_tool({tool}) -> {err_key}: {message or 'no message'}",
+            )
+
+        return {"action_id": action_id, "tool": tool, "result": result}
+    finally:
+        # Action is terminal (EXECUTED, FAILED, or unchanged from EXECUTING
+        # if an unhandled exception escaped). Either way, the WebUI session
+        # associated with this action is no longer needed. close_all_sessions
+        # is idempotent and safe to call when no sessions exist.
+        # Chunk A2 (2026-05-21): close the session the propose step opened
+        # now that execution (success or failure) is complete.
+        close_all_sessions()

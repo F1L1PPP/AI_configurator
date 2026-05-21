@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from unittest.mock import patch
 
 import pytest
 
+import backend.core.eventbus as eventbus_mod
 from backend.core.eventbus import EventBus
 
 
@@ -86,3 +88,74 @@ async def test_backpressure_drops_oldest_on_queue_full() -> None:
     seen_i = [e["data"]["i"] for e in received]
     assert seen_i == sorted(seen_i)
     assert max(seen_i) == 9
+
+
+# ---------------------------------------------------------------------------
+# Back-pressure log throttle — chunk D polish batch (#11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def reset_bp_throttle_state():
+    """Reset module-level throttle state before every test in this module."""
+    eventbus_mod._bp_last_log_time = 0.0
+    eventbus_mod._bp_drops_since_log = 0
+    yield
+    eventbus_mod._bp_last_log_time = 0.0
+    eventbus_mod._bp_drops_since_log = 0
+
+
+def test_eventbus_backpressure_logs_first_drop_immediately() -> None:
+    """The very first drop fires a log immediately.
+
+    Calls _put_and_log directly (bypassing call_soon_threadsafe) so we can
+    safely patch time.monotonic without breaking asyncio's own timer.
+    Verifies by inspecting module-level throttle state after the call.
+    """
+    b = EventBus(queue_size=1)
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
+    # Manually fill the queue so _put_and_log sees a back-pressure outcome.
+    q.put_nowait({"type": "fill"})
+
+    with patch("backend.core.eventbus.time.monotonic", return_value=10.0):
+        b._put_and_log(q, {"type": "overflow"})
+
+    # Log fired → counter reset to 0 and timestamp updated to 10.0.
+    assert eventbus_mod._bp_last_log_time == 10.0
+    assert eventbus_mod._bp_drops_since_log == 0
+
+
+def test_eventbus_backpressure_throttles_subsequent_drops() -> None:
+    """Multiple drops within the 5 s window produce only one log; a drop after
+    the window produces a second log with the aggregated count.
+
+    Calls _put_and_log directly to keep time.monotonic patch isolated from
+    asyncio internals.
+    """
+    b = EventBus(queue_size=1)
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+    # time_seq: drop1=10.0 (logs, resets), drop2=11.0 (suppressed),
+    #           drop3=12.0 (suppressed), drop4=20.0 (logs aggregated=3).
+    time_seq = [10.0, 11.0, 12.0, 20.0]
+
+    with patch("backend.core.eventbus.time.monotonic", side_effect=time_seq):
+        # Drop 1 — queue empty → "put" (not a drop). Pre-fill first.
+        q.put_nowait({"type": "fill"})
+        # Drop 1 — monotonic()=10.0; 10.0-0.0=10>=5 → logs, resets counter.
+        b._put_and_log(q, {"type": "drop1"})
+        assert eventbus_mod._bp_last_log_time == 10.0
+        assert eventbus_mod._bp_drops_since_log == 0
+
+        # Drop 2 — monotonic()=11.0; 11.0-10.0=1<5 → suppressed.
+        b._put_and_log(q, {"type": "drop2"})
+        assert eventbus_mod._bp_drops_since_log == 1  # counted but not logged
+
+        # Drop 3 — monotonic()=12.0; 12.0-10.0=2<5 → suppressed.
+        b._put_and_log(q, {"type": "drop3"})
+        assert eventbus_mod._bp_drops_since_log == 2
+
+        # Drop 4 — monotonic()=20.0; 20.0-10.0=10>=5 → logs aggregated=3, resets.
+        b._put_and_log(q, {"type": "drop4"})
+        assert eventbus_mod._bp_last_log_time == 20.0
+        assert eventbus_mod._bp_drops_since_log == 0

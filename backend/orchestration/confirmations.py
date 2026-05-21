@@ -26,7 +26,7 @@ from __future__ import annotations
 import copy
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 
 
@@ -63,9 +63,47 @@ class WrongState(Exception):
 _actions: dict[str, dict] = {}
 _lock = threading.RLock()
 
+_TERMINAL_STATES: frozenset[ActionState] = frozenset(
+    {
+        ActionState.EXECUTED,
+        ActionState.VERIFIED,
+        ActionState.FAILED,
+        ActionState.REJECTED,
+    }
+)
+
+# Lazy-purge cutoff. 24h is comfortably longer than any demo flow, short
+# enough that the dict doesn't grow without bound across a long-running
+# session. Each propose_action triggers an O(N) scan under _lock — N stays
+# small (<1000) for the school-project lab. SQLite migration (Day 12)
+# replaces this with a proper retention policy.
+_DEFAULT_TTL_SECONDS = 24 * 3600
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def purge_terminal_actions_older_than(ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> int:
+    """Remove terminal-state actions older than ttl_seconds. Returns count purged.
+
+    Terminal states: EXECUTED, VERIFIED, FAILED, REJECTED. Non-terminal
+    actions (PROPOSED, APPROVED, EXECUTING) are NEVER purged regardless of
+    age — purging an in-flight execution would lose the result on the
+    routes_approvals callback path.
+
+    Idempotent: calling twice in a row is a no-op.
+    """
+    cutoff_iso = (datetime.now(UTC) - timedelta(seconds=ttl_seconds)).isoformat()
+    with _lock:
+        to_remove = [
+            aid
+            for aid, a in _actions.items()
+            if a["state"] in _TERMINAL_STATES and a.get("updated_at", "") < cutoff_iso
+        ]
+        for aid in to_remove:
+            del _actions[aid]
+        return len(to_remove)
 
 
 def propose_action(tool: str, params: dict, preview_meta: dict | None = None) -> str:
@@ -76,6 +114,9 @@ def propose_action(tool: str, params: dict, preview_meta: dict | None = None) ->
     the UI but must NOT appear in ``params``, because ``params`` is splatted
     directly into the executor function via ``func(**params)``.
     """
+    # Lazy purge: terminal actions older than the TTL get evicted on every
+    # propose. Cheap O(N) scan under the lock; no scheduler needed.
+    purge_terminal_actions_older_than()
     now = _now()
     action_id = f"act_{datetime.now(UTC).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
     with _lock:
@@ -198,6 +239,26 @@ def mark_executed(action_id: str) -> dict:
     regardless of whether they came from /api/execute (state EXECUTING)
     or from the planner loop (state APPROVED). Both paths converge here."""
     return _transition(action_id, ActionState.EXECUTED)
+
+
+def try_mark_failed_if_executing(action_id: str, result: dict | None = None) -> dict | None:
+    """Atomic CAS: transition EXECUTING -> FAILED if currently EXECUTING, else no-op.
+
+    Returns the transitioned action on success; None if state was not EXECUTING
+    or action doesn't exist (idempotent — another caller may have already moved
+    the state). Persists the result dict on the action atomically with the
+    transition so debug_sweep can retrieve it via get_action(...)["result"].
+    """
+    try:
+        action = _transition_if(action_id, {ActionState.EXECUTING}, ActionState.FAILED)
+    except (KeyError, WrongState):
+        return None
+    # Result persistence under the same lock to keep the (state, result) pair
+    # atomic from a reader's perspective.
+    with _lock:
+        if action_id in _actions:
+            _actions[action_id]["result"] = copy.deepcopy(result) if result is not None else None
+    return action
 
 
 def mark_failed(action_id: str, result: dict | None = None) -> dict:

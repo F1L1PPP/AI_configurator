@@ -296,8 +296,8 @@ _ACT_TIMEOUT_MS = 5000
 # (covers Cisco's chatty Angular XHR bursts), and if the page never reaches
 # idle within the window, falls back to a small fixed sleep (covers pages with
 # polling timers that prevent networkidle from ever firing).
-_SETTLE_NETWORKIDLE_MS = 1500
-_SETTLE_FALLBACK_MS = 500
+_SETTLE_NETWORKIDLE_MS = 800
+_SETTLE_FALLBACK_MS = 250
 
 
 def _settle_page(page: Any) -> None:
@@ -310,17 +310,19 @@ def _settle_page(page: Any) -> None:
     inner LLM sees a blank view and returns empty plan.
 
     Strategy:
-      1. Try ``page.wait_for_load_state("networkidle", timeout=1500)`` —
+      1. Try ``page.wait_for_load_state("networkidle", timeout=800)`` —
          Cisco's Angular modals usually finish their open animation when
          network is quiet. Fast-out path: most healthy pages return in
-         well under 1.5s.
+         well under 800ms.
       2. If networkidle never fires (some Cisco pages have polling timers
-         that keep the network busy indefinitely), sleep 500ms as a
-         fixed fallback. That's enough for the typical Angular fade-in
-         (~300ms) to complete.
+         that keep the network busy indefinitely), sleep 250ms as a
+         fixed fallback. That's enough for the dismiss-on-blur fade
+         (~200ms) — the full enter animation is slower (~300ms) but if a
+         modal doesn't open in time the next describe will fail loudly
+         rather than silently.
 
-    Cost: ~500ms-1.5s per successful action. On a 5-step static-route
-    flow that's ~3-7s extra — acceptable given the correctness win.
+    Cost: ~250-800ms per successful action. On a 5-step static-route
+    flow that's ~1.25-4s extra — acceptable given the correctness win.
     Best-effort: any exception is swallowed; we still try to describe
     and let the planner decide.
     """
@@ -338,6 +340,30 @@ def _settle_page(page: Any) -> None:
         # Anything else (page closed, navigation in flight, etc.) — swallow
         # and let the describe_page that follows surface a real error.
         pass
+
+
+def _describe_with_retry(page: Any, max_attempts: int = 2) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Describe the page; on empty result, settle and retry up to max_attempts.
+
+    Cisco Angular pages can return an empty view if describe runs before
+    AngularJS finishes mounting controllers. Most pages settle in <500ms
+    after domcontentloaded, but the DHCP and OSPF detail forms have been
+    seen empty on the first call. Retry once after a fresh settle.
+
+    Returns whatever the last attempt produced — caller decides if an
+    empty view is still an error.
+    """
+    from backend.webui_agent.semantic_dom import describe_page  # noqa: PLC0415
+
+    for attempt_idx in range(max_attempts):
+        view, locator_map = describe_page(page)
+        elements = view.get("elements") or []
+        modals = view.get("modals") or []
+        if elements or modals:
+            return view, locator_map
+        if attempt_idx + 1 < max_attempts:
+            _settle_page(page)
+    return view, locator_map
 
 
 def _invoke_action(locator: Any, action: str, value: str | None) -> None:
@@ -451,7 +477,7 @@ def _do_act(
         try:
             _invoke_action(locator, action, value)
 
-            # Settle: networkidle (≤1.5s) then 500ms fallback. Critical for
+            # Settle: networkidle (≤800ms) then 250ms fallback. Critical for
             # Cisco's Angular modals that render/dismiss faster than
             # describe_page can iterate locators. ISIS Add form was the
             # canonical case — modal opened then auto-dismissed before
@@ -817,7 +843,6 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
     from backend.webui_agent.browser import webui_browser
     from backend.webui_agent.evidence import EvidenceCollector
     from backend.webui_agent.login import login
-    from backend.webui_agent.semantic_dom import describe_page
 
     action_id = str(init_payload.get("action_id") or "session")
     headless = init_payload.get("headless")
@@ -882,20 +907,27 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                     _relogin_if_needed(page)
 
                     if op == "open":
+                        from backend.core.settings import get_settings  # noqa: PLC0415,I001 — lazy import
+
                         raw_path = str(msg["path"])
                         target = _resolve_target_url(page, raw_path)
                         # wait_until="domcontentloaded" so we don't time out on
                         # third-party network calls; Angular renders after.
-                        page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+                        page.goto(
+                            target,
+                            wait_until="domcontentloaded",
+                            timeout=get_settings().webui_goto_timeout_ms,
+                        )
+                        _settle_page(page)  # networkidle + fallback before first describe
                         # Label uses the path tail so screenshots stay scannable.
                         label_tail = raw_path.split("/")[-1] or "root"
                         ev.step(f"goto-{label_tail}", page)
-                        view, locator_map = describe_page(page)
+                        view, locator_map = _describe_with_retry(page, max_attempts=2)
                         current_view_id = view["view_id"]
                         _reply({"ok": True, "view": view})
 
                     elif op == "describe":
-                        view, locator_map = describe_page(page)
+                        view, locator_map = _describe_with_retry(page, max_attempts=2)
                         current_view_id = view["view_id"]
                         _reply({"ok": True, "view": view})
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 SELECTORS_DIR = Path(__file__).parent
 
