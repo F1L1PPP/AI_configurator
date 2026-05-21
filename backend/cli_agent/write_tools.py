@@ -695,7 +695,6 @@ def cli_configure(
 
     match = re.search(verify_pattern, verify_output)
     if match is None:
-        mark_failed(action_id)
         # Surface any device-reported errors from the config push. IOS XE
         # marks rejected commands with a leading '%' (e.g. "% Router-ID
         # 10.0.0.1 in use by ospf process 2"). Pull these out so the
@@ -731,7 +730,7 @@ def cli_configure(
                 f"Verify `{verify_command}` ran but its output did not match "
                 f"`{verify_pattern}`. Output preview: {output_snippet!r}"
             )
-        return {
+        result: dict = {
             "error": "verify_failed",
             "message": message,
             "tool": "cli_configure",
@@ -744,6 +743,13 @@ def cli_configure(
             "snapshot_post": str(post_dir),
             "duration_ms": ms,
         }
+        # Pass result to mark_failed so debug_sweep can retrieve it later
+        # via get_action(action_id)["result"]. Without this, the action
+        # ends up FAILED with result=None and the auto-debug fallback in
+        # tool_registry.find_most_recent_failure filters it out, degrading
+        # the reactive diagnostic plan to a generic broad sweep.
+        mark_failed(action_id, result)
+        return result
 
     mark_executed(action_id)
 
