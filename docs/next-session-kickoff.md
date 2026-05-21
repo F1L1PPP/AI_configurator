@@ -22,7 +22,7 @@ After reading, summarise back in 6-8 sentences:
 3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED. Don't re-do.
 4. Phase G (`v0.5.6-phase-g-autodebug`) added reactive auto-debug: when a write returns `verify_failed`/`tool_failed`, the frontend auto-sends a diagnostic chat, Haiku drafts a focused `show` plan, the executor returns a plain-English digest rendered as an amber DIAGNOSIS block in chat. Required 4 follow-up commits to land cleanly — read the chunk 12 narrative in the recap before touching that code.
 5. Phase E (`v0.5.5-phase-e-preview-diff`) made the Config Preview's diff render for real via a new `/api/actions/{id}/snapshot/{phase}` endpoint that bridges the backend-stores-paths / frontend-expects-content gap that had been there since day one.
-6. The Opus → Sonnet → Opus-4.7-audit agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, a fresh Opus 4.7 sub-agent audits deltas (changed from Haiku on 2026-05-21). Haiku 4.5 is now reserved for one-question reads during Sonnet implementation.
+6. The Opus → Sonnet → tiered-audit agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, a fresh sub-agent audits deltas — Haiku 4.5 for light (trivial, 1–3 files, no new contracts) or Opus 4.7 for deep (new contracts, multi-file, security, error paths). Tier picked by orchestrator. Haiku 4.5 also used for one-question reads during Sonnet implementation.
 7. Working tree: `README.md` updated by Filip for chunk 16 (uncommitted); `docs/next-session-kickoff.md` has the verified pre-demo hardening punch list section (uncommitted). Decide first thing whether to commit both as session-start housekeeping.
 8. Next candidate: chunks 14/14b/15/17/18 remain (Phase F mop-up + remaining Phase G), plus the pre-demo hardening punch list (verified items from `/review` + `/security-review` 2026-05-21). Skip the chunk-order question — it is locked unless Filip asks.
 
@@ -150,13 +150,22 @@ Filip updated `README.md` himself with a refreshed top description, a 5-screensh
 
 Installed at `~/.claude/skills/director-blueprint/SKILL.md`. Captures the whole 3-day operating model: role split (Director / Opus / Sonnet / Haiku), communication style (team voice, tradeoffs first, no fluff), per-chunk workflow (Plan → Sonnet briefing → Haiku audit → commit → smoke → tag), Sonnet briefing template, Haiku audit template, tag discipline (hands-off + backup pair), bug-fix loop, anti-patterns. Auto-triggers in any project that has a chunked roadmap. Future Opus instances should invoke it via the Skill tool on message #1 — supersedes re-reading the memory file.
 
-### Audit model change: Haiku 4.5 → Opus 4.7
+### Audit model: three iterations on 2026-05-21, settled on tiered split
 
-Director directive at session-end: move the post-chunk audit role from Haiku 4.5 to Opus 4.7. Trigger: chunk 12 needed 4 follow-up fixes despite a Haiku PASS on the initial commit — Haiku's surface-level scope check (right files? right test count? consistent naming?) missed the `mark_failed(action_id)` vs `mark_failed(action_id, result)` call-order issue that produced clean unit tests but live-smoke failures. Opus 4.7 reads the diff with full context + reasoning depth and doubles as the contract-review pass that the parent Opus used to do on FLAG.
+The audit role moved through three rules on the same day:
 
-**Tradeoff:** ~50× per-audit cost ($0.01 → ~$0.40-0.60), ~2× latency (30s → 60-90s). Removes the "parent Opus re-reads diff on FLAG" step. Dev-time cost only — production backend stays Haiku 4.5.
+1. **Morning (start of day):** Haiku 4.5 always (legacy from 2026-05-19 Director Blueprint).
+2. **Mid-day:** Opus 4.7 always. Trigger: chunk 12 needed 4 follow-up fixes despite a Haiku PASS on the initial commit — Haiku's surface check missed the `mark_failed(action_id)` vs `mark_failed(action_id, result)` call-order contract violation that produced clean unit tests but live-smoke failures.
+3. **Evening (current rule):** **Tiered split** per Director directive — Haiku 4.5 for light audits, Opus 4.7 for deep audits. Reason: Opus on every typo-fix audit is ~50× overkill.
 
-**Scope of change:** AUDIT role only. Haiku 4.5 retained for Lightning Scout one-question reads during Sonnet implementation (e.g. *"Haiku, what does `parseFoo` do?"*) — those are cheap targeted lookups that don't benefit from Opus reasoning.
+**Audit tier rule:**
+
+| Tier | When to use | Auditor model | Cost | Latency |
+|---|---|---|---|---|
+| **Light** | 1–3 files, pure cleanup/docs/cosmetic/typo/rename, no new contracts, no new tool wiring | Haiku 4.5 | ~$0.01 | ~30s |
+| **Deep** | 4+ files OR new contracts OR new tool wiring OR security-touching OR error paths OR live-smoke-gated | Opus 4.7 | ~$0.40–0.60 | ~60–90s |
+
+When in doubt → deep. Production backend LLM still stays Haiku 4.5 — model-role-split is dev-time only.
 
 **Files updated (docs commit):**
 - [CLAUDE.md:27](CLAUDE.md:27) — role split line.

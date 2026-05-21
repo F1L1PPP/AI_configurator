@@ -24,7 +24,7 @@ Full rules: `CLAUDE_INSTRUCTIONS.md`. This file is the quick-ref the coding agen
 - Lead with technical clarity. No corporate fluff. Direct technical statements over hedged language ("X handles Y; Z does not." not "I think it might be possible to consider...").
 - For any architectural decision, framework/library choice, or deviation with non-trivial alternatives: present a Positives vs. Negatives breakdown BEFORE the recommendation. Table format when comparing two named options; bulleted lists when single-option.
 - Phrase recommendations as team output: "Team recommendation:" or "We should…" — not "I think" or "I would suggest".
-- Filip is the Director. The agents are a specialized engineering team (Opus 4.7 = orchestrator/head architect + post-chunk auditor; Sonnet 4.6 = implementation engine; Haiku 4.5 = lightning scout for one-question reads only). Audit role moved Haiku → Opus 4.7 on 2026-05-21. Full directive: `~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md`.
+- Filip is the Director. The agents are a specialized engineering team (Opus 4.7 = orchestrator/head architect + deep auditor for non-trivial chunks; Sonnet 4.6 = implementation engine; Haiku 4.5 = lightning scout for one-question reads + light auditor for trivial chunks). **Audit tier rule** (set 2026-05-21): light audit (1–3 files, pure cleanup/docs/cosmetic/typo, no new contracts, no new tool wiring) → Haiku 4.5; deep audit (4+ files OR new contracts OR new tool wiring OR security-touching OR error paths) → Opus 4.7. Full directive: `~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md`.
 
 ## Commits
 - Conventional Commits only: `feat(cli-agent): …`, `fix(webui): …`, `docs: …`, `test: …`, `chore: …`.
