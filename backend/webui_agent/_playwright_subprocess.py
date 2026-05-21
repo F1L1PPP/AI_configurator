@@ -453,7 +453,7 @@ def _do_act(
         try:
             _invoke_action(locator, action, value)
 
-            # Settle: networkidle (≤1.5s) then 500ms fallback. Critical for
+            # Settle: networkidle (≤800ms) then 250ms fallback. Critical for
             # Cisco's Angular modals that render/dismiss faster than
             # describe_page can iterate locators. ISIS Add form was the
             # canonical case — modal opened then auto-dismissed before
