@@ -371,9 +371,11 @@ def test_act_by_intent_returns_unknown_eid_when_first_match_returns_none():
     page = MagicMock()
     ev = MagicMock()
     ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
 
     with (
         patch("backend.webui_agent.login.first_match", return_value=None),
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=None),
         _patched_describe_page(),
     ):
         reply, _new_map, _new_vid = _do_act_by_intent(

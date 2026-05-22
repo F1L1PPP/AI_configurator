@@ -6,7 +6,11 @@ Paste the block between **=== START ===** and **=== END ===** into the first mes
 
 You are joining the Cisco AI Config Agent project mid-stream. You are operating as the **Orchestrator / Head Architect** of an Engineering & Networking Team reporting to the Director (Filip).
 
-**FIRST**: check whether the `director-blueprint` skill is available in your skill list (it should be — installed at `~/.claude/skills/director-blueprint/SKILL.md` on 2026-05-21). If yes, invoke it via the Skill tool BEFORE drafting your response. It captures the whole operating model that ran this project for the last 3 days (role split, communication style, per-chunk workflow, Sonnet briefing template, Haiku audit template, tag discipline, bug-fix loop, anti-patterns). If the skill loads, you don't need to re-read item 2 below — the skill content supersedes it.
+**FIRST**: check your skill list for **TWO** skills installed 2026-05-21:
+- `director-blueprint` (operating model — role split, communication, per-chunk workflow, Sonnet briefing template, audit templates by tier, tag discipline, bug-fix loop, anti-patterns).
+- `external-review-triage` (workflow for a multi-row code-review summary table — verify each via Haiku, bundle by severity, ship sequentially with deep audit per chunk).
+
+Invoke `director-blueprint` via the Skill tool BEFORE drafting your response. If a review summary table appears in the conversation, ALSO invoke `external-review-triage`. The skills supersede the inline memory references where they overlap.
 
 Then read the project-specific references:
 
@@ -15,16 +19,18 @@ Then read the project-specific references:
 3. [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — master 18-chunk roadmap from Filip's bug list. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED.
 4. The "What landed 2026-05-19" + "What landed 2026-05-20" + "What landed 2026-05-21" sections in **this** kickoff doc — chronological recap of the last three days.
 
-After reading, summarise back in 6-8 sentences:
+After reading, summarise back in 8-10 sentences:
 
-1. `feature/bootstrap` at HEAD `d62963b`, 602 tests passing (+58 over the 544 baseline of 2026-05-20 morning), last tag `v0.5.6-phase-g-autodebug` at `d62963b`.
-2. The Director Blueprint operating directive (skill or memory file) — team voice ("Team recommendation:" / "We should…"), tradeoff tables BEFORE architectural decisions, Haiku as delegated read-fetcher, reject corporate fluff.
-3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED. Don't re-do.
-4. Phase G (`v0.5.6-phase-g-autodebug`) added reactive auto-debug: when a write returns `verify_failed`/`tool_failed`, the frontend auto-sends a diagnostic chat, Haiku drafts a focused `show` plan, the executor returns a plain-English digest rendered as an amber DIAGNOSIS block in chat. Required 4 follow-up commits to land cleanly — read the chunk 12 narrative in the recap before touching that code.
-5. Phase E (`v0.5.5-phase-e-preview-diff`) made the Config Preview's diff render for real via a new `/api/actions/{id}/snapshot/{phase}` endpoint that bridges the backend-stores-paths / frontend-expects-content gap that had been there since day one.
-6. The Opus → Sonnet → tiered-audit agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, a fresh sub-agent audits deltas — Haiku 4.5 for light (trivial, 1–3 files, no new contracts) or Opus 4.7 for deep (new contracts, multi-file, security, error paths). Tier picked by orchestrator. Haiku 4.5 also used for one-question reads during Sonnet implementation.
-7. Working tree: `README.md` updated by Filip for chunk 16 (uncommitted); `docs/next-session-kickoff.md` has the verified pre-demo hardening punch list section (uncommitted). Decide first thing whether to commit both as session-start housekeeping.
-8. Next candidate: chunks 14/14b/15/17/18 remain (Phase F mop-up + remaining Phase G), plus the pre-demo hardening punch list (verified items from `/review` + `/security-review` 2026-05-21). Skip the chunk-order question — it is locked unless Filip asks.
+1. `feature/bootstrap` at HEAD **`9b6d8ec`**, **633 tests passing** (+89 over the 544 baseline of 2026-05-20 morning, +31 over the 2026-05-21 morning baseline), last tag **`v0.5.8-session-window-fix`** at `9b6d8ec`.
+2. The Director Blueprint operating directive — team voice, tradeoff tables BEFORE architectural decisions, reject corporate fluff. **Audit tier rule (locked):** Haiku 4.5 for light (1–3 files, pure cleanup/docs/cosmetic/typo, no contracts, no tool wiring); Opus 4.7 for deep (4+ files OR new contracts OR new tool wiring OR security-touching OR error paths OR live-smoke-gated). When in doubt → deep.
+3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/**14**/16 are LANDED. Don't re-do. Chunk 14 (`_settle_page` budget trim 1500/500 → 800/250 ms) live-smoked green.
+4. **`v0.5.7-review-hardening`** (afternoon, 4 commits + recap) = external review pass: 9 of 11 real findings fixed across chunks A/B/C/D, Opus 4.7 deep audits all PASS. #8 SecretStr migration deferred. See "External review pass" section.
+5. **`v0.5.8-session-window-fix`** (evening, 2 commits) = Path B (`3b2cc9c` settle+retry+message propagation) + Chunk A2 (`9b6d8ec` session lifecycle fix for propose→execute multi-turn). Path B fixed the DHCP `describe_failed: no message` bug. Chunk A2 fixed a regression chunk A introduced — blanket `close_all_sessions()` in chat-finally was killing sessions BETWEEN propose and execute. Lesson captured in the new `external-review-triage` skill.
+6. Phase G (`v0.5.6-phase-g-autodebug`) added reactive auto-debug. Chunk 12 required 4 follow-up commits — read the chunk-12 narrative before touching that code.
+7. The Opus → Sonnet → tiered-audit agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, fresh sub-agent audits per the tier rule. Haiku 4.5 also used for one-question reads during Sonnet implementation.
+8. **PARTIAL chunk 14b in the worktree (uncommitted):** Sonnet started before Filip interrupted. NEW `backend/webui_agent/vision_fallback.py` (~280 lines), NEW `tests/unit/test_vision_fallback.py` (~350 lines), modified `settings.py` + `_playwright_subprocess.py` + `evidence.py`. **First thing this session: skim the diff and decide review-and-commit OR discard-and-redo with tighter briefing.** Don't audit blindly — verify Sonnet's output first.
+9. **Known live-smoke bug awaiting 14b:** OSPF + DHCP intents reach the right WebUI screen but the inner Haiku planner mis-fills fields (Network empty, Starting IP shows the subnet mask). This is exactly the failure class chunk 14b targets.
+10. **Next candidates:** chunk 14b (review+commit OR redo), then chunk 15 hardware retest (needs 14b green first), then chunks 17/18 + #8 SecretStr + pre-demo hardening remainder. Skip the chunk-order question — it is locked unless Filip asks.
 
 Then wait for "go" before making any change. **Do not propose re-planning the chunk order** — it is locked unless Filip asks.
 
@@ -204,6 +210,100 @@ A second external code review surfaced a 15-item summary table after `15de1dd`. 
 
 **Audit rule worked end-to-end.** Tiered rule (Haiku light / Opus 4.7 deep, set earlier today) was applied: A/B/C/D all routed to Opus 4.7 deep because of security-touching surfaces (routes, settings boot guard, WS origin). One audit (Chunk D) was tier-escalated mid-flight when the WS strict-origin scope clarified — orchestrator's call, per the rule.
 
+### Evening fixes — describe race + session lifecycle (tag `v0.5.8-session-window-fix`)
+
+Two live-smoke regressions surfaced after the v0.5.7-review-hardening tag. Both fixed and tagged the same evening.
+
+#### Path B — describe settle+retry + message propagation (`3b2cc9c`)
+
+**Symptom:** DHCP intent `act_20260521_921e52` failed with chat showing `describe_failed: no message`. Two bugs in one error:
+
+1. **UX bug:** `tool_registry.py:1414` wrapped `webui_describe_page`'s error result but DROPPED the inner `message` field — only kept `describe_error` (structured). The route-layer fallback `{message or 'no message'}` then surfaced "no message" to chat.
+2. **Underlying race:** `_run_session_loop` `op == "open"` went `page.goto(wait_until="domcontentloaded")` → `describe_page` with NO settle. The DHCP form is AngularJS — `domcontentloaded` fires before controllers mount, so describe returns an empty view, which the wrap catches as describe_failed.
+
+**Fix:**
+- Propagate inner `message` in the wrap with fallback string `"describe_page returned no usable view"`.
+- Insert `_settle_page(page)` between goto and ev.step in `op == "open"`.
+- New `_describe_with_retry(page, max_attempts=2)` helper: settles + re-describes if first view is empty (no elements AND no modals). Used in BOTH `op == "open"` and `op == "describe"`.
+- +4 tests (627 → 631). Opus 4.7 deep audit PASS.
+
+#### Chunk A2 — session lifecycle for propose→execute multi-turn (`9b6d8ec`)
+
+**Symptom:** After Path B, DHCP retest `act_20260521_5ccca4` failed with `describe_failed: no live session for session_id='sess_X'`. Path B's inner-message propagation worked correctly — the real error became visible.
+
+**Root cause:** Chunk A (`f8fe1d5`) added unconditional `close_all_sessions()` in `routes_chat.chat()` finally. That broke the propose→approve→execute multi-turn flow:
+
+1. Chat 1: `propose_webui_configure` opens session `sess_X`, stores `session_id` in action's params, returns proposal.
+2. Chat finally → `close_all_sessions()` → `sess_X` dies.
+3. User approves + executes (separate HTTP call, no chat turn).
+4. `_webui_configure` reads `session_id=sess_X` from params → session not in `_sessions` → `_session_not_found` → describe_failed.
+
+**Fix:**
+- Chat finally close is now CONDITIONAL on `_pending_approval(result.events) is None`. If approval is pending, leave the session alive.
+- `routes_approvals.execute` and `routes_approvals.reject` BOTH wrap their function bodies in `try: ... finally: close_all_sessions()` — sessions die when the action enters a terminal state.
+- Double-try structure in chat: outer try/finally for cleanup; inner try/except for the existing six exception handlers. Flag `keep_sessions_for_approval` set on success path inside the inner try, read in the outer finally.
+- +6 tests (631 → 633). Opus 4.7 deep audit PASS.
+
+**Critical attribute bug avoided:** Sonnet correctly used `_pending_approval(result.events) is not None`, NOT `result.awaiting_approval` — `PlannerResult` (planner.py:316-320) has no `awaiting_approval` field; it's only an event `kind`. Spec's CRITICAL CHECK called this out and Sonnet got it right.
+
+#### Live-smoke status after v0.5.8
+
+DHCP form `act_20260521_5ccca4` retry:
+- ✅ Session survives propose→execute (no session_not_found).
+- ✅ Describe-retry kicks in on slow DHCP page (no describe_failed).
+- ⚠️ Inner WebUI planner mis-fills fields: Network empty, Starting IP shows the subnet mask `255.255.255.0` instead of an IPv4 address. **Same class as OSPF screen-routing bug — chunk 14b territory.**
+
+### Chunk 14b — Vision fallback (LANDED, awaiting live smoke)
+
+Triaged 2026-05-22 morning. Decision: review-and-commit (architecture sound, anti-pattern checklist clean, deviations from 2026-05-19 sketch are scope reductions not mistakes). Cleanup pass added the per-session cost cap, ruff/import fixes, and the integration-site `log.warning`. Opus 4.7 deep audit returned **PASS** — all findings MEDIUM/LOW, none gate live smoke.
+
+| File | State | Size |
+|---|---|---|
+| `backend/webui_agent/vision_fallback.py` | NEW | 323 lines |
+| `tests/unit/test_vision_fallback.py` | NEW | 17 tests (15 base + 2 cap) |
+| `backend/core/settings.py` | Modified | +4 lines (`selector_cache_path` field) |
+| `backend/webui_agent/_playwright_subprocess.py` | Modified | +34 lines (vision branch in `_do_act_by_intent` + log.warning) |
+| `backend/webui_agent/evidence.py` | Modified | +14 lines (`vision_screenshot` + `vision_call_count`) |
+| `tests/unit/test_playwright_subprocess.py` | Modified | +2 lines (patch `resolve_via_vision` in existing unknown_eid test) |
+
+**Tests:** 17/17 on `test_vision_fallback.py`, 636/636 full unit suite. Ruff clean.
+
+**Architecture (locked):**
+- Reactive — invoked only by `_do_act_by_intent` on `unknown_eid` (after semantic-DOM + `first_match` both return None).
+- Cache hit short-circuits Anthropic. Cache key `role|name|sha1(scheme+host+path)[:12]` — stable across query strings.
+- Confidence threshold 0.7. Self-rated by Haiku, not calibrated.
+- Per-session cost cap: 5 successful API returns per `EvidenceCollector` instance. Increment fires inside the try-block after `_call_haiku_vision` returns successfully — exceptions don't increment.
+- Atomic cache writes via `.tmp` sibling + rename. Single-session-safe; cross-session race is a known follow-up (see 14c below).
+- Grounding context on every cache-miss call: current screenshot + up to 2 prior screenshots of the same page (path-tail match in `artifacts/screenshots/`) + freshest `post/show_running-config.txt` (8 KB cap).
+
+**Known live-smoke targets:**
+- DHCP form `act_20260521_5ccca4` — Network field empty, Starting IP filled with subnet mask.
+- OSPF intent — same field mis-fill class.
+
+If smoke green: propose `v0.5.9-webui-vision-fallback` tag (Filip's call to create it). If red: capture cache state + screenshots, do not auto-retry.
+
+### Chunk 14c — follow-up items from the 14b deep audit (PASS verdict, ship list)
+
+Tracked here so they don't get lost. None blocks 14b; bundle when convenient.
+
+1. **Cross-session cache race comment** (`vision_fallback.py:75-82`). Two parallel sessions both `load_selector_cache → mutate → save` → second rename clobbers first key. Demo-lab is single-session so it can't fire today. Add a comment noting the assumption; file-lock if multi-tenant ever lands.
+2. **`error_type` in vision-exception log** (`_playwright_subprocess.py:783-785`). Current warning logs `error=str(exc)`. Match the existing pattern at `_playwright_subprocess.py:397` which logs `exc_type=exc.exc_type`. One-line fix.
+3. **Integration test for vision-success path.** Today's `test_act_by_intent_returns_unknown_eid_when_first_match_returns_none` only exercises the `None → unknown_eid` fallthrough. Add a counterpart: patch `resolve_via_vision` to return a selector, mock `page.locator` + `_do_act`, assert `reply["resolved_via"] == "vision"` and `reply["chosen_eid"]` starts with `"vision_"`.
+4. **Secret-page deny-list.** Vision_fallback docstring (lines 17-19) acknowledges screenshots may contain raw secrets on pages like AAA/RADIUS/IPsec PSK. Add a URL-path deny-list (e.g. refuse vision on `*/aaa/*`, `*/ipsec/*`, `*/radius/*`).
+5. **Cap-counts-success-not-billing nuance.** Current cap measures successful API returns. If Haiku returns malformed JSON 5×, the JSON parse failure raises BEFORE the increment, so 5 Anthropic calls were billed but `vision_call_count` reads 0 → the cap doesn't bound true Anthropic spend in this degenerate case. For demo lab, the gap is ≤5 wasted calls. Document the trade-off in a code comment OR move the increment inside `_call_haiku_vision` right after `response = client.messages.create(...)` so it fires before JSON parse.
+6. **Offline corpus bootstrap** (the original 14c content per the previous roadmap entry). Walk past `artifacts/screenshots/` + running-configs, pre-populate selector_cache from accumulated data so day-one runs hit cache. Defer until live smoke gives us a real cache-hit rate from reactive learning alone.
+
+### NEW skill installed 2026-05-21 PM: `external-review-triage`
+
+Distilled from today's 15-item review pass. Captures: verify-each-finding-via-Haiku → bundle-by-severity → ship-with-deep-audit-per-chunk → update kickoff doc → propose tag. Plus 8 anti-patterns observed (blanket-close-on-finally, two-step state check, params splat, name-based redaction, empty credential defaults, static mount shadowing, WS missing-origin bypass, eventbus log flood). At `~/.claude/skills/external-review-triage/SKILL.md`. Auto-triggers when a review summary table appears in the conversation.
+
+### Architectural lessons captured (2026-05-21 evening additions)
+
+- **Blanket-close on chat-finally is wrong for resources that span chat turns.** Conditional cleanup based on whether the work is FINISHED, not whether the current request is exiting. Chunk A → A2 lesson.
+- **Inner error result `message` fields must be propagated by every wrapping layer.** A 5-line `tool_registry.py:1414` wrap dropped the field; chat displayed "no message"; Filip's diagnosis was correct but blind. Always propagate `message` (with fallback) in result-dict wraps.
+- **`page.goto(wait_until="domcontentloaded")` is NOT enough for AngularJS pages.** Always settle (networkidle + fallback sleep) before the first describe. The DHCP race lived since day one but only surfaced when Filip tried DHCP — VLAN and hostname pages happened to mount fast enough.
+- **`PlannerResult` field shape vs event shape.** Code that reads `result.awaiting_approval` will AttributeError; the data lives in `result.events` as an event with `kind="awaiting_approval"`. Always read via the `_pending_approval(events)` helper, never directly.
+
 ### Pre-demo hardening punch list (verified)
 
 Two slash-command reviews (`/review` + `/security-review`) ran against `v0.5.5` on 2026-05-21. Both concluded "ship as-is for alpha-1 demo." Verified findings + corrections added to the "Pre-demo hardening" section below — pick up before cutting `v0.4.0-alpha.1` (chunk 18) or any external sharing.
@@ -218,16 +318,17 @@ Two slash-command reviews (`/review` + `/security-review`) ran against `v0.5.5` 
 
 | # | Chunk | Phase | Est | Pri |
 |---|---|---|---|---|
-| 14 | WebUI speed pass — trim `_settle_page` waits, retest on live router | G | ~60 min | LOW |
-| 14b | Self-training WebUI vision fallback — Claude Vision + learned selectors | G | ~4 h | MED |
-| 15 | Hardware retests — ISIS + OSPF WebUI on live router | F | ~30 min | MED |
+| 14c | Vision-fallback polish (5 audit follow-ups + offline corpus bootstrap) — see audit ship list above | G | ~2-3 h | MED |
+| 15 | Hardware retests — ISIS + OSPF WebUI on live router (unblocked by 14b) | F | ~30 min | MED |
 | 17 | Cosmetic prototype-label sweep | F | ~10 min | LOW |
 | 18 | Cut clean `v0.4.0-alpha.1` consolidation tag | F | ~15 min | — |
-| — | Pre-demo hardening (MED + LOW batches — see below) | mixed | ~2 h | mixed |
+| — | #8 SecretStr migration (deferred from review pass) | — | ~1 h | MED |
+| — | Pre-demo hardening (remaining items in MED + LOW batches) | mixed | ~1 h | mixed |
 
 ## Notes / housekeeping
 
-- **First thing in the new session: commit the working tree.** `README.md` + `docs/next-session-kickoff.md` + `docs/screenshots/*.png` are all uncommitted from 2026-05-21. Suggested single commit: `git add README.md docs/next-session-kickoff.md docs/screenshots/ && git commit -m "docs: README refresh + screenshots + kickoff doc update (chunks 16 + session wrap)"`.
+- **First thing in the new session: triage the partial chunk 14b in the worktree.** Run `git status --short` + `git diff HEAD` + `cat backend/webui_agent/vision_fallback.py | head -60`. Verify the integration site in `_playwright_subprocess.py` (look for `resolved_via="vision"` branch). Decide review-and-commit vs discard-and-redo BEFORE touching anything else. See "Chunk 14b PARTIAL" section above for file inventory.
+- **`docs/next-session-kickoff.md` is uncommitted** after the 2026-05-21 evening edits adding the v0.5.8 recap and partial-14b state. Commit it as session-start housekeeping after the 14b decision: `git add docs/next-session-kickoff.md && git commit -m "docs: kickoff recap for v0.5.8 + partial 14b worktree state"`.
 - `frontend-design-backup/` sweep is its own commit later in the week (after Phase C feels stable).
 - `tools/check_vectorstore.py` and `tools/query_rag.py` flagged in 2026-05-19 dead-code audit as worth a follow-up review — not blocking.
 - Director Blueprint applies from message #1 of the next chat. **Prefer invoking the `director-blueprint` skill** over re-reading the memory file — same content, kept in sync.

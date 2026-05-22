@@ -757,6 +757,39 @@ def _do_act_by_intent(
         ]
         chosen_loc = first_match(page, strategies)
         if chosen_loc is None:
+            # Vision fallback: screenshot + Haiku vision to resolve selector.
+            # Lazy imports — keep cold start cheap and isolate the API surface.
+            import hashlib  # noqa: PLC0415
+
+            from backend.core.settings import get_settings  # noqa: PLC0415
+            from backend.webui_agent.vision_fallback import resolve_via_vision  # noqa: PLC0415
+
+            cached_or_resolved = resolve_via_vision(page, intent, ev, get_settings())
+            if cached_or_resolved is not None:
+                try:
+                    vision_loc = page.locator(cached_or_resolved)
+                    synthetic_eid = (
+                        f"vision_{hashlib.sha1(cached_or_resolved.encode()).hexdigest()[:8]}"
+                    )
+                    fresh_map_with_vision = {**fresh_map, synthetic_eid: vision_loc}
+                    synthetic_msg = {
+                        "view_id": fresh_view_id,
+                        "eid": synthetic_eid,
+                        "action": action,
+                        "value": value,
+                    }
+                    reply, new_map, new_vid = _do_act(
+                        page, fresh_map_with_vision, fresh_view_id, synthetic_msg, ev
+                    )
+                    reply["chosen_eid"] = synthetic_eid
+                    reply["resolved_via"] = "vision"
+                    return reply, new_map, new_vid
+                except Exception as exc:  # noqa: BLE001
+                    from backend.core.logging import get_logger  # noqa: PLC0415
+
+                    get_logger(__name__).warning("vision_fallback_act_exception", error=str(exc))
+                    # fall through to the original unknown_eid return
+
             return (
                 {
                     "ok": False,

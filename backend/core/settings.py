@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # App
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     artifacts_dir: Path = Field(default=Path("artifacts"), alias="ARTIFACTS_DIR")
+    selector_cache_path: Path = Field(
+        default=Path("artifacts/selector_cache.json"),
+        alias="SELECTOR_CACHE_PATH",
+    )
     logs_dir: Path = Field(default=Path("logs"), alias="LOGS_DIR")
 
     # CORS + WebSocket origin allowlist. WebSockets bypass the browser CORS
