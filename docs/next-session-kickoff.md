@@ -1,4 +1,4 @@
-# Next session kickoff — 2026-05-22+
+# Next session kickoff — 2026-05-24+
 
 Paste the block between **=== START ===** and **=== END ===** into the first message of a fresh chat. Then wait for "go" before any code change.
 
@@ -6,33 +6,44 @@ Paste the block between **=== START ===** and **=== END ===** into the first mes
 
 You are joining the Cisco AI Config Agent project mid-stream. You are operating as the **Orchestrator / Head Architect** of an Engineering & Networking Team reporting to the Director (Filip).
 
-**FIRST**: check your skill list for **TWO** skills installed 2026-05-21:
+**FIRST**: check your skill list for **THREE** project-relevant skills:
 - `director-blueprint` (operating model — role split, communication, per-chunk workflow, Sonnet briefing template, audit templates by tier, tag discipline, bug-fix loop, anti-patterns).
 - `external-review-triage` (workflow for a multi-row code-review summary table — verify each via Haiku, bundle by severity, ship sequentially with deep audit per chunk).
+- `live-smoke-iteration` (NEW 2026-05-23) — ship→smoke→triage workflow when iterating against a live system. Encodes today's vision-stack saga lessons: visibility-first, evidence-per-smoke, wiring-trap prevention, backup-tag discipline. Triggers on "live smoke", "live router", repeated smoke failures, or terminal-log paste-bombs.
 
-Invoke `director-blueprint` via the Skill tool BEFORE drafting your response. If a review summary table appears in the conversation, ALSO invoke `external-review-triage`. The skills supersede the inline memory references where they overlap.
+Invoke `director-blueprint` via the Skill tool BEFORE drafting your response. Also invoke `live-smoke-iteration` if the first user message involves a live smoke result or paste-bombed router logs. If a review summary table appears in conversation, invoke `external-review-triage`. Skills supersede inline memory references where they overlap.
 
 Then read the project-specific references:
 
-1. [CLAUDE.md](CLAUDE.md) — project tone, branch rules, commits, AND the **Communication style** section (team voice, tradeoffs first, no fluff).
-2. [~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md](~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md) — full Director Blueprint memory file (role split, communication, concrete flow per task, edge cases). Skip if the `director-blueprint` skill loaded successfully — the skill is the same content, kept in sync.
-3. [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — master 18-chunk roadmap from Filip's bug list. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/16 are LANDED.
-4. The "What landed 2026-05-19" + "What landed 2026-05-20" + "What landed 2026-05-21" sections in **this** kickoff doc — chronological recap of the last three days.
+1. [CLAUDE.md](CLAUDE.md) — project tone, branch rules, commits, **Communication style** section (team voice, tradeoffs first, no fluff).
+2. [~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md](~/.claude/projects/C--GIT-AI-configurator/memory/feedback_model_role_split.md) — Director Blueprint memory (skip if skill loaded).
+3. [docs/roadmap-2026-05-19-bug-list.md](docs/roadmap-2026-05-19-bug-list.md) — master 18-chunk roadmap.
+4. The "What landed 2026-05-19/20/21/22/**23**" sections in **this** kickoff doc — five days of recap. The 2026-05-23 section is the longest by far — the entire day was the vision-stack saga.
 
-After reading, summarise back in 8-10 sentences:
+After reading, summarise back in 10-12 sentences:
 
-1. `feature/bootstrap` at HEAD **`9b6d8ec`**, **633 tests passing** (+89 over the 544 baseline of 2026-05-20 morning, +31 over the 2026-05-21 morning baseline), last tag **`v0.5.8-session-window-fix`** at `9b6d8ec`.
-2. The Director Blueprint operating directive — team voice, tradeoff tables BEFORE architectural decisions, reject corporate fluff. **Audit tier rule (locked):** Haiku 4.5 for light (1–3 files, pure cleanup/docs/cosmetic/typo, no contracts, no tool wiring); Opus 4.7 for deep (4+ files OR new contracts OR new tool wiring OR security-touching OR error paths OR live-smoke-gated). When in doubt → deep.
-3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/**14**/16 are LANDED. Don't re-do. Chunk 14 (`_settle_page` budget trim 1500/500 → 800/250 ms) live-smoked green.
-4. **`v0.5.7-review-hardening`** (afternoon, 4 commits + recap) = external review pass: 9 of 11 real findings fixed across chunks A/B/C/D, Opus 4.7 deep audits all PASS. #8 SecretStr migration deferred. See "External review pass" section.
-5. **`v0.5.8-session-window-fix`** (evening, 2 commits) = Path B (`3b2cc9c` settle+retry+message propagation) + Chunk A2 (`9b6d8ec` session lifecycle fix for propose→execute multi-turn). Path B fixed the DHCP `describe_failed: no message` bug. Chunk A2 fixed a regression chunk A introduced — blanket `close_all_sessions()` in chat-finally was killing sessions BETWEEN propose and execute. Lesson captured in the new `external-review-triage` skill.
-6. Phase G (`v0.5.6-phase-g-autodebug`) added reactive auto-debug. Chunk 12 required 4 follow-up commits — read the chunk-12 narrative before touching that code.
-7. The Opus → Sonnet → tiered-audit agent split is the standard flow: Opus plans + writes per-chunk Sonnet briefings, Sonnet implements with tests interleaved, fresh sub-agent audits per the tier rule. Haiku 4.5 also used for one-question reads during Sonnet implementation.
-8. **PARTIAL chunk 14b in the worktree (uncommitted):** Sonnet started before Filip interrupted. NEW `backend/webui_agent/vision_fallback.py` (~280 lines), NEW `tests/unit/test_vision_fallback.py` (~350 lines), modified `settings.py` + `_playwright_subprocess.py` + `evidence.py`. **First thing this session: skim the diff and decide review-and-commit OR discard-and-redo with tighter briefing.** Don't audit blindly — verify Sonnet's output first.
-9. **Known live-smoke bug awaiting 14b:** OSPF + DHCP intents reach the right WebUI screen but the inner Haiku planner mis-fills fields (Network empty, Starting IP shows the subnet mask). This is exactly the failure class chunk 14b targets.
-10. **Next candidates:** chunk 14b (review+commit OR redo), then chunk 15 hardware retest (needs 14b green first), then chunks 17/18 + #8 SecretStr + pre-demo hardening remainder. Skip the chunk-order question — it is locked unless Filip asks.
+1. `feature/bootstrap` at HEAD **`79dc895`** (14h-F hybrid revert), **690 tests passing** (+57 over the 633 baseline of 2026-05-22 evening). Last tags: `v0.5.8-session-window-fix` at `9b6d8ec` (2026-05-22) + backup tags `backup-20260523-1259` at `aff5f53` (mid-day) and `backup-20260523-1842` at `79dc895` (end of 2026-05-23).
+2. The Director Blueprint operating directive — team voice, tradeoff tables BEFORE architectural decisions, no corporate fluff. **Audit tier rule (locked):** Haiku 4.5 light / Opus 4.7 deep. When in doubt → deep. **2026-05-23 lesson:** 14k shipped dead code because audit was skipped on "small surface" — DO NOT skip deep audit on any smoke-touching chunk.
+3. Phases A, B, C, D, E, G + chunks 1/1.5/9/10/14/16 are LANDED from earlier days. The 2026-05-23 vision stack adds: 14b (vision_fallback module), 14f-adaptive (plan vision pre-check), 14g (vision-first inversion — OBSOLETED by 14h-F), 14h-C/D/E/F (visibility + uniqueness + eviction + hybrid revert). NONE of these are tagged as a release yet — all under the `backup-20260523-1842` end-of-day tag.
+4. **The vision stack is architecturally complete but DHCP smoke is still RED.** Last live evidence (`act_20260523_589a83`): vision resolved selector `button:has-text('Add')` which doesn't match Cisco's nested-icon buttons; 14h-F restores eid-first lookup which SHOULD skip vision entirely for Add (e_020 is in describe view). **First action this session: re-smoke DHCP at 79dc895.** If green, tag `v0.5.9-vision-hybrid`. If red, the click is failing on the REAL eid locator — pure Playwright/page-state issue, not vision-related.
+5. **14h-C subprocess log forwarding is the most-important shipped artifact of the day.** Without it the whole vision stack was invisible on live router. Going forward EVERY live-smoke iteration has `vision_fallback_*`, `selector_cache_evicted`, `plan_vision_check_*` events visible in parent uvicorn log. Use them.
+6. The Opus → Sonnet → tiered-audit flow is standard. **2026-05-23 added discipline:** for every new function/contract, grep for runtime callers BEFORE commit. The 14k wiring trap (role_text strategy handler + dhcp_form YAML — both dead code in the runtime path) caught nothing in tests but burned a smoke iteration. The `live-smoke-iteration` skill encodes this.
+7. **Vision-from-screenshot fundamentally can't see HTML attributes.** When vision is asked for selectors that require DOM knowledge (e.g. `input[name='networkIp']`), it falls back to text-based selectors (`button:has-text('Add')`). On Cisco's hostile-DOM (icon-only buttons, no proper labels) those don't match. Hybrid architecture (eid-first → vision-fallback) is the right shape: eid lookup uses the describe view which DOES have HTML attribute knowledge.
+8. **Two LOW audit follow-ups** inherited from 14g + 14h-F (vision-path `get_attribute` fail-open bypasses deny-list; `_eid_for_intent` tie-break doesn't filter deny-listed candidates). Neither blocks; track for 14h-G cleanup chunk after smoke green.
+9. **The architectural exhaustion list** — what's been tried, what works, what doesn't (read full 2026-05-23 recap):
+   - 14b reactive vision_fallback (only fires on unknown_eid) — RIGHT shape
+   - 14g vision-first inversion — WRONG (skips correct eid path)
+   - 14k YAML + role_text — DEAD CODE in runtime
+   - 14h-F hybrid (eid-first → vision-fallback) — RIGHT, awaiting smoke validation
+10. **Next candidates after smoke validates 14h-F:**
+    - `v0.5.9-vision-hybrid` tag (after green smoke)
+    - 14g/14h-F LOW audit follow-ups (1h cleanup chunk)
+    - 14h-A vision-grounded configure_planner (give planner the screenshot + element list + DOM — the long-term fix for "planner emits broken plans" that has been the root cause of multiple failure classes)
+    - Chunk 15 (hardware retests for OSPF, ISIS — was blocked on DHCP working)
+    - #8 SecretStr migration (deferred from 2026-05-21 review pass)
+    - Pre-demo hardening MED/LOW batches before `v0.4.0-alpha.1`
 
-Then wait for "go" before making any change. **Do not propose re-planning the chunk order** — it is locked unless Filip asks.
+Then wait for "go". **Do not propose re-planning chunk order** — locked unless Filip asks.
 
 === END ===
 
@@ -393,16 +404,82 @@ Two slash-command reviews (`/review` + `/security-review`) ran against `v0.5.5` 
 - **Server-side fallbacks beat fighting the LLM.** Haiku ignored the strong tool description mandating `failure_action_id` extraction. Adding a 5-line server-side scan of FAILED actions in confirmations was more reliable than 5 iterations of prompt-tuning.
 - **Live smoke surfaces architectural defects unit tests miss.** Chunk 12 needed 4 follow-up commits despite all unit tests passing. Each fix improved a real defect, not just a symptom. Plan for this rhythm on UX-heavy chunks.
 
+## What landed 2026-05-23
+
+**Theme of the day: the vision-stack saga.** 9 commits between two backup tags (`backup-20260523-1259` mid-day at `aff5f53`, `backup-20260523-1842` end-of-day at `79dc895`). Started with 14b partial in worktree, ended with a hybrid architecture pending live-smoke validation. Tests 633 → 690 (+57). **DHCP smoke still RED at session end.** The day's hard-won lessons captured in NEW skill `~/.claude/skills/live-smoke-iteration/SKILL.md` — invoke it from message #1 of any session that involves smoke iteration.
+
+### The full commit chain
+
+| Commit | Chunk | What | Outcome |
+|---|---|---|---|
+| `b8ef295` | 14b cleanup | vision_fallback module (reactive on unknown_eid) + per-session cap + atomic cache writes | Tests green, never smoke-validated (vision didn't fire because subprocess logs were silent) |
+| `298681e` | 14f-adaptive | plan vision pre-check with 4-tier familiarity scoring | Tier 3 adversarial REJECT verdicts caught real planner bugs; router stayed clean |
+| `e81be0a` | 14f auth fix | `api_key=` passed to `Anthropic()` (was relying on broken env-var resolution) | First smoke that actually called Haiku vision |
+| `27a0421` | 14f JSON + gaming | Brace-extract JSON from prose; snapshot_signal filters to EXECUTED-only actions | Plan vision works on prose responses; familiarity gaming closed |
+| `dfd9bda` | CI mypy | 27 mypy errors fixed (Anthropic SDK TypedDict + union-attr issues) | CI unblocked on Py 3.12 |
+| `25f9e50` | 14k (FAILED) | DHCP YAML + `role_text` strategy + spatial-label JS exclusion | **DEAD CODE.** Audit was skipped. Both additions never wired into runtime path. Burned one router smoke. |
+| `f84eb00` | 14g | INVERTED selector resolution: vision-FIRST, heuristics as vestigial fallback | Wrong call — skipped correct eid path for describable elements (Add button) |
+| `aff5f53` | Option H | When vision REJECTs with suggested_plan, treat as REVISE (use the suggestion) | Vision's suggested plans correctly addressed planner bugs |
+| `backup-20260523-1259` | tag | mid-day safety net at aff5f53 | — |
+| `5bef78f` | 14h-C | Subprocess stderr → parent log forwarding (daemon thread + NDJSON re-emit) | **BREAKTHROUGH.** First smoke where `vision_fallback_*` events were visible. Burned ~6h before this fix. |
+| `7f92118` | audit fix | Kwarg collision when subprocess emits a field named `subprocess` | Opus 4.7 audit caught it pre-push |
+| `ac48214` | vision JSON | Same prose-JSON recovery in vision_fallback that 27a0421 added to plan_vision_check | Vision finally returned usable selectors |
+| `5b53d90` | 14h-D | Vision prompt rewritten to demand UNIQUE selectors + `_SESSION_OP_TIMEOUT_S` 30→90s | Haiku ignored the uniqueness clause and returned `button:has-text('Add')` anyway |
+| `cf7e6a5` | 14h-E | Added `unknown_error` to cache eviction STALENESS set (cache-poisoning fix) | Cache self-heals on next failure; deleted poisoned `selector_cache.json` once |
+| `79dc895` | 14h-F | **HYBRID REVERT** — eid-first → vision-fallback → first_match-last (restore 14b shape) | Architecture corrected. Smoke pending at session end. |
+| `backup-20260523-1842` | tag | end-of-day at 79dc895 | — |
+
+### What the 4+ DHCP smokes proved
+
+Every smoke today targeted the same DHCP intent. The failure modes evolved as we shipped fixes:
+
+1. **Smoke 1 (pre-14h-C)**: Vision-first fired but silently failed (subprocess stderr discarded) → cascading session_not_found → fall back to heuristics → heuristics picked `e_013 link "Network/Subnet Mask"` (column header) → unknown_error → `iteration_cap_hit`. **Couldn't tell vision was broken.**
+
+2. **Smoke 2 (after 14h-C log forwarding)**: First time we saw `vision_fallback_api_error: "Expecting value: line 1 column 1 (char 0)"` — Haiku returning empty/prose. Caused by `_call_haiku_vision` doing `json.loads(raw_text)` directly. Fix: ac48214.
+
+3. **Smoke 3 (after 14h-D uniqueness prompt + 90s timeout)**: Vision returned `button:has-text('Add')` for the Add button. Click failed with `unknown_error` because Cisco's button has nested `<span><i>...</i>Add</span>` children — `:has-text()` matched zero direct-text elements. Eviction triggered + retry returned SAME selector. `inner_plan_empty`.
+
+4. **Smoke 4 (after 14h-E cache eviction)**: Cache properly evicted (`selector_cache_evicted` event visible — 14h-C working). But vision STILL returned `button:has-text('Add')` because Haiku-from-screenshot fundamentally can't see HTML attributes — it can only describe what's visually rendered.
+
+5. **Smoke pending (at 14h-F)**: Hybrid revert should bypass vision entirely for Add (e_020 is in describe view, eid forward-lookup finds it). Vision only fires for fields like Network that aren't in describe.
+
+### Architectural lessons captured (full 2026-05-23 set)
+
+- **Vision-from-screenshot fundamentally can't see HTML attributes.** When asked for attribute-based selectors (`input[name='X']`), Haiku falls back to text-based selectors (`button:has-text(...)`) because that's what's visible. On Cisco's icon-only buttons those don't match. Vision needs DOM context to produce attribute selectors.
+
+- **Hybrid > pure-vision-first.** 14g's inversion was wrong. The correct order is: eid forward-lookup FIRST (uses the describe view which DOES have HTML attribute knowledge) → vision fallback (for cases where describe drops the element) → first_match heuristics (last resort).
+
+- **Visibility is foundational.** 6+ hours wasted because subprocess `vision_fallback_*` events were silenced by `stderr=DEVNULL`. A ~150-line subprocess-log-forwarding chunk (14h-C) would have saved most of that. New rule: **if two consecutive smokes fail with same generic symptom, STOP architectural changes, ship the visibility fix first.**
+
+- **The wiring trap.** 14k shipped TWO dead-code additions because the audit step was skipped on "small surface, exactly what was recommended". For every new function/contract, GREP for runtime callers before commit. Count call sites.
+
+- **Cache hygiene requires catch-all eviction.** Narrower eviction sets leave poison entries. Include `unknown_error` (the Playwright catch-all) in STALENESS so a bad cached selector self-heals on next failure. Over-evict, don't under-evict.
+
+- **Default-PROCEED on failure paths.** Vision pre-check should never hard-fail on API hiccups (timeout, 529, JSON parse). The action store + operator approval flow are the safety net, not the pre-check.
+
+- **Option H pattern: trust the LLM's suggestion when it provides one.** When vision REJECTs a plan but provides a `suggested_plan`, promote to REVISE and use the suggestion. The LLM saw the form; its suggestion is authoritative.
+
+- **Familiarity-scaled vision intensity must filter to EXECUTED-only signals.** 10 failed retries leaving forensic snapshots should NOT inflate familiarity. snapshot_signal cross-references against `webui_configure_iteration_complete` events with `verify_present=true`.
+
+- **Sonnet auto-commit is a workflow violation.** Briefing explicitly said "don't commit"; Sonnet committed anyway in 14h-C. Net: harmless (audit ran retroactively). Future briefings: emphasize NOT committing, accept rather than revert if it happens with clean code.
+
+### NEW skill installed 2026-05-23 PM: `live-smoke-iteration`
+
+At `~/.claude/skills/live-smoke-iteration/SKILL.md`. Auto-triggers on "live smoke", "live router", repeated smoke failures, terminal-log paste-bombs. Encodes the 5 load-bearing rules (visibility-first, one-smoke-one-evidence, wiring-trap-prevention, backup-tag-discipline, deep-audit-no-skipping) + the vision-stack-specific lessons (vision-from-screenshot constraints, hybrid > pure, self-healing cache, default-PROCEED, familiarity-scaling, Option H). Includes a worked example table of today's 14 chunks. Pairs with `director-blueprint` and `external-review-triage`.
+
 ## Remaining chunks (one-line each)
 
 | # | Chunk | Phase | Est | Pri |
 |---|---|---|---|---|
-| 14c | Vision-fallback polish (5 audit follow-ups + offline corpus bootstrap) — see audit ship list above | G | ~2-3 h | MED |
-| 14g | Vision pre-check polish (6 audit follow-ups: URL fragment, snapshot gaming, counter leak, proposal-cap, shared json-extract, atomic cache) | G | ~2 h | MED |
-| 15 | Hardware retests — ISIS + OSPF WebUI on live router (unblocked by 14b + 14f) | F | ~30 min | MED |
+| Smoke at 79dc895 | Re-smoke DHCP on C1111-4P with 14h-F hybrid revert | G | ~5 min | **HIGH (first action)** |
+| 14h-A (deferred) | Vision-ground configure_planner (screenshot + element list + RAG + DOM → no more broken-plan emission) | G | ~4-6 h | MED (upstream root-cause fix) |
+| 14h-G (cleanup) | LOW audit follow-ups: vision-path deny-list fail-open + `_eid_for_intent` tie-break filter | G | ~1 h | LOW |
+| 14c | Vision-fallback polish (URL fragment fix, integration test, secret-page deny-list, offline corpus bootstrap) | G | ~2-3 h | MED |
+| 14g audit follow-ups | Pre-check polish (URL fragment, snapshot gaming AFTER 14h-E, counter leak, proposal-cap, shared json-extract, atomic cache) | G | ~2 h | MED |
+| 15 | Hardware retests — OSPF + ISIS WebUI on live router (unblocked once DHCP green) | F | ~30 min | MED |
 | 17 | Cosmetic prototype-label sweep | F | ~10 min | LOW |
 | 18 | Cut clean `v0.4.0-alpha.1` consolidation tag | F | ~15 min | — |
-| — | #8 SecretStr migration (deferred from review pass) | — | ~1 h | MED |
+| — | #8 SecretStr migration (deferred from 2026-05-21 review pass) | — | ~1 h | MED |
 | — | Pre-demo hardening (remaining items in MED + LOW batches) | mixed | ~1 h | mixed |
 
 ## Notes / housekeeping
