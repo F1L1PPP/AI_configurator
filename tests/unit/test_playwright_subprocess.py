@@ -1122,6 +1122,67 @@ def test_act_by_intent_does_not_evict_on_element_missing(tmp_path):
     assert reply["failure_reason"] == "element_missing"
 
 
+def test_act_by_intent_evicts_and_retries_on_unknown_error(tmp_path):
+    """14h-E regression: unknown_error MUST trigger cache eviction + vision retry.
+
+    Live smoke act_20260523_48a212 proved a poisoned cache entry
+    (button:has-text('Add') from a session before the uniqueness-prompt
+    fix) kept failing with unknown_error. The narrower STALENESS set
+    {element_hidden, disabled, intercepted} never evicted it — the cache
+    stayed poisoned and re-served the bad selector every session.
+    Including unknown_error self-heals the cache on click failures.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    selector_a = "button:has-text('Add')"  # poisoned
+    selector_b = "[aria-label='Add Pool']"  # corrected on retry
+
+    do_act_replies = [
+        ({"ok": False, "failure_reason": "unknown_error", "attempts": 0}, {}, "fresh"),
+        ({"ok": True, "attempts": 0}, {}, "fresh"),
+    ]
+
+    with (
+        patch(
+            "backend.webui_agent.vision_fallback.resolve_via_vision",
+            side_effect=[selector_a, selector_b],
+        ),
+        patch(
+            "backend.webui_agent.vision_fallback.evict_from_selector_cache",
+            return_value=True,
+        ) as mock_evict,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch(
+            "backend.webui_agent._playwright_subprocess._do_act",
+            side_effect=do_act_replies,
+        ),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=_base_intent_msg(),
+            ev=ev,
+        )
+
+    # Cache evicted exactly once (after the unknown_error failure).
+    mock_evict.assert_called_once()
+    # Retry succeeded with the new selector.
+    assert reply["ok"] is True
+
+
 def test_act_by_intent_no_infinite_retry_loop(tmp_path):
     """Both first and retry _do_act return element_hidden → only ONE retry (resolve_via_vision called 2× max)."""
     from backend.webui_agent._playwright_subprocess import _do_act_by_intent

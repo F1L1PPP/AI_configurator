@@ -820,8 +820,20 @@ def _do_act_by_intent(
         result = _try_act_with_vision(vision_selector, attempt=1)
         if result is not None:
             reply, new_map, new_vid = result
-            # Eviction + retry on staleness signals.
-            STALENESS = {"element_hidden", "element_disabled", "element_intercepted"}
+            # Eviction + retry on failure signals indicating a stale or
+            # bad cached selector. unknown_error added in chunk 14h-E after
+            # live smoke act_20260523_48a212: a poisoned cache entry
+            # (button:has-text('Add') from a prior tightening-prompt-pre-fix
+            # session) kept failing with unknown_error, but the narrower
+            # STALENESS set never evicted it — cache stayed poisoned
+            # forever. Including unknown_error is over-eviction by design;
+            # transient failures cost one extra vision call to repopulate.
+            STALENESS = {
+                "element_hidden",
+                "element_disabled",
+                "element_intercepted",
+                "unknown_error",
+            }
             if reply.get("ok") is False and reply.get("failure_reason") in STALENESS:
                 evicted = evict_from_selector_cache(
                     settings.selector_cache_path, role, name, page_url
