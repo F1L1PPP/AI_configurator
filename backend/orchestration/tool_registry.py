@@ -1186,7 +1186,9 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
     # count is not tracked across proposal calls; budget applies per execution session.
     # Using the most-recent screenshot from artifacts is simpler than
     # acquiring the page object from the subprocess at this point.
-    _proposal_vision_verdict: dict[str, Any] | None = None
+    from backend.orchestration.plan_vision_check import VisionVerdict  # noqa: PLC0415
+
+    _proposal_vision_verdict: VisionVerdict | None = None
     try:
         import base64  # noqa: PLC0415
 

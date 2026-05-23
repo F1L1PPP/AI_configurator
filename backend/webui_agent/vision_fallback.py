@@ -206,10 +206,12 @@ def _call_haiku_vision(
     response = client.messages.create(
         model=_MODEL,
         max_tokens=512,
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": content}],  # type: ignore[typeddict-item]
     )
 
-    raw_text = response.content[0].text
+    # First content block is always a TextBlock in our prompts (no tools).
+    first_block = response.content[0]
+    raw_text = first_block.text if hasattr(first_block, "text") else ""
     result = json.loads(raw_text)
 
     # Validate required keys are present before returning.

@@ -414,13 +414,15 @@ def _call_haiku_plan_vision(
     response = client.messages.create(
         model=_MODEL,
         max_tokens=1024,
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": content}],  # type: ignore[typeddict-item]
     )
     # Return raw text — caller routes through _parse_vision_response which
     # handles prose-around-JSON via brace extraction. Live smoke
     # act_20260523_41bfa6 hit JSONDecodeError on empty/prose responses;
     # parsing inline here was eating recoverable cases.
-    return response.content[0].text or ""
+    # First content block is always TextBlock in our prompts (no tools).
+    first_block = response.content[0]
+    return (first_block.text if hasattr(first_block, "text") else "") or ""
 
 
 def _extract_first_json_object_local(text: str) -> str | None:
@@ -700,7 +702,7 @@ def check_plan_via_vision(
     )
 
     return VisionVerdict(
-        verdict=raw_verdict,  # type: ignore[arg-type]
+        verdict=raw_verdict,
         reason=reason,
         suggested_plan=suggested_plan if isinstance(suggested_plan, list) else None,
         risks=risks if isinstance(risks, list) else [],
