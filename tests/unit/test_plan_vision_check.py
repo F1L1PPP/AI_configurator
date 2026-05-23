@@ -759,3 +759,62 @@ def test_per_iter_check_runs_on_redraft(tmp_path: Path) -> None:
 
 def test_model_constant_is_haiku_45() -> None:
     assert _MODEL == "claude-haiku-4-5-20251001"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Anthropic client must receive api_key kwarg
+# ---------------------------------------------------------------------------
+# Live smoke act_20260523_718d70 fired plan_vision_check_api_error 4x with
+# "Could not resolve authentication method" because the client was constructed
+# as Anthropic(max_retries=N) without api_key=. Every other call site in the
+# codebase (planner.py, configure_planner.py, debug_planner.py, routes_suggestions.py)
+# passes api_key=get_settings().anthropic_api_key explicitly. Lock that here.
+
+
+def test_anthropic_client_receives_api_key_kwarg(tmp_path: Path) -> None:
+    """_call_haiku_plan_vision MUST pass api_key= to Anthropic(), not rely on env."""
+    settings = _make_settings(tmp_path)
+    settings.anthropic_api_key = "sk-ant-test-fixture"
+    page_url = "http://router/webui/#/dhcp"
+    ev = _make_ev()
+    intent = "Configure something"
+    plan = [{"intent": {"role": "textbox", "name": "Field"}, "action": "fill", "value": "x"}]
+
+    mock_cls = _make_mock_anthropic(
+        json.dumps(
+            {
+                "verdict": "PROCEED",
+                "reason": "ok",
+                "confidence": 0.9,
+            }
+        )
+    )
+
+    # get_settings is lazy-imported inside _call_haiku_plan_vision; patch at source.
+    with (
+        patch("backend.orchestration.plan_vision_check.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        check_plan_via_vision(
+            plan=plan,
+            intent=intent,
+            page_screenshot_b64=_MINIMAL_B64,
+            view=None,
+            rag_chunks=None,
+            running_config="",
+            page_url=page_url,
+            ev=ev,
+            settings=settings,
+        )
+
+    # The Anthropic class was instantiated at least once
+    assert mock_cls.called, "Anthropic() was never called"
+    # Every construction must include api_key keyword
+    for call in mock_cls.call_args_list:
+        assert "api_key" in call.kwargs, (
+            f"Anthropic constructed without api_key kwarg: {call}. "
+            f"Without api_key, the SDK fails with TypeError 'Could not resolve "
+            f"authentication method' in some environments. See live smoke "
+            f"act_20260523_718d70 for the regression."
+        )
+        assert call.kwargs["api_key"] == "sk-ant-test-fixture"

@@ -391,3 +391,37 @@ def test_resolve_via_vision_cache_hit_does_not_consume_budget(tmp_path: Path) ->
         resolve_via_vision(page, intent, ev, settings)
 
     assert ev.vision_call_count == 0  # cache hit was free
+
+
+# ---------------------------------------------------------------------------
+# Regression: Anthropic client must receive api_key kwarg
+# ---------------------------------------------------------------------------
+# Live smoke act_20260523_718d70 fired plan_vision_check_api_error 4x with
+# "Could not resolve authentication method". Same construction pattern lives
+# here in vision_fallback._call_haiku_vision. Lock the explicit api_key= form.
+
+
+def test_anthropic_client_receives_api_key_kwarg(tmp_path: Path) -> None:
+    """_call_haiku_vision MUST pass api_key= to Anthropic(), not rely on env."""
+    settings = _make_settings(tmp_path)
+    settings.anthropic_api_key = "sk-ant-test-fixture"
+    page = _make_page()
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "20.20.20.0"}
+
+    mock_cls = _make_mock_anthropic(_valid_vision_response())
+
+    # get_settings is lazy-imported inside _call_haiku_vision; patch at source.
+    with (
+        patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        resolve_via_vision(page, intent, ev, settings)
+
+    assert mock_cls.called, "Anthropic() was never called"
+    for call in mock_cls.call_args_list:
+        assert "api_key" in call.kwargs, (
+            f"Anthropic constructed without api_key kwarg: {call}. "
+            f"See live smoke act_20260523_718d70 for the regression."
+        )
+        assert call.kwargs["api_key"] == "sk-ant-test-fixture"

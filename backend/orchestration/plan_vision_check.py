@@ -306,7 +306,9 @@ def _call_haiku_plan_vision(
     running_config: str,
 ) -> dict[str, Any]:
     """Make the Anthropic vision call for a given tier. Returns parsed JSON or raises."""
-    client = Anthropic(max_retries=_MAX_RETRIES)
+    from backend.core.settings import get_settings  # noqa: PLC0415
+
+    client = Anthropic(api_key=get_settings().anthropic_api_key, max_retries=_MAX_RETRIES)
 
     content: list[dict[str, Any]] = [_build_image_block(screenshot_b64)]
 
