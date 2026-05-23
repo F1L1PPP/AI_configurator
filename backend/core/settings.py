@@ -28,6 +28,11 @@ class Settings(BaseSettings):
         default=Path("artifacts/selector_cache.json"),
         alias="SELECTOR_CACHE_PATH",
     )
+    plan_validation_cache_path: Path = Field(
+        default=Path("artifacts/plan_validation_cache.json"),
+        alias="PLAN_VALIDATION_CACHE_PATH",
+    )
+    plan_vision_enabled: bool = Field(default=True, alias="PLAN_VISION_ENABLED")
     logs_dir: Path = Field(default=Path("logs"), alias="LOGS_DIR")
 
     # CORS + WebSocket origin allowlist. WebSockets bypass the browser CORS

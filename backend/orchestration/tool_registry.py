@@ -63,6 +63,11 @@ from backend.webui_agent.generic_driver import (
 _SEARCH_DOCS_MAX_QUERY_CHARS = 1000
 _SEARCH_DOCS_MAX_TOP_K = 50
 
+# 14f-adaptive: per-action_id plan_vision_count tracker for _webui_configure.
+# Persists across while-True iterations within the same execution call.
+# Keyed by action_id; entries are cleaned up implicitly when the action completes.
+_plan_vision_counters: dict[str, int] = {}
+
 # Repeated next_step copy for every propose_* helper. One source of truth
 # so a UX wording change doesn't require five edits.
 _NEXT_STEP_INLINE = "Use the APPROVE and EXECUTE NOW buttons below this message."
@@ -1176,6 +1181,103 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
             ],
         }
 
+    # 4f-adaptive: vision pre-check on the drafted plan.
+    # ev=None at proposal time — no EvidenceCollector in scope here.
+    # count is not tracked across proposal calls; budget applies per execution session.
+    # Using the most-recent screenshot from artifacts is simpler than
+    # acquiring the page object from the subprocess at this point.
+    _proposal_vision_verdict: dict[str, Any] | None = None
+    try:
+        import base64  # noqa: PLC0415
+
+        from backend.core.settings import get_settings as _get_settings_pvc  # noqa: PLC0415
+        from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+            check_plan_via_vision,
+        )
+
+        _settings_pvc = _get_settings_pvc()
+        if _settings_pvc.plan_vision_enabled:
+            # Best screenshot available: latest PNG under artifacts/screenshots.
+            _ss_dir = _settings_pvc.artifacts_dir / "screenshots"
+            _ss_b64 = ""
+            if _ss_dir.exists():
+                # Scope to the current session's subdir to avoid grabbing
+                # a screenshot from a different session/intent.
+                _prop_session_dirs = list(_ss_dir.glob(f"*{session_id}*"))
+                if len(_prop_session_dirs) == 1:
+                    _candidates = sorted(
+                        _prop_session_dirs[0].rglob("*.png"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if _candidates:
+                        with contextlib.suppress(OSError):
+                            _ss_b64 = base64.b64encode(_candidates[0].read_bytes()).decode()
+                # else: 0 or >1 matches — skip vision; first-ever session has
+                # no prior screenshots, so per-iter check will cover it.
+
+            if _ss_b64:
+                _proposal_vision_verdict = check_plan_via_vision(
+                    plan=plan,
+                    intent=intent,
+                    page_screenshot_b64=_ss_b64,
+                    view=view,
+                    rag_chunks=rag_chunks,
+                    running_config=running_config,
+                    page_url=webui_path,
+                    ev=None,
+                    settings=_settings_pvc,
+                )
+                if _proposal_vision_verdict["verdict"] == "REVISE" and _proposal_vision_verdict.get(
+                    "suggested_plan"
+                ):
+                    log.info(
+                        "propose_webui_configure_plan_revised_by_vision",
+                        intent=intent,
+                        tier=_proposal_vision_verdict.get("tier"),
+                    )
+                    plan = _proposal_vision_verdict["suggested_plan"]
+                elif (
+                    _proposal_vision_verdict["verdict"] == "REJECT"
+                    and _proposal_vision_verdict.get("confidence", 0) >= 0.7
+                ):
+                    import time as _time  # noqa: PLC0415
+
+                    from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                        _dump_vision_rejection,
+                    )
+
+                    # No action_id exists yet (propose_action hasn't run).
+                    # Use a time-based placeholder so the rejection artifact
+                    # is uniquely named and traceable to the intent.
+                    _reject_action_id = f"propose_{int(_time.time())}"
+                    log.error(
+                        "propose_webui_configure_plan_rejected_by_vision",
+                        intent=intent,
+                        reason=_proposal_vision_verdict["reason"],
+                        tier=_proposal_vision_verdict.get("tier"),
+                        familiarity_score=_proposal_vision_verdict.get("familiarity_score"),
+                    )
+                    _dump_vision_rejection(
+                        _reject_action_id, _proposal_vision_verdict, _settings_pvc
+                    )
+                    close_all_sessions()
+                    return {
+                        "error": "plan_rejected_by_vision",
+                        "message": _proposal_vision_verdict["reason"],
+                        "reason": _proposal_vision_verdict["reason"],
+                        "tier": _proposal_vision_verdict.get("tier"),
+                        "familiarity_score": _proposal_vision_verdict.get("familiarity_score"),
+                        "rejected_at": "proposal_time",
+                    }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "propose_webui_configure_vision_check_failed",
+            intent=intent,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
     # 5. Conflict detection using equivalent CLI commands (soft-fail if either
     # side is empty — avoid false positives from an LLM that couldn't infer).
     existing = None
@@ -1281,6 +1383,7 @@ def _webui_configure(**kwargs: Any) -> dict:
     verify_text = params.get("verify_text")
     session_id = params.get("session_id")
     intent = params.get("intent", "")
+    webui_path_for_vision = params.get("webui_path", "")
     rag_chunks = [
         {"text": "", "source": e.get("source"), "section": e.get("section")}
         for e in params.get("evidence", [])
@@ -1305,6 +1408,105 @@ def _webui_configure(**kwargs: Any) -> dict:
         )
         batch_had_failure = False
         last_failure: dict[str, Any] | None = None
+
+        # 14f-adaptive: vision pre-check on each iteration's plan (catches re-drafts).
+        # Skip iter 1 (already checked at proposal time). Use a function-local counter
+        # dict keyed by action_id — no EvidenceCollector in scope here.
+        if iteration > 1:
+            try:
+                import base64 as _b64  # noqa: PLC0415
+
+                from backend.core.settings import get_settings as _gset  # noqa: PLC0415
+                from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                    _dump_vision_rejection,
+                    check_plan_via_vision,
+                )
+
+                _iter_settings = _gset()
+                if _iter_settings.plan_vision_enabled:
+                    # A simple per-action_id counter stored in the function's local
+                    # closure. Use module-level dict to persist across loop iters.
+                    _pvc_count = _plan_vision_counters.get(action_id, 0)
+
+                    # Grab freshest screenshot scoped to the current session's
+                    # subdir to avoid grabbing a PNG from a different session.
+                    _iter_ss_b64 = ""
+                    _iter_ss_dir = _iter_settings.artifacts_dir / "screenshots"
+                    _session_dirs = (
+                        list(_iter_ss_dir.glob(f"*{session_id}*")) if _iter_ss_dir.exists() else []
+                    )
+                    if len(_session_dirs) == 1:
+                        _iter_candidates = sorted(
+                            _session_dirs[0].rglob("*.png"),
+                            key=lambda p: p.stat().st_mtime,
+                            reverse=True,
+                        )
+                        if _iter_candidates:
+                            with contextlib.suppress(OSError):
+                                _iter_ss_b64 = _b64.b64encode(
+                                    _iter_candidates[0].read_bytes()
+                                ).decode()
+                    # else: 0 or >1 session dirs — leave _iter_ss_b64 empty;
+                    # the `if _iter_ss_b64` guard below skips vision safely.
+
+                    # Minimal ev-like object so the counter tracks correctly.
+                    class _EvProxy:
+                        plan_vision_count: int = _pvc_count
+
+                    _ev_proxy = _EvProxy()
+
+                    _iter_verdict = check_plan_via_vision(
+                        plan=plan,
+                        intent=intent,
+                        page_screenshot_b64=_iter_ss_b64,
+                        view=None,
+                        rag_chunks=None,
+                        running_config="",
+                        page_url=webui_path_for_vision,
+                        ev=_ev_proxy,
+                        settings=_iter_settings,
+                    )
+                    _plan_vision_counters[action_id] = _ev_proxy.plan_vision_count
+
+                    if (
+                        _iter_verdict["verdict"] == "REJECT"
+                        and _iter_verdict.get("confidence", 0) >= 0.7
+                    ):
+                        mark_failed(action_id)
+                        close_all_sessions()
+                        log.error(
+                            "webui_configure_plan_rejected_by_vision",
+                            action_id=action_id,
+                            iteration=iteration,
+                            reason=_iter_verdict["reason"],
+                            tier=_iter_verdict.get("tier"),
+                            familiarity_score=_iter_verdict.get("familiarity_score"),
+                        )
+                        _dump_vision_rejection(action_id, _iter_verdict, _iter_settings)
+                        return {
+                            "error": "plan_rejected_by_vision",
+                            "reason": _iter_verdict["reason"],
+                            "tier": _iter_verdict.get("tier"),
+                            "familiarity_score": _iter_verdict.get("familiarity_score"),
+                        }
+                    if _iter_verdict["verdict"] == "REVISE" and _iter_verdict.get("suggested_plan"):
+                        log.info(
+                            "webui_configure_plan_revised_by_vision",
+                            action_id=action_id,
+                            iteration=iteration,
+                            original_steps=len(plan),
+                            suggested_steps=len(_iter_verdict["suggested_plan"]),
+                        )
+                        plan = _iter_verdict["suggested_plan"]
+                        # Falls through to existing _plan_hash stuck-detection below.
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "plan_vision_check_iter_failed",
+                    action_id=action_id,
+                    iteration=iteration,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
 
         for idx, step in enumerate(plan):
             intent_dict = {
@@ -1366,6 +1568,26 @@ def _webui_configure(**kwargs: Any) -> dict:
                     batch_clean=True,
                     verify_present=True,
                 )
+                # 14f-adaptive: bump succeed_count for this plan shape.
+                try:
+                    from backend.core.settings import get_settings as _gset_rs  # noqa: PLC0415
+                    from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                        record_plan_success,
+                    )
+
+                    record_plan_success(
+                        page_url=webui_path_for_vision,
+                        intent=intent,
+                        plan=plan,
+                        settings=_gset_rs(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "plan_validation_cache_write_failed",
+                        action_id=action_id,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
                 return {
                     "ok": True,
                     "action_id": action_id,

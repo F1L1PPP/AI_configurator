@@ -44,6 +44,7 @@ class EvidenceCollector:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._n = 0
         self.vision_call_count: int = 0
+        self.plan_vision_count: int = 0  # separate from vision_call_count (14b)
         log.info(
             "evidence_session_started",
             flow=flow_name,

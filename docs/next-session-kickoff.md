@@ -253,6 +253,51 @@ DHCP form `act_20260521_5ccca4` retry:
 - ✅ Describe-retry kicks in on slow DHCP page (no describe_failed).
 - ⚠️ Inner WebUI planner mis-fills fields: Network empty, Starting IP shows the subnet mask `255.255.255.0` instead of an IPv4 address. **Same class as OSPF screen-routing bug — chunk 14b territory.**
 
+### Chunk 14f-adaptive — Vision pre-check on planner output (LANDED, awaiting live smoke)
+
+Shipped 2026-05-23 after triage of `act_20260523_484286` (DHCP smoke failure). 14b never fired in that smoke because `first_match` returned wrong-but-non-None EIDs — vision_fallback only catches `unknown_eid`. The real bug was upstream: inner Haiku `configure_planner` produced a wrong plan (skipped Network field; iter 3 re-draft put subnet mask value `255.255.255.0` into Starting IP).
+
+14f-adaptive inserts a vision pre-check on the drafted plan BEFORE any step dispatches, at TWO sites:
+- **Proposal-time** in `_propose_webui_configure` — operator sees REJECT in chat BEFORE approving.
+- **Per-iter** in `_webui_configure` while-loop — catches re-drafts (the actual DHCP failure mode).
+
+**Adaptive intensity** scales by historical familiarity for the (page, intent) pair:
+- Tier 0 (familiarity ≥0.85): skip vision entirely.
+- Tier 1 (0.55–0.85): plan-level PROCEED/REJECT.
+- Tier 2 (0.25–0.55): step-by-step validation.
+- Tier 3 (<0.25): adversarial "find what could go wrong" with RAG + running-config context.
+
+Familiarity formula: `0.40·cache_hit + 0.25·success_ratio + 0.20·snapshot_count + 0.15·plan_validation`. Per-action budget cap 5 successful API returns (separate from 14b's 5/session). Default-PROCEED on all failure paths (API error, malformed JSON, low-confidence REJECT, session cap, kill switch).
+
+| File | State | Size |
+|---|---|---|
+| `backend/orchestration/plan_vision_check.py` | NEW | 675 lines |
+| `tests/unit/test_plan_vision_check.py` | NEW | 19 tests (18 spec + 1 model-pin guard) |
+| `backend/orchestration/tool_registry.py` | Modified | +210 lines (3 sites: proposal, per-iter, success-cache hook) |
+| `backend/core/settings.py` | Modified | +5 lines (`plan_validation_cache_path` + `plan_vision_enabled` kill switch) |
+| `backend/webui_agent/evidence.py` | Modified | +1 line (`plan_vision_count`) |
+
+**Tests:** 19/19 on `test_plan_vision_check.py`, 655/655 full unit suite. Ruff clean.
+
+**Opus 4.7 deep audit:** CONDITIONAL PASS → 2 fixes shipped before commit:
+- **#1 CRITICAL fixed**: proposal-time REJECT path now mirrors per-iter (logs, dumps rejection, closes sessions, returns `plan_rejected_by_vision` error).
+- **#4 HIGH fixed**: screenshot search scoped to current `session_id` subdir (was rglob across all of `artifacts/screenshots/`, could grab cross-session PNGs).
+
+**Live-smoke targets:** Re-run DHCP intent (`act_20260523_484286` shape) + OSPF intent on C1111-4P. Expected: Tier 3 fires (zero familiarity), vision REJECTs the no-Network plan OR REVISEs with correct plan. After both succeed, `artifacts/plan_validation_cache.json` populated with `succeed_count: 1` entries. Third successful run promotes to Tier 0 (free).
+
+If green → propose `v0.5.9-plan-vision-pre-check` tag (Filip's call).
+
+### Chunk 14g — vision-check polish (6 audit follow-up items)
+
+Tracked from the 14f-adaptive deep audit. None blocks live smoke; bundle when convenient.
+
+1. **URL fragment dropped by `_hash_page_url`** (`vision_fallback.py:54-61`). Every AngularJS SPA route (`#/dhcp`, `#/ospf`) collapses to the same `page_k`. Both 14b's selector_cache AND 14f's plan_validation_cache have dead `page` dimension. Fix: include `parsed.fragment` in the normalized form. Add unit test asserting `_hash_page_url('/webui/#/dhcp') != _hash_page_url('/webui/#/ospf')`.
+2. **snapshot_signal gaming hole** (`plan_vision_check.py:193-210` + `write_tools.py:408, 497, 586, 676`). `_snapshot_signal` counts ALL `device-snapshots/<id>/post/` dirs, but `take_snapshot(action_id, "post")` also fires on `WriteRejectedError`. 5 failed actions → +0.20 familiarity bump. Restrict to EXECUTED-only OR write a success-only sentinel file.
+3. **`_plan_vision_counters` memory leak** (`tool_registry.py:69, 1418`). Module-level dict grows unboundedly with action_ids. Add `_plan_vision_counters.pop(action_id, None)` in a `try/finally` wrapping the while-True loop.
+4. **No per-window cap at proposal time** (`tool_registry.py:1210-1220`). Re-propose loop could burn Anthropic budget unmetered. Add `collections.deque[float]` of timestamps with N-per-5-min cap.
+5. **`_extract_first_json_object_local` is verbatim copy** (`plan_vision_check.py:390-416` vs `configure_planner.py:201-227`). Promote to shared `backend/orchestration/_json_extract.py`.
+6. **Atomic cache cross-session race** — carried over from 14b (already tracked). Same `.tmp+replace` pattern; consolidate fix across 14b's `selector_cache` and 14f's `plan_validation_cache`.
+
 ### Chunk 14b — Vision fallback (LANDED, awaiting live smoke)
 
 Triaged 2026-05-22 morning. Decision: review-and-commit (architecture sound, anti-pattern checklist clean, deviations from 2026-05-19 sketch are scope reductions not mistakes). Cleanup pass added the per-session cost cap, ruff/import fixes, and the integration-site `log.warning`. Opus 4.7 deep audit returned **PASS** — all findings MEDIUM/LOW, none gate live smoke.
@@ -319,7 +364,8 @@ Two slash-command reviews (`/review` + `/security-review`) ran against `v0.5.5` 
 | # | Chunk | Phase | Est | Pri |
 |---|---|---|---|---|
 | 14c | Vision-fallback polish (5 audit follow-ups + offline corpus bootstrap) — see audit ship list above | G | ~2-3 h | MED |
-| 15 | Hardware retests — ISIS + OSPF WebUI on live router (unblocked by 14b) | F | ~30 min | MED |
+| 14g | Vision pre-check polish (6 audit follow-ups: URL fragment, snapshot gaming, counter leak, proposal-cap, shared json-extract, atomic cache) | G | ~2 h | MED |
+| 15 | Hardware retests — ISIS + OSPF WebUI on live router (unblocked by 14b + 14f) | F | ~30 min | MED |
 | 17 | Cosmetic prototype-label sweep | F | ~10 min | LOW |
 | 18 | Cut clean `v0.4.0-alpha.1` consolidation tag | F | ~15 min | — |
 | — | #8 SecretStr migration (deferred from review pass) | — | ~1 h | MED |
