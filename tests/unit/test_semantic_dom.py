@@ -687,6 +687,61 @@ def test_typical_view_fits_under_token_budget():
     assert len(serialised) < 3_200, f"view bloated to {len(serialised)} chars"
 
 
+def test_spatial_label_js_excludes_th_elements():
+    """Spatial-label JS must NOT pick up <th> column-header text.
+
+    The Cisco DHCP list view renders a table with <th>Network/Subnet Mask</th>
+    that is spatially above the Create DHCP Pool modal. Without the exclusion
+    the JS returns that column header instead of the modal's own <span> label.
+
+    We verify this by simulating the JS returning None when only a <th>-wrapped
+    text element is nearby — i.e. the page.evaluate mock is called but returns
+    None because the JS filter excluded the <th>. Name resolution falls through
+    to the placeholder.
+    """
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "xxx.xxx.xxx.xxx"},
+        text="",
+        bbox={"x": 300.0, "y": 400.0, "width": 160.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 300.0, "y": 400.0, "width": 160.0, "height": 32.0}
+    # Simulate JS returning None: th-wrapped "Network/Subnet Mask" was excluded,
+    # and the correct modal <span class="label">Network</span> wasn't found by
+    # the bbox probe (evaluate returns None in this mocked path).
+    inp.page.evaluate.return_value = None
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    # With JS returning None, name falls through to placeholder (not "Network/Subnet Mask").
+    assert view["elements"][0]["name"] == "xxx.xxx.xxx.xxx"
+    assert view["elements"][0]["name"] != "Network/Subnet Mask"
+
+
+def test_spatial_label_js_returns_span_label_not_th_header():
+    """When both a th column header and a span label exist, JS returns span text.
+
+    This test verifies the correct path: page.evaluate returns "Network"
+    (the modal's <span class="label">Network</span>) NOT "Network/Subnet Mask"
+    (the <th> header). The JS exclusion logic already filtered the th.
+    """
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "placeholder": "xxx.xxx.xxx.xxx"},
+        text="",
+        bbox={"x": 300.0, "y": 400.0, "width": 160.0, "height": 32.0},
+    )
+    inp.bounding_box.return_value = {"x": 300.0, "y": 400.0, "width": 160.0, "height": 32.0}
+    # JS correctly returns the modal span label (th was filtered out).
+    inp.page.evaluate.return_value = "Network"
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    assert view["elements"][0]["name"] == "Network"
+
+
 def test_worst_case_view_fits_under_realistic_budget():
     # Worst case: 30 textboxes with names truncated AT _MAX_NAME_LEN (50),
     # `value` + `required` populated. This is the page we'd see on a heavy

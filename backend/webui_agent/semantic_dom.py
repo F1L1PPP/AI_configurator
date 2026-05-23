@@ -344,10 +344,17 @@ def _spatial_label(loc: Locator) -> str:
       for (const el of cs) {
         // Skip containers that wrap form elements (they own layout, not labels).
         if (el.querySelector('input, textarea, select, button')) continue;
-        // Skip ancestors of a <table> — column headers in <th> elements are
-        // NOT form labels even when spatially close to a form below. This
-        // catches the Cisco column-header-as-label false match.
-        if (el.closest('thead, table th, table thead')) continue;
+        // Skip table header elements and anything whose ancestor chain contains
+        // <th> or <thead>. This catches both:
+        //   (a) <th> elements themselves (el.tagName check), and
+        //   (b) inline elements such as <a> or <span> nested inside a <th>
+        //       (el.closest check).
+        // The Cisco DHCP list view renders "Network/Subnet Mask" as a <th>
+        // column header spatially above the Create DHCP Pool modal. Without
+        // this guard the spatial-label search picks it up instead of the
+        // <span class="label">Network</span> in the modal.
+        if (el.tagName === 'TH' || el.tagName === 'THEAD') continue;
+        if (el.closest('th, thead')) continue;
         const text = (el.innerText || el.textContent || '').trim();
         if (!text || text.length > 60) continue;
         const r = el.getBoundingClientRect();

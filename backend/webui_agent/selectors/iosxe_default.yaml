@@ -147,6 +147,58 @@ vlan_form:
     - { role: "button", name: "Back" }
 
 # -----------------------------------------------------------------
+# Configuration → Services → DHCP (Create DHCP Pool modal)
+#
+# Verified against IOS XE 17.6.3a DOM (artifact 99-act-error-e_013.html).
+# The Create DHCP Pool modal is a Kendo UI window rendered on top of the
+# DHCP pool list table. Key structural facts:
+#   - Modal title: <span class="k-window-title">Create DHCP Pool</span>
+#   - Pool Name field: input[name='dhcpScopeName'] (no id, no aria-label)
+#   - Subnet Mask: Kendo dropdown — <select name='subnetmaskOptions'> (hidden)
+#     backed by a visible <span role='listbox'>; CSS targets the hidden select.
+#   - VRF is a checkbox toggle (showDHCPVrfOptions); the VRF name textbox only
+#     appears when the checkbox is checked (ng-if conditional).
+#   - Apply button: <button class="primaryActionButton"> inside windowButtonContainer.
+# -----------------------------------------------------------------
+dhcp_form:
+  pool_name:
+    - { css: "input[name='dhcpScopeName']" }
+    - { css: "input[ng-model='dhcpScope.dhcpScopeName']" }
+    - { label: "DHCP Pool Name" }
+    - { role: "textbox", name: "DHCP Pool Name" }
+  network_ip:
+    - { css: "input[name='networkIp']" }
+    - { css: "input[ng-model='dhcpScope.networkIp']" }
+    - { label: "Network" }
+    - { role: "textbox", name: "Network" }
+  subnet_mask:
+    # Kendo dropdown: the visible widget is a <span role='listbox'>, but fill
+    # targets the backing hidden <select> directly. Use CSS on the hidden select.
+    - { css: "select[name='subnetmaskOptions']" }
+    - { css: "select[id='subnetmaskOptions']" }
+    - { label: "Subnet Mask" }
+  starting_ip:
+    - { css: "input[name='startingIp']" }
+    - { css: "input[ng-model='dhcpScope.startingIp']" }
+    - { label: "Starting" }
+    - { role: "textbox", name: "Starting ip" }
+  ending_ip:
+    - { css: "input[name='endingIp']" }
+    - { css: "input[ng-model='dhcpScope.endingIp']" }
+    - { label: "Ending" }
+    - { role: "textbox", name: "Ending ip" }
+  vrf_checkbox:
+    # VRF is a checkbox that toggles the VRF name textbox visibility.
+    - { css: "input[name='showDHCPVrfOptions']" }
+    - { css: "input[id='showDHCPVrfOptions']" }
+    - { css: "input[ng-model='dhcpScope.vrfSelect']" }
+  apply_button:
+    - { css: "button.primaryActionButton:has-text('Apply to Device')" }
+    - { role: "button", name: "Apply to Device" }
+    - { css: "button:has-text('Apply to Device')" }
+    - { text: "Apply to Device" }
+
+# -----------------------------------------------------------------
 # Hostname change form — Administration → Device → General
 #
 # Captured from real C1111 with IOS XE 17.6.3a by manual inspection

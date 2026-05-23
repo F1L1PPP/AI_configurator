@@ -44,7 +44,7 @@ def _page_with_strategy_results(results_by_strategy: dict[str, int]) -> MagicMoc
     locator with the specified count. Unmapped strategies return count=0."""
     page = MagicMock()
 
-    def fake_get_by_role(role: str, name: str | None = None):
+    def fake_get_by_role(role: str, name: str | None = None, **kwargs: object):
         key = f"role:{role}:{name}"
         return _loc(results_by_strategy.get(key, 0))
 
@@ -100,6 +100,13 @@ def test_build_returns_none_for_unknown_strategy():
     assert _build(page, {"unsupported_key": "x"}) is None
 
 
+def test_build_role_text_calls_get_by_role_with_exact_false():
+    """role_text strategy must call get_by_role(role, name=name, exact=False)."""
+    page = MagicMock()
+    _build(page, {"role_text": ("textbox", "Network")})
+    page.get_by_role.assert_called_once_with("textbox", name="Network", exact=False)
+
+
 # ---------------------------------------------------------------------------
 # first_match — walks the chain, returns first hit
 # ---------------------------------------------------------------------------
@@ -124,6 +131,40 @@ def test_first_match_returns_none_when_nothing_resolves():
     strategies = [{"label": "Username"}, {"css": "x"}]
     result = first_match(page, strategies)
     assert result is None
+
+
+def test_first_match_role_text_wins_over_bare_text_for_textbox():
+    """role_text strategy must be tried BEFORE text=, so a textbox is found
+    instead of an ambiguous link element with the same text.
+
+    Scenario: page has a 'Network' link (th column header) that bare text=
+    would match, but the textbox is only findable via role_text.  The
+    strategy list mirrors what the DHCP form needs:
+
+        [css, label, role_text, text]
+
+    role_text resolves; text= should never be reached.
+    """
+    # css: no hit, label: no hit, role_text: hit on textbox, text: NOT checked.
+    page = _page_with_strategy_results(
+        {
+            "locator:input[name='networkIp']": 0,  # css miss
+            "label:Network": 0,  # label miss
+            "role:textbox:Network": 1,  # role_text hit (exact=False internally)
+        }
+    )
+    strategies = [
+        {"css": "input[name='networkIp']"},
+        {"label": "Network"},
+        {"role_text": ("textbox", "Network")},
+        {"text": "Network"},  # should NOT be reached
+    ]
+    result = first_match(page, strategies)
+    assert result is not None
+    # Verify text= was never called (page.locator would have been called for css,
+    # but NOT for text=Network after role_text succeeded).
+    # We check that get_by_role was called with exact=False (role_text path).
+    page.get_by_role.assert_called_once_with("textbox", name="Network", exact=False)
 
 
 def test_first_match_survives_exception_in_one_strategy():

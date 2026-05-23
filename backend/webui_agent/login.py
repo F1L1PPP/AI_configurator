@@ -81,7 +81,17 @@ def first_match(page: Page, strategies: list[dict[str, Any]]) -> Locator | None:
 
 
 def _build(page: Page, strat: dict[str, Any]) -> Locator | None:
-    """Convert one strategy dict into a Playwright Locator (no .count() yet)."""
+    """Convert one strategy dict into a Playwright Locator (no .count() yet).
+
+    Strategy keys:
+      role (+name) — page.get_by_role(role, name=name)
+      label        — page.get_by_label(label, exact=False)
+      role_text    — (role, name) tuple; page.get_by_role(role, name=name, exact=False)
+                     Used as a role-constrained text match BEFORE bare text= fallback
+                     to avoid matching same-text LINKS when looking for a textbox.
+      text         — page.locator("text=…") last-resort generic text match
+      css          — page.locator(selector)
+    """
     if "role" in strat:
         name = strat.get("name")
         return (
@@ -89,6 +99,9 @@ def _build(page: Page, strat: dict[str, Any]) -> Locator | None:
         )
     if "label" in strat:
         return page.get_by_label(strat["label"], exact=False)
+    if "role_text" in strat:
+        role, name = strat["role_text"]
+        return page.get_by_role(role, name=name, exact=False)
     if "text" in strat:
         return page.locator(f"text={strat['text']}")
     if "css" in strat:
