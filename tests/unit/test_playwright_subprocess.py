@@ -873,8 +873,13 @@ def _fresh_view_and_map() -> tuple[dict, dict]:
     return view, {}
 
 
-def test_act_by_intent_vision_first_used_when_vision_returns_selector(tmp_path):
-    """vision returns a selector → _do_act runs with synthetic_eid; first_match NOT called."""
+def test_act_by_intent_vision_fallback_used_when_eid_lookup_returns_none(tmp_path):
+    """14h-F order: eid lookup finds nothing (describe has no match) → vision fires.
+
+    When describe_page returns an empty view (no elements matching the intent),
+    _eid_for_intent returns None and vision fallback is reached. first_match
+    must NOT be called if vision provides a selector.
+    """
     from backend.webui_agent._playwright_subprocess import _do_act_by_intent
 
     selector = "input[aria-label='Network']"
@@ -885,6 +890,7 @@ def test_act_by_intent_vision_first_used_when_vision_returns_selector(tmp_path):
     ev.vision_call_count = 0
 
     settings_mock = _make_settings_mock(tmp_path)
+    # Empty view: _eid_for_intent will return None, triggering vision fallback.
     fresh_view, fresh_map = _fresh_view_and_map()
 
     # _do_act needs the synthetic eid in the locator_map to succeed.
@@ -912,7 +918,7 @@ def test_act_by_intent_vision_first_used_when_vision_returns_selector(tmp_path):
             ev=ev,
         )
 
-    # first_match must NOT have been called — vision was the primary path.
+    # first_match must NOT have been called — vision resolved before it.
     mock_first_match.assert_not_called()
     # _do_act was called and synthetic_eid starts with "vision_".
     assert len(do_act_calls) == 1
@@ -983,7 +989,11 @@ def test_act_by_intent_vision_path_enforces_sensitive_deny_list(tmp_path):
 
 
 def test_act_by_intent_falls_through_to_heuristics_when_vision_returns_none(tmp_path):
-    """vision returns None → eid + first_match fallback path is reached."""
+    """14h-F order: eid lookup None → vision None → first_match reached.
+
+    With an empty describe view, _eid_for_intent returns None. vision also
+    returns None. The code must fall through to first_match (Step 3).
+    """
     from backend.webui_agent._playwright_subprocess import _do_act_by_intent
 
     page = MagicMock()
@@ -993,10 +1003,18 @@ def test_act_by_intent_falls_through_to_heuristics_when_vision_returns_none(tmp_
     ev.vision_call_count = 0
 
     settings_mock = _make_settings_mock(tmp_path)
+    # Empty view: _eid_for_intent returns None → vision path tried → vision returns None
+    # → first_match reached.
     fresh_view, fresh_map = _fresh_view_and_map()
 
+    resolve_calls: list[int] = []
+
+    def fake_resolve(*args, **kwargs):
+        resolve_calls.append(1)
+        return None
+
     with (
-        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=None),
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", side_effect=fake_resolve),
         patch("backend.webui_agent.login.first_match", return_value=None) as mock_first_match,
         patch(
             "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
@@ -1011,7 +1029,10 @@ def test_act_by_intent_falls_through_to_heuristics_when_vision_returns_none(tmp_
             ev=ev,
         )
 
-    # first_match IS called on the heuristic fallback path.
+    # eid lookup tried first (silent — no call to assert, it's internal).
+    # vision was tried second (returns None).
+    assert len(resolve_calls) == 1, "vision must be called once when eid lookup returns None"
+    # first_match IS called as the final fallback.
     mock_first_match.assert_called_once()
     assert reply["failure_reason"] == "unknown_eid"
 
@@ -1236,3 +1257,72 @@ def test_act_by_intent_no_infinite_retry_loop(tmp_path):
     assert len(resolve_calls) <= 2
     # No further eviction or retry loop — reply is the result of attempt 2.
     assert reply["failure_reason"] == "element_hidden"
+
+
+def test_act_by_intent_uses_eid_first_when_describe_has_match(tmp_path):
+    """14h-F core invariant: eid forward-lookup wins when describe surfaces the element.
+
+    Set up describe view with e_020 role=button name="Add" — the DHCP Add
+    button case from live smoke act_20260523_589a83. Intent asks for
+    {role: button, name: "Add"}. _eid_for_intent resolves to e_020, so
+    chosen_loc is set WITHOUT calling vision or first_match.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+
+    # Describe view contains the Add button — exactly what the DHCP smoke saw.
+    add_loc = MagicMock()
+    add_loc.get_attribute.return_value = ""  # no aria-label (safe: "Add" is not deny-listed)
+    add_loc.text_content.return_value = "Add"
+
+    fresh_view = {
+        "view_id": "dhcp_fresh",
+        "url": "http://router/webui/#/dhcp",
+        "title": "DHCP",
+        "elements": [
+            {"eid": "e_020", "role": "button", "name": "Add", "enabled": True},
+        ],
+        "modals": [],
+        "errors": [],
+    }
+    fresh_map = {"e_020": add_loc}
+
+    do_act_calls: list[dict] = []
+
+    def fake_do_act(page_, locator_map_, view_id_, msg_, ev_):
+        do_act_calls.append({"msg": msg_, "locator_map_keys": list(locator_map_.keys())})
+        return ({"ok": True, "attempts": 0}, locator_map_, view_id_)
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision") as mock_vision,
+        patch("backend.webui_agent.login.first_match") as mock_first_match,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page",
+            return_value=(fresh_view, fresh_map),
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch("backend.webui_agent._playwright_subprocess._do_act", side_effect=fake_do_act),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg={"intent": {"role": "button", "name": "Add", "action": "click", "value": None}},
+            ev=ev,
+        )
+
+    # Core 14h-F invariant: eid path won — vision and first_match NOT called.
+    mock_vision.assert_not_called()
+    mock_first_match.assert_not_called()
+    # _do_act was called with e_020 (eid forward-lookup result).
+    assert len(do_act_calls) == 1
+    assert do_act_calls[0]["msg"]["eid"] == "e_020"
+    assert reply["ok"] is True
+    assert reply["chosen_eid"] == "e_020"

@@ -733,8 +733,7 @@ def _do_act_by_intent(
             view["view_id"],
         )
 
-    # Describe page once upfront — used by both vision-first and the
-    # heuristic fallback path.
+    # Describe page once upfront — used by all resolution paths.
     view, fresh_map = describe_page(page)
     fresh_view_id: str = view["view_id"]
 
@@ -742,12 +741,30 @@ def _do_act_by_intent(
     page_url = page.url
 
     # -----------------------------------------------------------------------
-    # Step 1: VISION-FIRST. resolve_via_vision is internally cache-aware —
-    # cache hit is ~free (~0ms, no Anthropic call); miss calls Anthropic
-    # and caches the result for future turns.
+    # Step 1: EID FORWARD-LOOKUP (cheap, deterministic).
+    # Uses the same naming source the inner LLM saw (Phase 3.4 spatial labels
+    # for inputs without ARIA labels), so role+name collisions resolve
+    # correctly. Works for all elements already surfaced by describe_page
+    # (e.g. the DHCP "Add" button). Returns None for elements describe_page
+    # cannot surface (e.g. the DHCP "Network" textbox with spatial labels).
     # -----------------------------------------------------------------------
-    vision_selector = resolve_via_vision(page, intent, ev, settings)
+    chosen_loc: Any | None = None
+    eid: str | None = _eid_for_intent(view, role, name)
+    if eid is not None:
+        chosen_loc = fresh_map.get(eid)
+        # Belt-and-braces: if the eid is in the view but not the
+        # locator_map (shouldn't happen, but bbox edge cases exist),
+        # clear and fall through to vision / first_match.
+        if chosen_loc is None:
+            eid = None
 
+    # -----------------------------------------------------------------------
+    # Step 2: VISION FALLBACK (fires when eid lookup returned None).
+    # resolve_via_vision is internally cache-aware — cache hit is ~free
+    # (~0ms, no Anthropic call); miss calls Anthropic and caches the result
+    # for future turns. Handles elements that describe_page cannot surface
+    # under the planner's role+name (e.g. Network field with spatial labels).
+    # -----------------------------------------------------------------------
     def _try_act_with_vision(
         selector: str, attempt: int
     ) -> tuple[dict[str, Any], dict[str, Any], str | None] | None:
@@ -761,12 +778,12 @@ def _do_act_by_intent(
             synthetic_eid = f"vision_{hashlib.sha1(selector.encode()).hexdigest()[:8]}"
             fresh_map_with_vision = {**fresh_map, synthetic_eid: vision_loc}
 
-            # 14g security guard: vision path must enforce the same
-            # _SENSITIVE_DENY_LIST as the heuristic path (line ~856). Without
-            # this check, a prompt-injected intent like {role: button,
-            # name: "Reboot"} would resolve via vision and click Reboot,
-            # bypassing the deny-list entirely. Mirror the heuristic probe
-            # against the locator's accessible name.
+            # Security guard: vision path must enforce the same
+            # _SENSITIVE_DENY_LIST as the heuristic path. Without this check,
+            # a prompt-injected intent like {role: button, name: "Reboot"}
+            # would resolve via vision and click Reboot, bypassing the
+            # deny-list entirely. Mirror the heuristic probe against the
+            # locator's accessible name.
             try:
                 accessible_name = (vision_loc.get_attribute("aria-label") or "").strip()
                 if not accessible_name:
@@ -809,65 +826,52 @@ def _do_act_by_intent(
             from backend.core.logging import get_logger  # noqa: PLC0415
 
             get_logger(__name__).warning(
-                "vision_first_act_exception",
+                "vision_act_exception",
                 error=str(exc),
                 error_type=type(exc).__name__,
                 attempt=attempt,
             )
             return None
 
-    if vision_selector is not None:
-        result = _try_act_with_vision(vision_selector, attempt=1)
-        if result is not None:
-            reply, new_map, new_vid = result
-            # Eviction + retry on failure signals indicating a stale or
-            # bad cached selector. unknown_error added in chunk 14h-E after
-            # live smoke act_20260523_48a212: a poisoned cache entry
-            # (button:has-text('Add') from a prior tightening-prompt-pre-fix
-            # session) kept failing with unknown_error, but the narrower
-            # STALENESS set never evicted it — cache stayed poisoned
-            # forever. Including unknown_error is over-eviction by design;
-            # transient failures cost one extra vision call to repopulate.
-            STALENESS = {
-                "element_hidden",
-                "element_disabled",
-                "element_intercepted",
-                "unknown_error",
-            }
-            if reply.get("ok") is False and reply.get("failure_reason") in STALENESS:
-                evicted = evict_from_selector_cache(
-                    settings.selector_cache_path, role, name, page_url
-                )
-                if evicted:
-                    # Retry vision: cache was evicted, so resolve_via_vision
-                    # will go to Anthropic for a fresh selector.
-                    retry_selector = resolve_via_vision(page, intent, ev, settings)
-                    if retry_selector is not None and retry_selector != vision_selector:
-                        retry_result = _try_act_with_vision(retry_selector, attempt=2)
-                        if retry_result is not None:
-                            reply, new_map, new_vid = retry_result
-            return reply, new_map, new_vid
+    if chosen_loc is None:
+        # eid lookup returned None — try vision fallback.
+        vision_selector = resolve_via_vision(page, intent, ev, settings)
+        if vision_selector is not None:
+            result = _try_act_with_vision(vision_selector, attempt=1)
+            if result is not None:
+                reply, new_map, new_vid = result
+                # Eviction + retry on failure signals indicating a stale or
+                # bad cached selector. unknown_error added in chunk 14h-E after
+                # live smoke act_20260523_48a212: a poisoned cache entry
+                # (button:has-text('Add') from a prior tightening-prompt-pre-fix
+                # session) kept failing with unknown_error, but the narrower
+                # STALENESS set never evicted it — cache stayed poisoned
+                # forever. Including unknown_error is over-eviction by design;
+                # transient failures cost one extra vision call to repopulate.
+                STALENESS = {
+                    "element_hidden",
+                    "element_disabled",
+                    "element_intercepted",
+                    "unknown_error",
+                }
+                if reply.get("ok") is False and reply.get("failure_reason") in STALENESS:
+                    evicted = evict_from_selector_cache(
+                        settings.selector_cache_path, role, name, page_url
+                    )
+                    if evicted:
+                        # Retry vision: cache was evicted, so resolve_via_vision
+                        # will go to Anthropic for a fresh selector.
+                        retry_selector = resolve_via_vision(page, intent, ev, settings)
+                        if retry_selector is not None and retry_selector != vision_selector:
+                            retry_result = _try_act_with_vision(retry_selector, attempt=2)
+                            if retry_result is not None:
+                                reply, new_map, new_vid = retry_result
+                return reply, new_map, new_vid
 
     # -----------------------------------------------------------------------
-    # Step 2 (FALLBACK): vision returned None or _try_act_with_vision raised.
-    # Fall through to the existing eid forward-lookup + first_match heuristics.
+    # Step 3: HEURISTIC first_match (last resort — both eid lookup and
+    # vision returned None).
     # -----------------------------------------------------------------------
-
-    # 2a. PRIMARY heuristic: forward-lookup in the fresh describe view. Uses
-    # the SAME naming source the inner LLM saw (Phase 3.4 spatial labels for
-    # inputs without ARIA labels), so role+name collisions resolve correctly.
-    chosen_loc: Any | None = None
-    eid: str | None = _eid_for_intent(view, role, name)
-    if eid is not None:
-        chosen_loc = fresh_map.get(eid)
-        # Belt-and-braces: if the eid is in the view but not the
-        # locator_map (shouldn't happen, but bbox edge cases exist),
-        # clear and fall through to first_match.
-        if chosen_loc is None:
-            eid = None
-
-    # 2b. LEGACY fuzzy walker for cases where describe_page didn't surface
-    # the element under the requested role+name.
     if chosen_loc is None:
         strategies: list[dict[str, Any]] = [
             {"role": role, "name": name},
@@ -888,9 +892,13 @@ def _do_act_by_intent(
                 fresh_view_id,
             )
 
-    # 2c. Sensitive-text deny-list: refuse to act on locators whose accessible
-    # name matches dangerous operations. Defends against prompt-injected intents
-    # that would resolve to "Factory Reset" / "Reboot" / etc.
+    # -----------------------------------------------------------------------
+    # Sensitive-text deny-list: refuse to act on locators whose accessible
+    # name matches dangerous operations. Defends against prompt-injected
+    # intents that would resolve to "Factory Reset" / "Reboot" / etc.
+    # Applies to ALL resolution paths: eid-resolved AND first_match-resolved.
+    # (Vision-resolved locators are checked inside _try_act_with_vision above.)
+    # -----------------------------------------------------------------------
     try:
         accessible_name = (chosen_loc.get_attribute("aria-label") or "").strip()
         if not accessible_name:
@@ -914,7 +922,7 @@ def _do_act_by_intent(
             fresh_view_id,
         )
 
-    # 2d. Reverse-lookup the chosen locator's eid (only needed for the
+    # Reverse-lookup the chosen locator's eid (only needed for the
     # first_match fallback path — the forward path already set eid).
     if eid is None:
         eid = _reverse_lookup_eid(chosen_loc, fresh_map)
@@ -931,7 +939,7 @@ def _do_act_by_intent(
             fresh_view_id,
         )
 
-    # 2e. Dispatch into the same _do_act machinery (self-heal, never-retry-click).
+    # Dispatch into the same _do_act machinery (self-heal, never-retry-click).
     synthetic_msg = {
         "view_id": fresh_view_id,
         "eid": eid,
