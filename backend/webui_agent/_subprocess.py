@@ -23,7 +23,10 @@ import subprocess
 import sys
 import threading
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 from backend.core.logging import get_logger
 
@@ -35,6 +38,67 @@ log = get_logger(__name__)
 # generic subprocess error). If a flow legitimately needs longer, bump
 # both this and the frontend cap together.
 DEFAULT_SUBPROCESS_TIMEOUT_S = 120.0
+
+
+# ---------------------------------------------------------------------------
+# Subprocess stderr forwarding — NDJSON → parent structlog
+# ---------------------------------------------------------------------------
+
+
+def _forward_subprocess_stderr_lines(raw_lines: Iterable[str]) -> None:
+    """Parse NDJSON lines from subprocess stderr and re-emit into parent logger.
+
+    Each line is expected to be a structlog NDJSON record. Non-JSON lines
+    (tracebacks, print statements, Playwright debug noise) are emitted as
+    ``subprocess_stderr_raw`` warnings so they remain visible but clearly
+    flagged as unstructured.
+
+    All re-emitted events carry ``subprocess=True`` to distinguish them from
+    parent-native log entries.
+    """
+    for line in raw_lines:
+        stripped = line.rstrip("\n\r")
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            log.warning("subprocess_stderr_raw", raw=stripped, subprocess=True)
+            continue
+
+        event = str(record.pop("event", "subprocess_event"))
+        level = str(record.pop("level", "info")).lower()
+        # Remove timestamp / logger fields that structlog adds automatically.
+        record.pop("timestamp", None)
+        record.pop("logger", None)
+        emit = getattr(log, level, log.info)
+        emit(event, subprocess=True, **record)
+
+
+def _start_stderr_forwarder(proc: subprocess.Popen[str]) -> threading.Thread:
+    """Spawn a daemon thread that forwards proc.stderr NDJSON to parent logger.
+
+    Daemon=True means the thread dies when the parent process dies — no
+    zombie threads. The returned thread is stored on the session so its
+    lifetime is clearly owned.
+    """
+
+    def _reader() -> None:
+        try:
+            assert proc.stderr is not None
+            for line in iter(proc.stderr.readline, ""):
+                _forward_subprocess_stderr_lines([line])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "subprocess_stderr_forwarder_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                subprocess=True,
+            )
+
+    t = threading.Thread(target=_reader, daemon=True, name="webui-subprocess-stderr")
+    t.start()
+    return t
 
 
 class SubprocessFlowError(RuntimeError):
@@ -97,6 +161,12 @@ def run_flow_in_subprocess(
         timeout=timeout_s,
         check=False,
     )
+
+    # Forward any NDJSON events the child emitted to stderr into the parent
+    # logger BEFORE processing stdout, so vision_fallback_* / plan_* events
+    # are visible even when the flow succeeds.
+    if proc.stderr:
+        _forward_subprocess_stderr_lines(proc.stderr.splitlines())
 
     if not proc.stdout.strip():
         # No JSON on stdout = catastrophic child failure (import error,
@@ -176,22 +246,23 @@ class WebUISession:
         self.action_id = action_id
         self._proc: subprocess.Popen[str] | None = None
         self.evidence_dir: str | None = None
+        self._stderr_forwarder: threading.Thread | None = None
         self._start(headless)
 
     def _start(self, headless: bool | None) -> None:
         log.info("webui_session_starting", action_id=self.action_id, headless=headless)
-        # bufsize=1 = line-buffered. stderr=DEVNULL because the child writes
-        # structured logs to logs/actions.log via structlog; stderr is only
-        # used for raw tracebacks on hard failure, which we'd discover via
-        # the stdout reply payload anyway.
+        # bufsize=1 = line-buffered. stderr=PIPE so we can forward NDJSON
+        # events (vision_fallback_*, plan_*, etc.) from the child into the
+        # parent's logger via _start_stderr_forwarder.
         self._proc = subprocess.Popen(  # noqa: S603
             [sys.executable, "-m", "backend.webui_agent._playwright_subprocess"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
+        self._stderr_forwarder = _start_stderr_forwarder(self._proc)
         # Send the init handshake.
         self._write_line(
             {

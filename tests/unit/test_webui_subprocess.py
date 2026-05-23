@@ -1,8 +1,10 @@
-"""Unit tests for WebUISession (parent-side handle for the Phase 4 session subprocess).
+"""Unit tests for WebUISession and subprocess stderr forwarding helpers.
 
 Patches `subprocess.Popen` so no real Chromium / Playwright runs. The
 session's protocol — init handshake, send/recv JSON lines, clean close
 — is exercised against a MagicMock subprocess.
+
+Also unit-tests `_forward_subprocess_stderr_lines` in isolation.
 """
 
 from __future__ import annotations
@@ -12,7 +14,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from backend.webui_agent._subprocess import SubprocessFlowError, WebUISession
+from backend.webui_agent._subprocess import (
+    SubprocessFlowError,
+    WebUISession,
+    _forward_subprocess_stderr_lines,
+)
 
 pytestmark = pytest.mark.webui
 
@@ -172,3 +178,56 @@ def test_invalid_json_reply_raises():
             sess.send({"op": "describe"})
 
         assert excinfo.value.exc_type == "JSONDecodeError"
+
+
+# ---------------------------------------------------------------------------
+# Tests for _forward_subprocess_stderr_lines
+# ---------------------------------------------------------------------------
+
+
+def test_forward_subprocess_stderr_lines_emits_json_event_at_correct_level():
+    """NDJSON lines are re-emitted via the parent logger at the correct level,
+    and all events include subprocess=True."""
+    ndjson_line = json.dumps(
+        {
+            "event": "vision_fallback_resolved",
+            "level": "warning",
+            "eid": "GigabitEthernet0/0",
+            "strategy": "haiku_vision",
+        }
+    )
+
+    with patch("backend.webui_agent._subprocess.log") as mock_log:
+        _forward_subprocess_stderr_lines([ndjson_line])
+
+    mock_log.warning.assert_called_once_with(
+        "vision_fallback_resolved",
+        subprocess=True,
+        eid="GigabitEthernet0/0",
+        strategy="haiku_vision",
+    )
+
+
+def test_forward_subprocess_stderr_lines_falls_back_on_non_json():
+    """Non-JSON lines (tracebacks, prints) are emitted as subprocess_stderr_raw warnings."""
+    traceback_line = "Traceback (most recent call last):"
+
+    with patch("backend.webui_agent._subprocess.log") as mock_log:
+        _forward_subprocess_stderr_lines([traceback_line])
+
+    mock_log.warning.assert_called_once_with(
+        "subprocess_stderr_raw",
+        raw=traceback_line,
+        subprocess=True,
+    )
+
+
+def test_forward_subprocess_stderr_lines_skips_empty_lines():
+    """Empty strings and bare newlines produce no log calls."""
+    with patch("backend.webui_agent._subprocess.log") as mock_log:
+        _forward_subprocess_stderr_lines(["", "\n"])
+
+    mock_log.info.assert_not_called()
+    mock_log.warning.assert_not_called()
+    mock_log.error.assert_not_called()
+    mock_log.debug.assert_not_called()
