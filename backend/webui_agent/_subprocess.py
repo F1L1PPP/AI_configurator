@@ -71,6 +71,10 @@ def _forward_subprocess_stderr_lines(raw_lines: Iterable[str]) -> None:
         # Remove timestamp / logger fields that structlog adds automatically.
         record.pop("timestamp", None)
         record.pop("logger", None)
+        # Pop "subprocess" to avoid TypeError: got multiple values for kwarg
+        # if the child happened to emit log.info("...", subprocess="...").
+        # The parent-set subprocess=True kwarg below is authoritative.
+        record.pop("subprocess", None)
         emit = getattr(log, level, log.info)
         emit(event, subprocess=True, **record)
 

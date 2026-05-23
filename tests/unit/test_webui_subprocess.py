@@ -231,3 +231,32 @@ def test_forward_subprocess_stderr_lines_skips_empty_lines():
     mock_log.warning.assert_not_called()
     mock_log.error.assert_not_called()
     mock_log.debug.assert_not_called()
+
+
+def test_forward_subprocess_stderr_lines_handles_subprocess_kwarg_collision():
+    """Audit regression: if child emits a field literally named 'subprocess',
+    the parent's subprocess=True kwarg must not collide and raise TypeError.
+
+    Without record.pop('subprocess', None), real subprocess code that does
+    log.info('event', subprocess='child_val') would crash the forwarder via
+    'got multiple values for keyword argument'.
+    """
+    line = json.dumps(
+        {
+            "event": "vision_resolved",
+            "level": "info",
+            "subprocess": "child_says_so",
+            "selector": "input[name='networkIp']",
+        }
+    )
+
+    with patch("backend.webui_agent._subprocess.log") as mock_log:
+        # Must NOT raise TypeError.
+        _forward_subprocess_stderr_lines([line])
+
+    # Parent-set subprocess=True wins; child's value dropped.
+    mock_log.info.assert_called_once_with(
+        "vision_resolved",
+        subprocess=True,
+        selector="input[name='networkIp']",
+    )
