@@ -460,3 +460,112 @@ def test_anthropic_client_receives_api_key_kwarg(tmp_path: Path) -> None:
             f"See live smoke act_20260523_718d70 for the regression."
         )
         assert call.kwargs["api_key"] == "sk-ant-test-fixture"
+
+
+# ---------------------------------------------------------------------------
+# Regression: empty / prose-around-JSON responses must not crash
+# ---------------------------------------------------------------------------
+# Live smoke act_20260523_6dc28c (visible for the first time after 14h-C
+# subprocess log forwarding) showed every vision_fallback call returning
+# JSONDecodeError "Expecting value: line 1 column 1 (char 0)" — Haiku's
+# response.content[0].text was empty/prose. Without recovery, every
+# selector resolution silently fails → falls through to heuristics →
+# picks wrong element (the e_013 link bug we've chased all day).
+# Mirror of plan_vision_check fix from commit 27a0421.
+
+
+def test_resolve_via_vision_empty_response_returns_none_gracefully(tmp_path: Path) -> None:
+    """Empty content[0].text → ValueError raised internally → caught by outer
+    except → resolve_via_vision returns None (no crash, no JSONDecodeError leak).
+    This is the live-smoke act_20260523_6dc28c shape."""
+    settings = _make_settings(tmp_path)
+    settings.anthropic_api_key = "sk-ant-test"
+    page = _make_page()
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "20.20.20.0"}
+
+    mock_cls = _make_mock_anthropic("")  # empty content
+
+    with (
+        patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        result = resolve_via_vision(page, intent, ev, settings)
+
+    assert result is None
+    # Cap should NOT have been bumped — the call raised before increment.
+    assert ev.vision_call_count == 0
+
+
+def test_resolve_via_vision_prose_around_json_is_recovered(tmp_path: Path) -> None:
+    """Haiku returns prose + valid JSON object → brace extraction recovers it."""
+    settings = _make_settings(tmp_path)
+    settings.anthropic_api_key = "sk-ant-test"
+    page = _make_page()
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "20.20.20.0"}
+
+    prose_response = (
+        "Looking at the screenshot, the Network input field has name='networkIp'. "
+        '{"selector": "input[name=\\"networkIp\\"]", "confidence": 0.92, '
+        '"reasoning": "matched by HTML name attribute"}'
+    )
+    mock_cls = _make_mock_anthropic(prose_response)
+
+    with (
+        patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        result = resolve_via_vision(page, intent, ev, settings)
+
+    assert result == 'input[name="networkIp"]'
+    # Cache populated with the recovered selector.
+    saved = load_selector_cache(settings.selector_cache_path)
+    key = _cache_key("textbox", "Network", page.url)
+    assert saved.get(key) == 'input[name="networkIp"]'
+
+
+def test_resolve_via_vision_prose_only_no_json_returns_none(tmp_path: Path) -> None:
+    """Haiku returns prose with NO JSON object → outer except catches → None."""
+    settings = _make_settings(tmp_path)
+    settings.anthropic_api_key = "sk-ant-test"
+    page = _make_page()
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "x"}
+
+    mock_cls = _make_mock_anthropic("I cannot identify the element with confidence.")
+
+    with (
+        patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        result = resolve_via_vision(page, intent, ev, settings)
+
+    assert result is None
+
+
+def test_extract_first_json_object_handles_nested_braces() -> None:
+    """Brace counter must correctly handle nested {} inside the JSON value."""
+    from backend.webui_agent.vision_fallback import _extract_first_json_object
+
+    text = 'prose {"a": {"nested": "x"}, "b": [1,2]} trailing'
+    assert _extract_first_json_object(text) == '{"a": {"nested": "x"}, "b": [1,2]}'
+
+
+def test_extract_first_json_object_ignores_braces_in_strings() -> None:
+    """Braces inside double-quoted strings must not affect depth counting."""
+    from backend.webui_agent.vision_fallback import _extract_first_json_object
+
+    text = '{"selector": "div[data-foo=\\"{not-a-brace}\\"]", "confidence": 0.9}'
+    extracted = _extract_first_json_object(text)
+    assert extracted == text
+    parsed = json.loads(extracted)
+    assert parsed["confidence"] == 0.9
+
+
+def test_extract_first_json_object_returns_none_when_no_object() -> None:
+    from backend.webui_agent.vision_fallback import _extract_first_json_object
+
+    assert _extract_first_json_object("just prose with no braces") is None
+    assert _extract_first_json_object("") is None
+    assert _extract_first_json_object("{ unterminated") is None

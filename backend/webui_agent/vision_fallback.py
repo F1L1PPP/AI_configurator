@@ -177,6 +177,44 @@ def _latest_post_running_config(snapshots_dir: Path) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# JSON-from-prose recovery (mirrors plan_vision_check._extract_first_json_object_local)
+# ---------------------------------------------------------------------------
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    """Brace-balanced JSON extraction from raw text. Returns the substring of
+    the first complete top-level {...} object, or None if no balanced object
+    is found. Used to recover JSON from Haiku responses that wrap the JSON
+    in prose ("Looking at the screenshot, I see... {valid JSON}").
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    start = -1
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                return text[start : i + 1]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Anthropic vision call
 # ---------------------------------------------------------------------------
 
@@ -244,7 +282,24 @@ def _call_haiku_vision(
     # First content block is always a TextBlock in our prompts (no tools).
     first_block = response.content[0]
     raw_text = first_block.text if hasattr(first_block, "text") else ""
-    result = json.loads(raw_text)
+
+    # Live smoke act_20260523_6dc28c showed Haiku returning empty/prose
+    # content (JSONDecodeError at column 1) for every selector resolution.
+    # Mirror the plan_vision_check fix (commit 27a0421): try strict parse,
+    # fall back to brace extraction for prose-around-JSON, raise with a
+    # clear message on hard failure so the outer except logs an actionable
+    # api_error instead of an opaque JSONDecodeError.
+    if not raw_text.strip():
+        raise ValueError("Vision response had empty text content")
+    try:
+        result = json.loads(raw_text)
+    except json.JSONDecodeError:
+        extracted = _extract_first_json_object(raw_text)
+        if extracted is None:
+            raise ValueError(
+                f"Vision response was prose with no JSON object: {raw_text[:200]}"
+            ) from None
+        result = json.loads(extracted)
 
     # Validate required keys are present before returning.
     if "selector" not in result or "confidence" not in result:
