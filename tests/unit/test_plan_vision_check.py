@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from backend.orchestration.plan_vision_check import (
     _MODEL,
     _intent_key,
@@ -818,3 +820,162 @@ def test_anthropic_client_receives_api_key_kwarg(tmp_path: Path) -> None:
             f"act_20260523_718d70 for the regression."
         )
         assert call.kwargs["api_key"] == "sk-ant-test-fixture"
+
+
+# ---------------------------------------------------------------------------
+# Regression: snapshot_signal must filter by successful action_ids
+# ---------------------------------------------------------------------------
+# Audit finding #3 + live smoke act_20260523_41bfa6 evidence: snapshot_signal
+# was counting ALL device-snapshots/<id>/post/ dirs, including forensic
+# snapshots taken on WriteRejectedError. 5 failed DHCP attempts pushed
+# familiarity to 0.427 (Tier 2) for an intent that had never succeeded.
+# Tier 3 (adversarial) was the correct tier.
+
+
+def test_snapshot_signal_filters_by_succeeded_action_ids(tmp_path: Path) -> None:
+    """5 post-snapshot dirs with ZERO matching success events → signal == 0.0."""
+    settings = _make_settings(tmp_path)
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir = settings.artifacts_dir / "device-snapshots"
+
+    # Create 5 post-snapshot dirs (simulating WriteRejectedError forensics).
+    for i in range(5):
+        post_dir = snapshots_dir / f"act_failed_{i}" / "post"
+        post_dir.mkdir(parents=True)
+        (post_dir / "show_running-config.txt").write_text("blah", encoding="utf-8")
+
+    # Log has only failures — no webui_configure_iteration_complete events.
+    log_path = settings.logs_dir / "actions.log"
+    events = [
+        json.dumps({"event": "webui_act_by_intent_soft_failure", "action_id": f"act_failed_{i}"})
+        for i in range(5)
+    ]
+    log_path.write_text("\n".join(events), encoding="utf-8")
+
+    from backend.orchestration import plan_vision_check
+
+    plan_vision_check._log_cache.clear()
+
+    score = compute_familiarity_score(
+        page_url="http://router/webui/#/dhcp",
+        intent=_DHCP_INTENT,
+        plan=[{"intent": {"role": "textbox", "name": "Network"}, "action": "fill", "value": "x"}],
+        settings=settings,
+    )
+
+    # 5 forensic snapshot dirs but ZERO succeeded action_ids → snapshot_signal = 0.
+    # Other signals are also 0 → score < 0.05.
+    assert score < 0.05, f"Forensic snapshots inflated familiarity to {score}"
+
+
+def test_snapshot_signal_counts_only_succeeded(tmp_path: Path) -> None:
+    """3 successful action_ids in log + 5 dirs → signal = 3/5 = 0.6 contribution."""
+    settings = _make_settings(tmp_path)
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir = settings.artifacts_dir / "device-snapshots"
+
+    # 5 post-snapshot dirs.
+    for i in range(5):
+        post_dir = snapshots_dir / f"act_x_{i}" / "post"
+        post_dir.mkdir(parents=True)
+
+    # Log marks 3 of them as succeeded.
+    log_path = settings.logs_dir / "actions.log"
+    events = [
+        json.dumps(
+            {
+                "event": "webui_configure_iteration_complete",
+                "action_id": f"act_x_{i}",
+                "verify_present": True,
+                "batch_clean": True,
+            }
+        )
+        for i in range(3)
+    ]
+    log_path.write_text("\n".join(events), encoding="utf-8")
+
+    from backend.orchestration import plan_vision_check
+
+    plan_vision_check._log_cache.clear()
+
+    # Direct signal probe (compute_familiarity uses other signals too).
+    snap = plan_vision_check._snapshot_signal(settings)
+    assert snap == pytest.approx(3 / 5), f"Expected 0.6, got {snap}"
+
+
+# ---------------------------------------------------------------------------
+# Regression: prose-around-JSON vision responses must be recovered
+# ---------------------------------------------------------------------------
+# Live smoke act_20260523_41bfa6: Haiku returned an empty/prose response,
+# json.loads raised inside _call_haiku_plan_vision, outer except caught it
+# as api_error → default-PROCEED. We never reached _parse_vision_response.
+# Fix: _call_haiku_plan_vision returns raw text; check_plan_via_vision
+# routes through brace-extraction recovery.
+
+
+def test_prose_around_json_response_is_recovered(tmp_path: Path) -> None:
+    """Haiku returns prose+JSON like 'I think... {valid JSON}' → recovered + parsed."""
+    settings = _make_settings(tmp_path)
+    page_url = "http://router/webui/#/dhcp"
+    ev = _make_ev()
+    plan = [
+        {"intent": {"role": "textbox", "name": "Network"}, "action": "fill", "value": "10.0.0.0"}
+    ]
+
+    # Mock response: prose preamble + valid JSON object (the audit-recommended
+    # fallback path).
+    prose_response = (
+        "Looking at the screenshot, I see a DHCP form. The plan appears correct. "
+        '{"verdict": "PROCEED", "reason": "all fields present", "confidence": 0.92}'
+    )
+    mock_cls = _make_mock_anthropic(prose_response)
+
+    with (
+        patch("backend.orchestration.plan_vision_check.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        verdict = check_plan_via_vision(
+            plan=plan,
+            intent=_DHCP_INTENT,
+            page_screenshot_b64=_MINIMAL_B64,
+            view=None,
+            rag_chunks=None,
+            running_config="",
+            page_url=page_url,
+            ev=ev,
+            settings=settings,
+        )
+
+    assert verdict["verdict"] == "PROCEED"
+    assert verdict["confidence"] == pytest.approx(0.92)
+    assert verdict["reason"] == "all fields present"
+
+
+def test_empty_haiku_response_falls_through_to_proceed(tmp_path: Path) -> None:
+    """Empty content[0].text → malformed_response → PROCEED (not api_error)."""
+    settings = _make_settings(tmp_path)
+    page_url = "http://router/webui/#/dhcp"
+    ev = _make_ev()
+    plan = [{"intent": {"role": "textbox", "name": "Network"}, "action": "fill", "value": "x"}]
+
+    # Mock empty response (the live-smoke act_20260523_41bfa6 shape).
+    mock_cls = _make_mock_anthropic("")
+
+    with (
+        patch("backend.orchestration.plan_vision_check.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        verdict = check_plan_via_vision(
+            plan=plan,
+            intent=_DHCP_INTENT,
+            page_screenshot_b64=_MINIMAL_B64,
+            view=None,
+            rag_chunks=None,
+            running_config="",
+            page_url=page_url,
+            ev=ev,
+            settings=settings,
+        )
+
+    assert verdict["verdict"] == "PROCEED"
+    assert verdict["reason"] == "malformed_response"

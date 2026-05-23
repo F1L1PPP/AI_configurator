@@ -55,8 +55,11 @@ _MAX_PLAN_VISION_CALLS_PER_SESSION = 5
 _TIER_THRESHOLDS = (0.25, 0.55, 0.85)
 _SUCCESS_LOG_CACHE_TTL_SECS = 300  # 5-min in-process cache for actions.log reads
 
-# In-process log-read cache: keyed by (path, mtime), value is (successes, failures).
-_log_cache: dict[tuple[str, float], tuple[int, int]] = {}
+# In-process log-read cache: keyed by (path, mtime), value is
+# (successes, failures, succeeded_action_ids). The third element is the
+# set of action_ids that completed end-to-end (verify_present=true), used
+# by _snapshot_signal to filter out forensic snapshots of failed actions.
+_log_cache: dict[tuple[str, float], tuple[int, int, frozenset[str]]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -138,15 +141,18 @@ def _cache_hit_signal(plan: list[dict], page_url: str, settings: Any) -> float:
     return hits / len(plan)
 
 
-def _success_signal(settings: Any) -> float:
-    """System-wide success ratio from actions.log (5-min in-process cache).
+def _parse_actions_log(settings: Any) -> tuple[int, int, frozenset[str]]:
+    """Parse actions.log once and return (successes, failures, succeeded_action_ids).
 
-    First iteration: approximate by counting EXECUTED events vs FAILED events
-    across the whole log. Per-intent grouping is a follow-up chunk.
+    5-minute in-process cache keyed by (path, mtime). Cleared when the file
+    changes. Used by _success_signal AND _snapshot_signal — single pass over
+    the log avoids duplicated parsing.
 
-    Events parsed:
-        webui_act_by_intent_complete     → success
-        webui_act_by_intent_soft_failure → failure
+    Events:
+        webui_act_by_intent_complete     → step-level success counter
+        webui_act_by_intent_soft_failure → step-level failure counter
+        webui_configure_iteration_complete (verify_present=true, batch_clean=true)
+            → action_id added to succeeded set (end-to-end success marker)
     """
     global _log_cache  # noqa: PLW0603
 
@@ -156,53 +162,78 @@ def _success_signal(settings: Any) -> float:
     try:
         mtime = log_path.stat().st_mtime
     except OSError:
-        # No log file yet — system is fresh, no evidence either way.
-        return 0.0
+        return (0, 0, frozenset())
 
     cache_key = (str(log_path), mtime)
 
-    # Purge stale cache entries (anything older than TTL). We keep only the
-    # current mtime entry to avoid unbounded growth.
+    # Purge stale entries for the same path (avoids unbounded growth).
     stale = [k for k in _log_cache if k[0] == str(log_path) and k != cache_key]
     for k in stale:
         del _log_cache[k]
 
     if cache_key in _log_cache:
-        successes, failures = _log_cache[cache_key]
-    else:
-        successes = 0
-        failures = 0
-        try:
-            text = log_path.read_text(encoding="utf-8", errors="replace")
-            for line in text.splitlines():
-                with suppress(json.JSONDecodeError, KeyError):
-                    event = json.loads(line)
-                    ev_type = event.get("event", "")
-                    if ev_type == "webui_act_by_intent_complete":
-                        successes += 1
-                    elif ev_type == "webui_act_by_intent_soft_failure":
-                        failures += 1
-        except OSError:
-            pass
-        _log_cache[cache_key] = (successes, failures)
+        return _log_cache[cache_key]
 
-    # +1 denominator: avoids division by zero and slight pessimism on tiny samples.
+    successes = 0
+    failures = 0
+    succeeded_action_ids: set[str] = set()
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            with suppress(json.JSONDecodeError, KeyError):
+                event = json.loads(line)
+                ev_type = event.get("event", "")
+                if ev_type == "webui_act_by_intent_complete":
+                    successes += 1
+                elif ev_type == "webui_act_by_intent_soft_failure":
+                    failures += 1
+                elif (
+                    ev_type == "webui_configure_iteration_complete"
+                    and event.get("verify_present") is True
+                    and event.get("batch_clean") is True
+                ):
+                    aid = event.get("action_id")
+                    if isinstance(aid, str):
+                        succeeded_action_ids.add(aid)
+    except OSError:
+        pass
+
+    result = (successes, failures, frozenset(succeeded_action_ids))
+    _log_cache[cache_key] = result
+    return result
+
+
+def _success_signal(settings: Any) -> float:
+    """System-wide success ratio from actions.log.
+
+    +1 denominator: avoids division by zero and slight pessimism on tiny samples.
+    """
+    successes, failures, _ = _parse_actions_log(settings)
     return successes / (successes + failures + 1)
 
 
 def _snapshot_signal(settings: Any) -> float:
-    """Count of post-snapshot dirs (clip at 5, divide by 5).
+    """Count of post-snapshot dirs FROM SUCCESSFUL ACTIONS only (clip at 5, /5).
 
-    Coarse "system has executed N successful actions overall" signal.
-    Per-intent grouping is a follow-up chunk.
+    Gaming defense (audit finding #3): snapshots are also taken on
+    WriteRejectedError + verify-failure for forensic preservation. Without
+    this filter, 5 failed actions would push familiarity by +0.20 and demote
+    Tier 3 (adversarial) to Tier 2 (step-level) for tasks never actually
+    successfully performed. We cross-reference against the log's set of
+    action_ids that completed end-to-end (webui_configure_iteration_complete
+    with verify_present=true).
     """
     snapshots_dir: Path = settings.artifacts_dir / "device-snapshots"
     if not snapshots_dir.exists():
         return 0.0
 
+    _, _, succeeded_action_ids = _parse_actions_log(settings)
+
     count = 0
     for child in snapshots_dir.iterdir():
-        if child.is_dir() and (child / "post").is_dir():
+        if not (child.is_dir() and (child / "post").is_dir()):
+            continue
+        if child.name in succeeded_action_ids:
             count += 1
             if count >= 5:
                 break
@@ -304,8 +335,14 @@ def _call_haiku_plan_vision(
     view: dict[str, Any] | None,
     rag_chunks: list[dict[str, Any]] | None,
     running_config: str,
-) -> dict[str, Any]:
-    """Make the Anthropic vision call for a given tier. Returns parsed JSON or raises."""
+) -> str:
+    """Make the Anthropic vision call for a given tier. Returns RAW response text.
+
+    Returns the raw text — caller MUST route through _parse_vision_response
+    so prose-around-JSON responses are recovered via brace-extraction. Returns
+    empty string if Haiku produces no text content. Raises on API failure
+    (network, 5xx, auth) — those are caught by the outer handler.
+    """
     from backend.core.settings import get_settings  # noqa: PLC0415
 
     client = Anthropic(api_key=get_settings().anthropic_api_key, max_retries=_MAX_RETRIES)
@@ -379,8 +416,11 @@ def _call_haiku_plan_vision(
         max_tokens=1024,
         messages=[{"role": "user", "content": content}],
     )
-    raw_text = response.content[0].text
-    return json.loads(raw_text)
+    # Return raw text — caller routes through _parse_vision_response which
+    # handles prose-around-JSON via brace extraction. Live smoke
+    # act_20260523_41bfa6 hit JSONDecodeError on empty/prose responses;
+    # parsing inline here was eating recoverable cases.
+    return response.content[0].text or ""
 
 
 def _extract_first_json_object_local(text: str) -> str | None:
@@ -599,28 +639,27 @@ def check_plan_via_vision(
     if ev is not None:
         ev.plan_vision_count += 1
 
-    # Parse response (already parsed from JSON in _call_haiku_plan_vision,
-    # but handle malformed-JSON gracefully if the call returned raw string).
-    if isinstance(raw_result, str):
-        parsed = _parse_vision_response(raw_result)
-        if parsed is None:
-            log.warning(
-                "plan_vision_check_malformed_response",
-                intent=intent[:80],
-                raw=raw_result[:200],
-            )
-            return VisionVerdict(
-                verdict="PROCEED",
-                reason="malformed_response",
-                suggested_plan=None,
-                risks=[],
-                confidence=0.0,
-                tier=tier,
-                familiarity_score=familiarity,
-            )
-        result = parsed
-    else:
-        result = raw_result
+    # raw_result is the raw response text from Haiku. Route through
+    # _parse_vision_response so prose-around-JSON ("Looking at the screenshot,
+    # I think... {...}") is recovered via brace-extraction. Empty/non-JSON
+    # responses fall through to default-PROCEED.
+    parsed = _parse_vision_response(raw_result) if raw_result else None
+    if parsed is None:
+        log.warning(
+            "plan_vision_check_malformed_response",
+            intent=intent[:80],
+            raw=raw_result[:200] if raw_result else "",
+        )
+        return VisionVerdict(
+            verdict="PROCEED",
+            reason="malformed_response",
+            suggested_plan=None,
+            risks=[],
+            confidence=0.0,
+            tier=tier,
+            familiarity_score=familiarity,
+        )
+    result = parsed
 
     raw_verdict = result.get("verdict", "PROCEED")
     reason = result.get("reason", "")
