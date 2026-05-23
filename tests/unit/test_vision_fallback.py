@@ -569,3 +569,51 @@ def test_extract_first_json_object_returns_none_when_no_object() -> None:
     assert _extract_first_json_object("just prose with no braces") is None
     assert _extract_first_json_object("") is None
     assert _extract_first_json_object("{ unterminated") is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: vision prompt must demand UNIQUE selectors
+# ---------------------------------------------------------------------------
+# Live smoke act_20260523_90c146 showed Haiku returning bare
+# `button:has-text('Add')` which matched multiple Add buttons on the DHCP
+# page → click hung → 30s timeout → session_not_found cascade. Prompt now
+# explicitly forbids bare role+text selectors and demands one of: HTML
+# attribute, aria-label, container-scoped, or :nth-match. Lock the words
+# so a future prompt edit doesn't silently drop the guidance.
+
+
+def test_vision_prompt_demands_unique_selectors(tmp_path: Path) -> None:
+    """The Haiku vision prompt must contain selector-uniqueness clauses."""
+    settings = _make_settings(tmp_path)
+    settings.anthropic_api_key = "sk-ant-test"
+    page = _make_page()
+    ev = _make_ev(tmp_path)
+    intent = {"role": "button", "name": "Add", "action": "click", "value": None}
+
+    mock_cls = _make_mock_anthropic(
+        json.dumps({"selector": "[aria-label='Add Pool']", "confidence": 0.95})
+    )
+
+    with (
+        patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls),
+        patch("backend.core.settings.get_settings", return_value=settings),
+    ):
+        resolve_via_vision(page, intent, ev, settings)
+
+    # Grab the actual messages payload sent to Haiku.
+    call_kwargs = mock_cls.return_value.messages.create.call_args.kwargs
+    content_blocks = call_kwargs["messages"][0]["content"]
+    prompt_text = " ".join(b["text"] for b in content_blocks if b.get("type") == "text")
+
+    # Must demand uniqueness explicitly.
+    assert "EXACTLY ONE" in prompt_text or "exactly one" in prompt_text.lower(), (
+        "Vision prompt no longer demands unique selectors — regression of 14h-D fix"
+    )
+    # Must call out the live-smoke bad pattern as forbidden.
+    assert "button:has-text" in prompt_text or "FORBIDDEN" in prompt_text, (
+        "Vision prompt no longer forbids bare role+text selectors"
+    )
+    # Must prefer attribute-based selectors.
+    assert "aria-label" in prompt_text, (
+        "Vision prompt no longer prefers aria-label / attribute selectors"
+    )

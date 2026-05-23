@@ -260,15 +260,28 @@ def _call_haiku_vision(
         )
 
     # Intent prompt — always last.
+    # Selector-uniqueness clauses added in chunk 14h-D after live smoke
+    # act_20260523_90c146 returned `button:has-text('Add')` which matched
+    # multiple buttons on the page → click hung → 30s timeout cascade.
     content.append(
         {
             "type": "text",
             "text": (
                 f"Find the element with role='{role}' and accessible name '{name}'. "
                 "Return ONLY JSON: "
-                '{"selector": "...", "confidence": 0.0-1.0, "reasoning": "..."}. '
-                "Use stable Playwright selectors (aria-label, role+text, exact text). "
-                "Never xpath or nth-child."
+                '{"selector": "...", "confidence": 0.0-1.0, "reasoning": "..."}.\n\n'
+                "CRITICAL: the selector MUST match EXACTLY ONE visible element on the "
+                "page. Bare role+text selectors like `button:has-text('Add')` are "
+                "FORBIDDEN if multiple Add buttons exist (e.g. column headers, table "
+                "rows, modal). Prefer in this order:\n"
+                "  1. `input[name='attr_name']` or `[id='exact-id']` — HTML attribute "
+                "scoped (read the DOM if visible).\n"
+                "  2. `[aria-label='Exact Label']` — accessibility-name match.\n"
+                "  3. Container-scoped: `.modal button:has-text('Apply')` or "
+                "`form[name='dhcp'] input[name='networkIp']` — parent selector + child.\n"
+                "  4. Last resort: `:nth-match(:visible, N)` where N targets the "
+                "specific occurrence.\n"
+                "NEVER: xpath, `:nth-child`, bare text selectors that could collide."
             ),
         }
     )

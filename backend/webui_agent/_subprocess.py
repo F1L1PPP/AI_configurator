@@ -220,10 +220,15 @@ def run_flow_in_subprocess(
 # Phase 4 — long-lived session helper.
 # ---------------------------------------------------------------------------
 
-# Per-op stdin/stdout round-trip timeout. Describe is ~1 s, click ~0.5 s on a
-# happy page; anything taking 30 s is a hang and we kill the child. The hard
-# subprocess watchdog (`DEFAULT_SUBPROCESS_TIMEOUT_S`) is the absolute ceiling.
-_SESSION_OP_TIMEOUT_S = 30.0
+# Per-op stdin/stdout round-trip timeout.
+# Bumped 30 → 90s in chunk 14h-D after live smoke act_20260523_90c146:
+# the vision-first path (14g) now does up to TWO Haiku vision calls per
+# action when staleness eviction-retry fires (vision_call_1 ≈ 4s + click ≈
+# 5s + evict + vision_call_2 ≈ 4s + click_2 ≈ 5s = ~18s minimum; with
+# Anthropic latency variance the 30s budget would burst and trigger
+# spurious session_not_found cascades). Happy-path describe is still ~1s
+# / simple click ~0.5s — 90s only matters for vision-first retry paths.
+_SESSION_OP_TIMEOUT_S = 90.0
 
 # Init handshake can be slow — Cisco WebUI login is ~5-20 s on real hardware.
 _SESSION_INIT_TIMEOUT_S = 60.0
