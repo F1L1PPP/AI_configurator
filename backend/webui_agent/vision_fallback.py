@@ -43,7 +43,12 @@ _MAX_RETRIES = 5
 _CONFIDENCE_THRESHOLD = 0.7
 _MAX_PRIOR_SCREENSHOTS = 2
 _MAX_RUNNING_CONFIG_BYTES = 8192
-_MAX_VISION_CALLS_PER_SESSION = 5
+_MAX_VISION_CALLS_PER_SESSION = 15  # bumped from 5 in chunk 14g (vision-first
+# inversion fires vision on every action; first-ever DHCP/OSPF/NAT forms have
+# 6-10 fields. Cap of 5 would burn during initial page warm-up and trigger
+# heuristic fallback for the remaining fields — defeating the whole point of
+# vision-first. Cache hits don't increment, so this only bounds first-encounter
+# spend at $0.015 × 15 = $0.225 per session.
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +85,33 @@ def save_selector_cache(path: Path, cache: dict[str, str]) -> None:
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def evict_from_selector_cache(path: Path, role: str, name: str, page_url: str) -> bool:
+    """Remove (role, name, page_url) from the cache. Returns True if evicted.
+
+    Called when a cached selector's action fails with a staleness signal
+    (element_hidden, element_disabled, element_intercepted). The next
+    resolve_via_vision call then goes to Anthropic instead of returning
+    the stale cached selector.
+    """
+    cache = load_selector_cache(path)
+    key = _cache_key(role, name, page_url)
+    if key not in cache:
+        return False
+    del cache[key]
+    try:
+        save_selector_cache(path, cache)
+    except OSError as exc:
+        log.warning(
+            "selector_cache_evict_failed",
+            key=key,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return False
+    log.info("selector_cache_evicted", key=key)
+    return True
 
 
 # ---------------------------------------------------------------------------

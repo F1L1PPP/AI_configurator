@@ -401,6 +401,41 @@ def test_resolve_via_vision_cache_hit_does_not_consume_budget(tmp_path: Path) ->
 # here in vision_fallback._call_haiku_vision. Lock the explicit api_key= form.
 
 
+# ---------------------------------------------------------------------------
+# evict_from_selector_cache (chunk 14g)
+# ---------------------------------------------------------------------------
+
+
+def test_evict_from_selector_cache_removes_entry(tmp_path: Path) -> None:
+    """Pre-populated entry must be removed on evict."""
+    from backend.webui_agent.vision_fallback import (
+        _cache_key,
+        evict_from_selector_cache,
+        load_selector_cache,
+        save_selector_cache,
+    )
+
+    cache_path = tmp_path / "selector_cache.json"
+    page_url = "http://router/webui/#/dhcp"
+    key = _cache_key("textbox", "Network", page_url)
+    save_selector_cache(cache_path, {key: "input[name='networkIp']"})
+
+    evicted = evict_from_selector_cache(cache_path, "textbox", "Network", page_url)
+
+    assert evicted is True
+    assert key not in load_selector_cache(cache_path)
+
+
+def test_evict_from_selector_cache_missing_key_returns_false(tmp_path: Path) -> None:
+    """Evicting a key not in cache must return False without raising."""
+    from backend.webui_agent.vision_fallback import evict_from_selector_cache
+
+    cache_path = tmp_path / "selector_cache.json"
+    # File doesn't exist; load returns {}.
+    evicted = evict_from_selector_cache(cache_path, "textbox", "Network", "http://router/")
+    assert evicted is False
+
+
 def test_anthropic_client_receives_api_key_kwarg(tmp_path: Path) -> None:
     """_call_haiku_vision MUST pass api_key= to Anthropic(), not rely on env."""
     settings = _make_settings(tmp_path)

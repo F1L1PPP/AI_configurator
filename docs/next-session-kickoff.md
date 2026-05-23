@@ -253,6 +253,40 @@ DHCP form `act_20260521_5ccca4` retry:
 - ✅ Describe-retry kicks in on slow DHCP page (no describe_failed).
 - ⚠️ Inner WebUI planner mis-fills fields: Network empty, Starting IP shows the subnet mask `255.255.255.0` instead of an IPv4 address. **Same class as OSPF screen-routing bug — chunk 14b territory.**
 
+### Chunk 14g — Vision-first selector resolution (LANDED, awaiting live smoke)
+
+Shipped 2026-05-23 after the live smoke `act_20260523_f8cd97` proved chunk 14k (commit `25f9e50`, YAML + role_text + spatial-label) was dead code in the runtime path. Both new additions in 14k bypassed the `_do_act_by_intent` flow entirely — the YAML is only consulted by named-flow POM modules, and the `role_text` strategy was added as a handler in `login._build` but never wired into the strategies list at `_playwright_subprocess.py:753`. Tactical patches couldn't fix the underlying architectural fragility of heuristic-first selector resolution on hostile AngularJS forms.
+
+14g inverts the architecture. Vision becomes the PRIMARY selector resolution mechanism; heuristics (`eid lookup → first_match strategies`) become vestigial fallback. The existing `selector_cache.json` from 14b makes repeat calls free. Eviction-and-retry handles stale cached selectors when forms re-render.
+
+**Flow change:**
+- BEFORE: describe_page eid → first_match → vision_fallback (only on None) → unknown_eid
+- AFTER: `resolve_via_vision` (cache-aware, internal) → fresh_map eid → first_match → unknown_eid
+
+**Eviction loop:** if a vision-resolved selector's fill returns `element_hidden | element_disabled | element_intercepted`, evict the cache entry, re-call `resolve_via_vision` (cache miss → Anthropic), retry `_do_act` once. Self-healing on form re-render or version drift.
+
+| File | State | Size |
+|---|---|---|
+| `backend/webui_agent/_playwright_subprocess.py` | Modified | +135/-47 lines (refactored `_do_act_by_intent`) |
+| `backend/webui_agent/vision_fallback.py` | Modified | +24 lines: new `evict_from_selector_cache` helper, `_MAX_VISION_CALLS_PER_SESSION` bumped 5→15 |
+| `tests/unit/test_vision_fallback.py` | Modified | +2 tests (evict helper) |
+| `tests/unit/test_playwright_subprocess.py` | Modified | +6 tests (vision-first path, fallthrough, evict+retry, no-evict-on-missing, no-infinite-loop, security regression for deny-list) |
+
+**Tests:** 673/673 unit suite green. Ruff + mypy clean.
+
+**Opus 4.7 deep audit:** CONDITIONAL PASS → 2 HIGH findings fixed before commit:
+- **Security: deny-list bypass.** Vision-resolved locators skipped the `_SENSITIVE_DENY_LIST` check (Reboot / Factory Reset / etc.). Mirrored the heuristic-path probe inside `_try_act_with_vision` before calling `_do_act`. Added regression test `test_act_by_intent_vision_path_enforces_sensitive_deny_list`.
+- **Ops: per-session cap too tight.** Bumped `_MAX_VISION_CALLS_PER_SESSION` 5→15. At cap=5 the first-ever DHCP run would burn budget on fields 1-5, field 6 falls through to heuristics → unknown_eid → same failure 14k hit. Worst-case spend rises from $0.075 to $0.225/session.
+
+5 MEDIUM/LOW findings tracked as 14h follow-ups (retry observability gap, eviction race, log volume — all non-blocking).
+
+**Live-smoke target:** DHCP intent on C1111-4P. Expected:
+- First fill: vision resolves each field, caches. Slow (~30s for 5-6 fields × 2s vision).
+- Form fills correctly. Apply lands clean. `verify_present: true`.
+- Second run: cache hits, fast (~5s).
+
+If green: propose `v0.5.9-vision-first` tag covering 14b + 14f-adaptive + 14g (and obsoleting 14k's dead-code attempt).
+
 ### Chunk 14f-adaptive — Vision pre-check on planner output (LANDED, awaiting live smoke)
 
 Shipped 2026-05-23 after triage of `act_20260523_484286` (DHCP smoke failure). 14b never fired in that smoke because `first_match` returned wrong-but-non-None EIDs — vision_fallback only catches `unknown_eid`. The real bug was upstream: inner Haiku `configure_planner` produced a wrong plan (skipped Network field; iter 3 re-draft put subnet mask value `255.255.255.0` into Starting IP).

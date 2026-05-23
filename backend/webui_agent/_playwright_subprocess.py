@@ -703,8 +703,15 @@ def _do_act_by_intent(
     Intent shape: ``{"role": str, "name": str, "action": str,
     "value": str | None}``. Action validation falls through to `_do_act`.
     """
+    import hashlib  # noqa: PLC0415
+
+    from backend.core.settings import get_settings  # noqa: PLC0415
     from backend.webui_agent.login import first_match  # noqa: PLC0415
     from backend.webui_agent.semantic_dom import describe_page  # noqa: PLC0415
+    from backend.webui_agent.vision_fallback import (  # noqa: PLC0415
+        evict_from_selector_cache,
+        resolve_via_vision,
+    )
 
     intent = msg.get("intent") or {}
     role = intent.get("role")
@@ -726,15 +733,117 @@ def _do_act_by_intent(
             view["view_id"],
         )
 
-    # 1. PRIMARY: forward-lookup in a fresh describe view. Uses the SAME
-    #    naming source the inner LLM saw (Phase 3.4 spatial labels for
-    #    inputs without ARIA labels), so role+name collisions resolve
-    #    correctly. Required because Playwright's get_by_role doesn't
-    #    know about spatial labels — it'd fall through to text-match and
-    #    pick the wrong same-named element (e.g. a column-header link
-    #    instead of the form input).
+    # Describe page once upfront — used by both vision-first and the
+    # heuristic fallback path.
     view, fresh_map = describe_page(page)
     fresh_view_id: str = view["view_id"]
+
+    settings = get_settings()
+    page_url = page.url
+
+    # -----------------------------------------------------------------------
+    # Step 1: VISION-FIRST. resolve_via_vision is internally cache-aware —
+    # cache hit is ~free (~0ms, no Anthropic call); miss calls Anthropic
+    # and caches the result for future turns.
+    # -----------------------------------------------------------------------
+    vision_selector = resolve_via_vision(page, intent, ev, settings)
+
+    def _try_act_with_vision(
+        selector: str, attempt: int
+    ) -> tuple[dict[str, Any], dict[str, Any], str | None] | None:
+        """Build synthetic_eid + synthetic_msg and call _do_act once.
+
+        Returns (reply, new_map, new_vid) on success or staleness signal,
+        None on hard exception (let caller fall through to heuristics).
+        """
+        try:
+            vision_loc = page.locator(selector)
+            synthetic_eid = f"vision_{hashlib.sha1(selector.encode()).hexdigest()[:8]}"
+            fresh_map_with_vision = {**fresh_map, synthetic_eid: vision_loc}
+
+            # 14g security guard: vision path must enforce the same
+            # _SENSITIVE_DENY_LIST as the heuristic path (line ~856). Without
+            # this check, a prompt-injected intent like {role: button,
+            # name: "Reboot"} would resolve via vision and click Reboot,
+            # bypassing the deny-list entirely. Mirror the heuristic probe
+            # against the locator's accessible name.
+            try:
+                accessible_name = (vision_loc.get_attribute("aria-label") or "").strip()
+                if not accessible_name:
+                    accessible_name = (vision_loc.text_content() or "").strip()
+            except Exception:  # noqa: BLE001
+                accessible_name = ""
+            name_lower = accessible_name.lower()
+            matched_phrase = next((p for p in _SENSITIVE_DENY_LIST if p in name_lower), None)
+            if matched_phrase is not None:
+                return (
+                    {
+                        "ok": False,
+                        "failure_reason": "sensitive_text_denied",
+                        "denied_phrase": matched_phrase,
+                        "accessible_name": accessible_name,
+                        "chosen_eid": None,
+                        "view": view,
+                        "attempts": 0,
+                        "resolved_via": "vision_denied",
+                        "vision_attempt": attempt,
+                    },
+                    fresh_map_with_vision,
+                    fresh_view_id,
+                )
+
+            synthetic_msg = {
+                "view_id": fresh_view_id,
+                "eid": synthetic_eid,
+                "action": action,
+                "value": value,
+            }
+            reply, new_map, new_vid = _do_act(
+                page, fresh_map_with_vision, fresh_view_id, synthetic_msg, ev
+            )
+            reply["chosen_eid"] = synthetic_eid
+            reply["resolved_via"] = "vision"
+            reply["vision_attempt"] = attempt
+            return reply, new_map, new_vid
+        except Exception as exc:  # noqa: BLE001
+            from backend.core.logging import get_logger  # noqa: PLC0415
+
+            get_logger(__name__).warning(
+                "vision_first_act_exception",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                attempt=attempt,
+            )
+            return None
+
+    if vision_selector is not None:
+        result = _try_act_with_vision(vision_selector, attempt=1)
+        if result is not None:
+            reply, new_map, new_vid = result
+            # Eviction + retry on staleness signals.
+            STALENESS = {"element_hidden", "element_disabled", "element_intercepted"}
+            if reply.get("ok") is False and reply.get("failure_reason") in STALENESS:
+                evicted = evict_from_selector_cache(
+                    settings.selector_cache_path, role, name, page_url
+                )
+                if evicted:
+                    # Retry vision: cache was evicted, so resolve_via_vision
+                    # will go to Anthropic for a fresh selector.
+                    retry_selector = resolve_via_vision(page, intent, ev, settings)
+                    if retry_selector is not None and retry_selector != vision_selector:
+                        retry_result = _try_act_with_vision(retry_selector, attempt=2)
+                        if retry_result is not None:
+                            reply, new_map, new_vid = retry_result
+            return reply, new_map, new_vid
+
+    # -----------------------------------------------------------------------
+    # Step 2 (FALLBACK): vision returned None or _try_act_with_vision raised.
+    # Fall through to the existing eid forward-lookup + first_match heuristics.
+    # -----------------------------------------------------------------------
+
+    # 2a. PRIMARY heuristic: forward-lookup in the fresh describe view. Uses
+    # the SAME naming source the inner LLM saw (Phase 3.4 spatial labels for
+    # inputs without ARIA labels), so role+name collisions resolve correctly.
     chosen_loc: Any | None = None
     eid: str | None = _eid_for_intent(view, role, name)
     if eid is not None:
@@ -745,10 +854,8 @@ def _do_act_by_intent(
         if chosen_loc is None:
             eid = None
 
-    # 2. FALLBACK: legacy fuzzy walker for cases where describe_page
-    #    didn't surface the element under the requested role+name (e.g.
-    #    the LLM used a slightly different role than what describe_page
-    #    produced, but Playwright's accessibility tree still finds it).
+    # 2b. LEGACY fuzzy walker for cases where describe_page didn't surface
+    # the element under the requested role+name.
     if chosen_loc is None:
         strategies: list[dict[str, Any]] = [
             {"role": role, "name": name},
@@ -757,39 +864,6 @@ def _do_act_by_intent(
         ]
         chosen_loc = first_match(page, strategies)
         if chosen_loc is None:
-            # Vision fallback: screenshot + Haiku vision to resolve selector.
-            # Lazy imports — keep cold start cheap and isolate the API surface.
-            import hashlib  # noqa: PLC0415
-
-            from backend.core.settings import get_settings  # noqa: PLC0415
-            from backend.webui_agent.vision_fallback import resolve_via_vision  # noqa: PLC0415
-
-            cached_or_resolved = resolve_via_vision(page, intent, ev, get_settings())
-            if cached_or_resolved is not None:
-                try:
-                    vision_loc = page.locator(cached_or_resolved)
-                    synthetic_eid = (
-                        f"vision_{hashlib.sha1(cached_or_resolved.encode()).hexdigest()[:8]}"
-                    )
-                    fresh_map_with_vision = {**fresh_map, synthetic_eid: vision_loc}
-                    synthetic_msg = {
-                        "view_id": fresh_view_id,
-                        "eid": synthetic_eid,
-                        "action": action,
-                        "value": value,
-                    }
-                    reply, new_map, new_vid = _do_act(
-                        page, fresh_map_with_vision, fresh_view_id, synthetic_msg, ev
-                    )
-                    reply["chosen_eid"] = synthetic_eid
-                    reply["resolved_via"] = "vision"
-                    return reply, new_map, new_vid
-                except Exception as exc:  # noqa: BLE001
-                    from backend.core.logging import get_logger  # noqa: PLC0415
-
-                    get_logger(__name__).warning("vision_fallback_act_exception", error=str(exc))
-                    # fall through to the original unknown_eid return
-
             return (
                 {
                     "ok": False,
@@ -802,7 +876,7 @@ def _do_act_by_intent(
                 fresh_view_id,
             )
 
-    # 1b. Sensitive-text deny-list: refuse to act on locators whose accessible
+    # 2c. Sensitive-text deny-list: refuse to act on locators whose accessible
     # name matches dangerous operations. Defends against prompt-injected intents
     # that would resolve to "Factory Reset" / "Reboot" / etc.
     try:
@@ -828,7 +902,7 @@ def _do_act_by_intent(
             fresh_view_id,
         )
 
-    # 2. Reverse-lookup the chosen locator's eid (only needed for the
+    # 2d. Reverse-lookup the chosen locator's eid (only needed for the
     # first_match fallback path — the forward path already set eid).
     if eid is None:
         eid = _reverse_lookup_eid(chosen_loc, fresh_map)
@@ -845,7 +919,7 @@ def _do_act_by_intent(
             fresh_view_id,
         )
 
-    # 3. Dispatch into the same _do_act machinery (self-heal, never-retry-click).
+    # 2e. Dispatch into the same _do_act machinery (self-heal, never-retry-click).
     synthetic_msg = {
         "view_id": fresh_view_id,
         "eid": eid,

@@ -324,15 +324,25 @@ def test_act_by_intent_resolves_via_first_match():
     }
 
     page = MagicMock()
+    page.url = "http://router/webui/#/general"
     ev = MagicMock()
     ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = MagicMock()
+    import tempfile
+    from pathlib import Path as _Path
+
+    settings_mock.selector_cache_path = _Path(tempfile.mkdtemp()) / "sc.json"
 
     with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=None),
         patch("backend.webui_agent.login.first_match", return_value=chosen_loc) as mock_first_match,
         patch(
             "backend.webui_agent.semantic_dom.describe_page",
             return_value=(fresh_view, fresh_map),
         ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
     ):
         reply, _new_map, _new_vid = _do_act_by_intent(
             page=page,
@@ -431,12 +441,20 @@ def test_act_by_intent_denies_sensitive_text():
     from backend.webui_agent._playwright_subprocess import _do_act_by_intent
 
     page = MagicMock()
+    page.url = "http://router/webui/#/general"
     ev = MagicMock()
     ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
 
     chosen_loc = MagicMock()
     # Mixed case to verify case-insensitive match
     chosen_loc.get_attribute.return_value = "Factory Reset"
+
+    import tempfile
+    from pathlib import Path as _Path
+
+    settings_mock = MagicMock()
+    settings_mock.selector_cache_path = _Path(tempfile.mkdtemp()) / "sc.json"
 
     post_view = {
         "view_id": "post",
@@ -448,11 +466,13 @@ def test_act_by_intent_denies_sensitive_text():
     }
 
     with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=None),
         patch("backend.webui_agent.login.first_match", return_value=chosen_loc),
         patch(
             "backend.webui_agent.semantic_dom.describe_page",
             return_value=(post_view, {}),
         ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
     ):
         reply, _new_map, _new_vid = _do_act_by_intent(
             page=page,
@@ -818,3 +838,340 @@ def test_describe_with_retry_returns_empty_after_max_attempts(monkeypatch):
     assert lmap == {}
     assert len(describe_calls) == 2, "must attempt describe twice before giving up"
     assert len(settle_calls) == 1, "_settle_page must be called once between attempts"
+
+
+# ---------------------------------------------------------------------------
+# chunk 14g — vision-first selector resolution tests
+# ---------------------------------------------------------------------------
+
+
+def _make_settings_mock(tmp_path=None) -> MagicMock:
+    """Return a settings mock with a valid selector_cache_path."""
+    import tempfile
+    from pathlib import Path as _Path
+
+    settings = MagicMock()
+    if tmp_path is None:
+        tmp_path = _Path(tempfile.mkdtemp())
+    settings.selector_cache_path = tmp_path / "selector_cache.json"
+    return settings
+
+
+def _base_intent_msg(role: str = "textbox", name: str = "Network", action: str = "fill") -> dict:
+    return {"intent": {"role": role, "name": name, "action": action, "value": "10.0.0.0"}}
+
+
+def _fresh_view_and_map() -> tuple[dict, dict]:
+    view = {
+        "view_id": "fresh",
+        "url": "http://router/webui/#/dhcp",
+        "title": "DHCP",
+        "elements": [],
+        "modals": [],
+        "errors": [],
+    }
+    return view, {}
+
+
+def test_act_by_intent_vision_first_used_when_vision_returns_selector(tmp_path):
+    """vision returns a selector → _do_act runs with synthetic_eid; first_match NOT called."""
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    selector = "input[aria-label='Network']"
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    # _do_act needs the synthetic eid in the locator_map to succeed.
+    # We patch _do_act directly so we can assert on the synthetic_eid arg.
+    do_act_calls: list[dict] = []
+
+    def fake_do_act(page_, locator_map_, view_id_, msg_, ev_):
+        do_act_calls.append({"msg": msg_, "locator_map_keys": list(locator_map_.keys())})
+        return ({"ok": True, "attempts": 0}, locator_map_, view_id_)
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=selector),
+        patch("backend.webui_agent.login.first_match") as mock_first_match,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch("backend.webui_agent._playwright_subprocess._do_act", side_effect=fake_do_act),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=_base_intent_msg(),
+            ev=ev,
+        )
+
+    # first_match must NOT have been called — vision was the primary path.
+    mock_first_match.assert_not_called()
+    # _do_act was called and synthetic_eid starts with "vision_".
+    assert len(do_act_calls) == 1
+    assert do_act_calls[0]["msg"]["eid"].startswith("vision_")
+    assert reply["resolved_via"] == "vision"
+
+
+def test_act_by_intent_vision_path_enforces_sensitive_deny_list(tmp_path):
+    """14g security regression guard.
+
+    Vision-first inversion in 14g moved the primary resolution path to vision,
+    bypassing the _SENSITIVE_DENY_LIST check that lived only in the heuristic
+    path. Without the in-closure deny-list check added in this commit, a
+    prompt-injected intent like {role: button, name: "Reboot"} would resolve
+    via vision and click Reboot, bypassing the safeguard entirely. This test
+    asserts the vision path now enforces the deny-list.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    selector = "button.danger-reboot"
+    page = MagicMock()
+    page.url = "http://router/webui/#/admin"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    # Locator's accessible name contains the deny-listed phrase "reboot".
+    vision_loc = MagicMock()
+    vision_loc.get_attribute.return_value = "Reboot Router"
+    vision_loc.text_content.return_value = "Reboot Router"
+    page.locator.return_value = vision_loc
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    # _do_act must NOT be called — the deny-list short-circuits before it.
+    do_act_called = False
+
+    def fake_do_act(*args, **kwargs):
+        nonlocal do_act_called
+        do_act_called = True
+        return ({"ok": True, "attempts": 0}, {}, "v")
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=selector),
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch("backend.webui_agent._playwright_subprocess._do_act", side_effect=fake_do_act),
+    ):
+        # Intent asks for a button by name "Reboot" (the prompt-injection shape).
+        msg = _base_intent_msg()
+        msg["intent"] = {"role": "button", "name": "Reboot", "action": "click", "value": None}
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=msg,
+            ev=ev,
+        )
+
+    # The action must be denied — _do_act NOT called, sensitive_text_denied returned.
+    assert do_act_called is False, "deny-list bypass: vision-resolved Reboot reached _do_act"
+    assert reply["ok"] is False
+    assert reply["failure_reason"] == "sensitive_text_denied"
+    assert reply["resolved_via"] == "vision_denied"
+
+
+def test_act_by_intent_falls_through_to_heuristics_when_vision_returns_none(tmp_path):
+    """vision returns None → eid + first_match fallback path is reached."""
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=None),
+        patch("backend.webui_agent.login.first_match", return_value=None) as mock_first_match,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=_base_intent_msg(),
+            ev=ev,
+        )
+
+    # first_match IS called on the heuristic fallback path.
+    mock_first_match.assert_called_once()
+    assert reply["failure_reason"] == "unknown_eid"
+
+
+def test_act_by_intent_evicts_and_retries_on_element_hidden(tmp_path):
+    """First _do_act returns element_hidden → evict called, retry with new selector."""
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    selector_a = "input[aria-label='Network']"
+    selector_b = "input[name='networkAddr']"
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    do_act_eids: list[str] = []
+
+    def fake_do_act(page_, locator_map_, view_id_, msg_, ev_):
+        eid = msg_["eid"]
+        do_act_eids.append(eid)
+        # First call (selector_a) → element_hidden; second (selector_b) → ok.
+        if len(do_act_eids) == 1:
+            return (
+                {"ok": False, "failure_reason": "element_hidden", "attempts": 0},
+                locator_map_,
+                view_id_,
+            )
+        return ({"ok": True, "attempts": 0}, locator_map_, view_id_)
+
+    with (
+        patch(
+            "backend.webui_agent.vision_fallback.resolve_via_vision",
+            side_effect=[selector_a, selector_b],
+        ),
+        patch(
+            "backend.webui_agent.vision_fallback.evict_from_selector_cache",
+            return_value=True,
+        ) as mock_evict,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch("backend.webui_agent._playwright_subprocess._do_act", side_effect=fake_do_act),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=_base_intent_msg(),
+            ev=ev,
+        )
+
+    # evict_from_selector_cache was called once.
+    mock_evict.assert_called_once()
+    # _do_act was called twice: first with selector_a's synthetic_eid, then selector_b's.
+    assert len(do_act_eids) == 2
+    # Both eids must be different (derived from different selectors).
+    assert do_act_eids[0] != do_act_eids[1]
+    assert reply["ok"] is True
+
+
+def test_act_by_intent_does_not_evict_on_element_missing(tmp_path):
+    """First _do_act returns element_missing (not a staleness signal) → evict NOT called."""
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    selector = "input[aria-label='Network']"
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=selector),
+        patch(
+            "backend.webui_agent.vision_fallback.evict_from_selector_cache",
+        ) as mock_evict,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch(
+            "backend.webui_agent._playwright_subprocess._do_act",
+            return_value=(
+                {"ok": False, "failure_reason": "element_missing", "attempts": 0},
+                {},
+                "fresh",
+            ),
+        ),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=_base_intent_msg(),
+            ev=ev,
+        )
+
+    mock_evict.assert_not_called()
+    assert reply["failure_reason"] == "element_missing"
+
+
+def test_act_by_intent_no_infinite_retry_loop(tmp_path):
+    """Both first and retry _do_act return element_hidden → only ONE retry (resolve_via_vision called 2× max)."""
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    selector_a = "input[aria-label='Network']"
+    selector_b = "input[name='networkAddr']"
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    settings_mock = _make_settings_mock(tmp_path)
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    resolve_calls: list[int] = []
+
+    def fake_resolve(page_, intent_, ev_, settings_):
+        resolve_calls.append(1)
+        return selector_a if len(resolve_calls) == 1 else selector_b
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", side_effect=fake_resolve),
+        patch(
+            "backend.webui_agent.vision_fallback.evict_from_selector_cache",
+            return_value=True,
+        ),
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch(
+            "backend.webui_agent._playwright_subprocess._do_act",
+            return_value=(
+                {"ok": False, "failure_reason": "element_hidden", "attempts": 0},
+                {},
+                "fresh",
+            ),
+        ),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg=_base_intent_msg(),
+            ev=ev,
+        )
+
+    # resolve_via_vision called at most 2× (initial + one retry).
+    assert len(resolve_calls) <= 2
+    # No further eviction or retry loop — reply is the result of attempt 2.
+    assert reply["failure_reason"] == "element_hidden"
