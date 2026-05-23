@@ -1243,35 +1243,59 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
                     _proposal_vision_verdict["verdict"] == "REJECT"
                     and _proposal_vision_verdict.get("confidence", 0) >= 0.7
                 ):
-                    import time as _time  # noqa: PLC0415
-
+                    # Option H: REJECT-with-suggested_plan → promote to REVISE.
+                    # Vision saw the rendered form; its corrected plan is
+                    # authoritative. Only hard-fail when no usable suggestion.
                     from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
-                        _dump_vision_rejection,
+                        filter_executable_steps,
                     )
 
-                    # No action_id exists yet (propose_action hasn't run).
-                    # Use a time-based placeholder so the rejection artifact
-                    # is uniquely named and traceable to the intent.
-                    _reject_action_id = f"propose_{int(_time.time())}"
-                    log.error(
-                        "propose_webui_configure_plan_rejected_by_vision",
-                        intent=intent,
-                        reason=_proposal_vision_verdict["reason"],
-                        tier=_proposal_vision_verdict.get("tier"),
-                        familiarity_score=_proposal_vision_verdict.get("familiarity_score"),
+                    _prop_suggested = _proposal_vision_verdict.get("suggested_plan") or []
+                    _prop_filtered = (
+                        filter_executable_steps(_prop_suggested) if _prop_suggested else []
                     )
-                    _dump_vision_rejection(
-                        _reject_action_id, _proposal_vision_verdict, _settings_pvc
-                    )
-                    close_all_sessions()
-                    return {
-                        "error": "plan_rejected_by_vision",
-                        "message": _proposal_vision_verdict["reason"],
-                        "reason": _proposal_vision_verdict["reason"],
-                        "tier": _proposal_vision_verdict.get("tier"),
-                        "familiarity_score": _proposal_vision_verdict.get("familiarity_score"),
-                        "rejected_at": "proposal_time",
-                    }
+
+                    if _prop_filtered:
+                        log.info(
+                            "propose_webui_configure_plan_reject_promoted_to_revise",
+                            intent=intent,
+                            reason=_proposal_vision_verdict["reason"],
+                            risks=_proposal_vision_verdict.get("risks", []),
+                            original_steps=len(plan),
+                            suggested_steps=len(_prop_suggested),
+                            executable_steps=len(_prop_filtered),
+                        )
+                        plan = _prop_filtered
+                    else:
+                        import time as _time  # noqa: PLC0415
+
+                        from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                            _dump_vision_rejection,
+                        )
+
+                        # No action_id exists yet (propose_action hasn't run).
+                        # Use a time-based placeholder so the rejection artifact
+                        # is uniquely named and traceable to the intent.
+                        _reject_action_id = f"propose_{int(_time.time())}"
+                        log.error(
+                            "propose_webui_configure_plan_rejected_by_vision",
+                            intent=intent,
+                            reason=_proposal_vision_verdict["reason"],
+                            tier=_proposal_vision_verdict.get("tier"),
+                            familiarity_score=_proposal_vision_verdict.get("familiarity_score"),
+                        )
+                        _dump_vision_rejection(
+                            _reject_action_id, _proposal_vision_verdict, _settings_pvc
+                        )
+                        close_all_sessions()
+                        return {
+                            "error": "plan_rejected_by_vision",
+                            "message": _proposal_vision_verdict["reason"],
+                            "reason": _proposal_vision_verdict["reason"],
+                            "tier": _proposal_vision_verdict.get("tier"),
+                            "familiarity_score": _proposal_vision_verdict.get("familiarity_score"),
+                            "rejected_at": "proposal_time",
+                        }
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "propose_webui_configure_vision_check_failed",
@@ -1470,37 +1494,71 @@ def _webui_configure(**kwargs: Any) -> dict:
                     )
                     _plan_vision_counters[action_id] = _ev_proxy.plan_vision_count
 
+                    # Option H: if vision REJECTs but provides a usable
+                    # suggested_plan, treat it like a REVISE. Vision saw the
+                    # real form; its corrected plan is authoritative.
+                    # Only hard-fail when REJECT has no suggested_plan or
+                    # the suggested_plan has no executable steps after filter.
                     if (
                         _iter_verdict["verdict"] == "REJECT"
                         and _iter_verdict.get("confidence", 0) >= 0.7
                     ):
-                        mark_failed(action_id)
-                        close_all_sessions()
-                        log.error(
-                            "webui_configure_plan_rejected_by_vision",
-                            action_id=action_id,
-                            iteration=iteration,
-                            reason=_iter_verdict["reason"],
-                            tier=_iter_verdict.get("tier"),
-                            familiarity_score=_iter_verdict.get("familiarity_score"),
+                        from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                            filter_executable_steps,
                         )
-                        _dump_vision_rejection(action_id, _iter_verdict, _iter_settings)
-                        return {
-                            "error": "plan_rejected_by_vision",
-                            "reason": _iter_verdict["reason"],
-                            "tier": _iter_verdict.get("tier"),
-                            "familiarity_score": _iter_verdict.get("familiarity_score"),
-                        }
-                    if _iter_verdict["verdict"] == "REVISE" and _iter_verdict.get("suggested_plan"):
-                        log.info(
-                            "webui_configure_plan_revised_by_vision",
-                            action_id=action_id,
-                            iteration=iteration,
-                            original_steps=len(plan),
-                            suggested_steps=len(_iter_verdict["suggested_plan"]),
+
+                        _suggested = _iter_verdict.get("suggested_plan") or []
+                        _filtered = filter_executable_steps(_suggested) if _suggested else []
+                        if _filtered:
+                            log.info(
+                                "webui_configure_plan_reject_promoted_to_revise",
+                                action_id=action_id,
+                                iteration=iteration,
+                                reason=_iter_verdict["reason"],
+                                risks=_iter_verdict.get("risks", []),
+                                original_steps=len(plan),
+                                suggested_steps=len(_suggested),
+                                executable_steps=len(_filtered),
+                            )
+                            plan = _filtered
+                            # Falls through to existing _plan_hash stuck-detection.
+                        else:
+                            mark_failed(action_id)
+                            close_all_sessions()
+                            log.error(
+                                "webui_configure_plan_rejected_by_vision",
+                                action_id=action_id,
+                                iteration=iteration,
+                                reason=_iter_verdict["reason"],
+                                tier=_iter_verdict.get("tier"),
+                                familiarity_score=_iter_verdict.get("familiarity_score"),
+                            )
+                            _dump_vision_rejection(action_id, _iter_verdict, _iter_settings)
+                            return {
+                                "error": "plan_rejected_by_vision",
+                                "reason": _iter_verdict["reason"],
+                                "tier": _iter_verdict.get("tier"),
+                                "familiarity_score": _iter_verdict.get("familiarity_score"),
+                            }
+                    elif _iter_verdict["verdict"] == "REVISE" and _iter_verdict.get(
+                        "suggested_plan"
+                    ):
+                        from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                            filter_executable_steps,
                         )
-                        plan = _iter_verdict["suggested_plan"]
-                        # Falls through to existing _plan_hash stuck-detection below.
+
+                        _filtered = filter_executable_steps(_iter_verdict["suggested_plan"])
+                        if _filtered:
+                            log.info(
+                                "webui_configure_plan_revised_by_vision",
+                                action_id=action_id,
+                                iteration=iteration,
+                                original_steps=len(plan),
+                                suggested_steps=len(_iter_verdict["suggested_plan"]),
+                                executable_steps=len(_filtered),
+                            )
+                            plan = _filtered
+                            # Falls through to existing _plan_hash stuck-detection below.
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "plan_vision_check_iter_failed",

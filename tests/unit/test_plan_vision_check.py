@@ -979,3 +979,64 @@ def test_empty_haiku_response_falls_through_to_proceed(tmp_path: Path) -> None:
 
     assert verdict["verdict"] == "PROCEED"
     assert verdict["reason"] == "malformed_response"
+
+
+# ---------------------------------------------------------------------------
+# Option H: filter_executable_steps — drop non-executable actions from
+# vision's suggested_plan before tool_registry uses it.
+# Live smoke act_20260523_5aa2cf showed vision's suggested_plan includes
+# "note" steps with string-typed intent (commentary, not actions). The
+# executor would reject those, so we filter before use.
+# ---------------------------------------------------------------------------
+
+
+def test_filter_executable_steps_drops_note_action() -> None:
+    from backend.orchestration.plan_vision_check import filter_executable_steps
+
+    plan = [
+        {"action": "fill", "intent": {"role": "textbox", "name": "Pool"}, "value": "X"},
+        {"action": "note", "intent": "default_gateway", "value": "configure separately"},
+        {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None},
+    ]
+    out = filter_executable_steps(plan)
+    assert len(out) == 2
+    assert out[0]["intent"]["name"] == "Pool"
+    assert out[1]["intent"]["name"] == "Apply"
+
+
+def test_filter_executable_steps_drops_string_intent() -> None:
+    """Even if action is in the allowlist, intent must be a dict."""
+    from backend.orchestration.plan_vision_check import filter_executable_steps
+
+    plan = [
+        {"action": "fill", "intent": "a_string_not_a_dict", "value": "X"},
+        {"action": "fill", "intent": {"role": "textbox", "name": "Y"}, "value": "Y"},
+    ]
+    out = filter_executable_steps(plan)
+    assert len(out) == 1
+    assert out[0]["intent"]["name"] == "Y"
+
+
+def test_filter_executable_steps_keeps_all_when_all_valid() -> None:
+    from backend.orchestration.plan_vision_check import filter_executable_steps
+
+    plan = [
+        {"action": "click", "intent": {"role": "button", "name": "A"}, "value": None},
+        {"action": "fill", "intent": {"role": "textbox", "name": "B"}, "value": "x"},
+        {"action": "select", "intent": {"role": "combobox", "name": "C"}, "value": "y"},
+        {"action": "check", "intent": {"role": "checkbox", "name": "D"}, "value": None},
+        {"action": "hover", "intent": {"role": "link", "name": "E"}, "value": None},
+    ]
+    out = filter_executable_steps(plan)
+    assert len(out) == 5
+
+
+def test_filter_executable_steps_empty_on_all_invalid() -> None:
+    from backend.orchestration.plan_vision_check import filter_executable_steps
+
+    plan = [
+        {"action": "note", "intent": "x", "value": "y"},
+        {"action": "verify", "intent": {"role": "textbox", "name": "Z"}, "value": "..."},
+    ]
+    out = filter_executable_steps(plan)
+    assert out == []

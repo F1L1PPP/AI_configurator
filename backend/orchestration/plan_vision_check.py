@@ -491,6 +491,36 @@ def _dump_vision_rejection(action_id: str, verdict: VisionVerdict, settings: Any
 
 
 # ---------------------------------------------------------------------------
+# Suggested-plan filtering (chunk 14h follow-up to 14g)
+# ---------------------------------------------------------------------------
+
+# Actions the WebUI executor knows how to dispatch via _do_act. Vision's
+# suggested_plan may include narrative or commentary actions like "note" or
+# "verify" that the executor would reject — strip them before use.
+_EXECUTABLE_ACTIONS = frozenset({"click", "fill", "select", "check", "hover"})
+
+
+def filter_executable_steps(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop non-executable actions from a vision-suggested plan.
+
+    Vision occasionally adds "note" / "verify" / "configure_separately" steps
+    that explain something but aren't actions the executor can dispatch.
+    Keeps only steps whose ``action`` is in _EXECUTABLE_ACTIONS AND whose
+    ``intent`` is a dict (filters out string-typed intents from notes).
+    """
+    out: list[dict[str, Any]] = []
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        if step.get("action") not in _EXECUTABLE_ACTIONS:
+            continue
+        if not isinstance(step.get("intent"), dict):
+            continue
+        out.append(step)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Success cache updater
 # ---------------------------------------------------------------------------
 
