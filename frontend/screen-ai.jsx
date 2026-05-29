@@ -52,6 +52,7 @@ function synthesizeProposal(reply) {
   let summary = reply.final_text;
   let previewMeta = null;
   let eventCommands = null;
+  let eventVerify = null;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev.type === "awaiting_approval" && ev.data) {
@@ -63,13 +64,29 @@ function synthesizeProposal(reply) {
       }
       if (ev.data.preview_meta) previewMeta = ev.data.preview_meta;
       if (Array.isArray(ev.data.commands)) eventCommands = ev.data.commands;
+      // WebUI configure: plan lives in preview.plan (list of {action, intent: {role, name}, value}).
+      // Format each step as a human-readable string when no top-level commands array is present.
+      if (!eventCommands && p && Array.isArray(p.plan)) {
+        eventCommands = p.plan.map(function(step, idx) {
+          var action = step.action || "?";
+          var role = (step.intent && step.intent.role) || "";
+          var name = (step.intent && step.intent.name) || "";
+          var label = (role && name) ? (role + " \"" + name + "\"") : (role || name || "?");
+          var val = (step.value != null && step.value !== "") ? (" = " + step.value) : "";
+          return action + "  " + label + val;
+        });
+      }
+      // WebUI configure: verify string is preview.verify_text, not a top-level field.
+      if (p && typeof p === "object" && typeof p.verify_text === "string" && p.verify_text) {
+        eventVerify = p.verify_text;
+      }
       break;
     }
   }
 
   const commands = eventCommands || input.commands || (input.params && input.params.commands) || [];
   const risk = input.risk || "low";
-  const verify = input.verify_pattern || "";
+  const verify = eventVerify || input.verify_pattern || "";
   const affects = input.affects || "";
   const note = input.note || "";
   const existingEntity = previewMeta && previewMeta.existing_entity || null;
@@ -507,12 +524,15 @@ function ProposalBubble({ proposal }) {
             {proposal.transport === "cli" ? "IOS XE commands" : "WebUI steps"}
           </div>
           <pre className="codeblock">
-            {proposal.commands.map((c, i) => (
-              <div key={i} className="code-line">
-                <span className="code-num">{String(i + 1).padStart(2, "0")}</span>
-                <span>{c}</span>
-              </div>
-            ))}
+            {proposal.commands.length === 0
+              ? <div className="code-line"><span className="code-num">--</span><span>(no steps)</span></div>
+              : proposal.commands.map((c, i) => (
+                <div key={i} className="code-line">
+                  <span className="code-num">{String(i + 1).padStart(2, "0")}</span>
+                  <span>{c}</span>
+                </div>
+              ))
+            }
           </pre>
         </div>
         <div className="prop-block">

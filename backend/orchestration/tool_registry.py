@@ -1304,6 +1304,34 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
             error_type=type(exc).__name__,
         )
 
+    # Fix 5b — propose guard: reject any plan where a step has an empty or
+    # missing intent.role or intent.name. Identical rule to the sibling check
+    # in configure_planner.draft_plan; duplicated here so the gate is also
+    # enforced for vision-revised plans that bypass draft_plan's validation.
+    # Surfaces as the existing "can't map / invalid plan" error shape.
+    for _step_idx, _step in enumerate(plan):
+        _step_intent = _step.get("intent") or {}
+        _step_role = str(_step_intent.get("role") or "").strip()
+        _step_name = str(_step_intent.get("name") or "").strip()
+        if not _step_role or not _step_name:
+            close_all_sessions()
+            log.warning(
+                "propose_webui_configure_empty_intent_field",
+                intent=intent,
+                step_index=_step_idx,
+                step_role=_step_role,
+                step_name=_step_name,
+            )
+            return {
+                "error": "invalid_plan",
+                "message": (
+                    f"Plan step {_step_idx} has empty intent.role or intent.name — "
+                    "cannot map to UI element. Please refine the intent or "
+                    "describe the target field more precisely."
+                ),
+                "step_index": _step_idx,
+            }
+
     # 5. Conflict detection using equivalent CLI commands (soft-fail if either
     # side is empty — avoid false positives from an LLM that couldn't infer).
     existing = None
@@ -1357,6 +1385,9 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
 # batches count against this budget so failure-recovery stays bounded.
 # Bumping this means trusting the inner LLM to converge on more pages — keep
 # tight until real flows demand more.
+# Kept at 4: the no_progress guard (Fix 3) kills failure-spins at iteration 2,
+# so the hard cap exists only for LEGITIMATE multi-page flows (e.g. DHCP) that
+# progress each iteration and genuinely need 4 iterations.
 _WEBUI_CONFIGURE_MAX_ITER = 4
 
 
@@ -1423,6 +1454,23 @@ def _webui_configure(**kwargs: Any) -> dict:
     iteration = 0
     last_plan_hash: str | None = _plan_hash(plan)
 
+    # Fix 3 — convergence early-abort: track per-(selector_key, failure_reason)
+    # failure counts across ALL iterations. If the SAME step selector fails with
+    # the SAME failure_reason twice, the loop cannot make progress — abort early
+    # instead of spinning to the cap. Complements inner_plan_stuck (hash-based)
+    # which catches re-draft stalls; this catches repeated Playwright failures.
+    _step_failure_counts: dict[tuple[str, str], int] = {}
+
+    # Fix 7 — record how many steps were approved so we can detect re-drafts
+    # that exceed the approved scope and emit a visibility event.
+    _approved_step_count: int = len(plan)
+
+    # Fix 4 — gate per-iteration vision to fire at most once DURING execution
+    # (the propose-time check is the primary safety gate; one additional
+    # mid-execution check is sufficient to catch obvious stalls without burning
+    # the per-session budget on every re-draft iteration).
+    _iter_vision_fired: bool = False
+
     while True:
         iteration += 1
         log.info(
@@ -1435,10 +1483,11 @@ def _webui_configure(**kwargs: Any) -> dict:
         batch_had_failure = False
         last_failure: dict[str, Any] | None = None
 
-        # 14f-adaptive: vision pre-check on each iteration's plan (catches re-drafts).
+        # Fix 4: per-iteration adversarial vision runs at most once during
+        # execution (propose-time is the primary gate). Skip if already fired.
         # Skip iter 1 (already checked at proposal time). Use a function-local counter
         # dict keyed by action_id — no EvidenceCollector in scope here.
-        if iteration > 1:
+        if iteration > 1 and not _iter_vision_fired:
             try:
                 import base64 as _b64  # noqa: PLC0415
 
@@ -1475,90 +1524,97 @@ def _webui_configure(**kwargs: Any) -> dict:
                     # else: 0 or >1 session dirs — leave _iter_ss_b64 empty;
                     # the `if _iter_ss_b64` guard below skips vision safely.
 
-                    # Minimal ev-like object so the counter tracks correctly.
-                    class _EvProxy:
-                        plan_vision_count: int = _pvc_count
+                    # Only run vision when a real screenshot was captured.
+                    # If _iter_ss_b64 is empty (no session dir, no PNGs,
+                    # or OSError), skip — don't burn the single allowed
+                    # mid-execution slot on a no-op call.
+                    if _iter_ss_b64:
+                        # Minimal ev-like object so the counter tracks correctly.
+                        class _EvProxy:
+                            plan_vision_count: int = _pvc_count
 
-                    _ev_proxy = _EvProxy()
+                        _ev_proxy = _EvProxy()
 
-                    _iter_verdict = check_plan_via_vision(
-                        plan=plan,
-                        intent=intent,
-                        page_screenshot_b64=_iter_ss_b64,
-                        view=None,
-                        rag_chunks=None,
-                        running_config="",
-                        page_url=webui_path_for_vision,
-                        ev=_ev_proxy,
-                        settings=_iter_settings,
-                    )
-                    _plan_vision_counters[action_id] = _ev_proxy.plan_vision_count
-
-                    # Option H: if vision REJECTs but provides a usable
-                    # suggested_plan, treat it like a REVISE. Vision saw the
-                    # real form; its corrected plan is authoritative.
-                    # Only hard-fail when REJECT has no suggested_plan or
-                    # the suggested_plan has no executable steps after filter.
-                    if (
-                        _iter_verdict["verdict"] == "REJECT"
-                        and _iter_verdict.get("confidence", 0) >= 0.7
-                    ):
-                        from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
-                            filter_executable_steps,
+                        _iter_verdict = check_plan_via_vision(
+                            plan=plan,
+                            intent=intent,
+                            page_screenshot_b64=_iter_ss_b64,
+                            view=None,
+                            rag_chunks=None,
+                            running_config="",
+                            page_url=webui_path_for_vision,
+                            ev=_ev_proxy,
+                            settings=_iter_settings,
                         )
+                        _plan_vision_counters[action_id] = _ev_proxy.plan_vision_count
+                        # Mark slot consumed ONLY when check actually ran.
+                        _iter_vision_fired = True
 
-                        _suggested = _iter_verdict.get("suggested_plan") or []
-                        _filtered = filter_executable_steps(_suggested) if _suggested else []
-                        if _filtered:
-                            log.info(
-                                "webui_configure_plan_reject_promoted_to_revise",
-                                action_id=action_id,
-                                iteration=iteration,
-                                reason=_iter_verdict["reason"],
-                                risks=_iter_verdict.get("risks", []),
-                                original_steps=len(plan),
-                                suggested_steps=len(_suggested),
-                                executable_steps=len(_filtered),
+                        # Option H: if vision REJECTs but provides a usable
+                        # suggested_plan, treat it like a REVISE. Vision saw the
+                        # real form; its corrected plan is authoritative.
+                        # Only hard-fail when REJECT has no suggested_plan or
+                        # the suggested_plan has no executable steps after filter.
+                        if (
+                            _iter_verdict["verdict"] == "REJECT"
+                            and _iter_verdict.get("confidence", 0) >= 0.7
+                        ):
+                            from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                                filter_executable_steps,
                             )
-                            plan = _filtered
-                            # Falls through to existing _plan_hash stuck-detection.
-                        else:
-                            mark_failed(action_id)
-                            close_all_sessions()
-                            log.error(
-                                "webui_configure_plan_rejected_by_vision",
-                                action_id=action_id,
-                                iteration=iteration,
-                                reason=_iter_verdict["reason"],
-                                tier=_iter_verdict.get("tier"),
-                                familiarity_score=_iter_verdict.get("familiarity_score"),
-                            )
-                            _dump_vision_rejection(action_id, _iter_verdict, _iter_settings)
-                            return {
-                                "error": "plan_rejected_by_vision",
-                                "reason": _iter_verdict["reason"],
-                                "tier": _iter_verdict.get("tier"),
-                                "familiarity_score": _iter_verdict.get("familiarity_score"),
-                            }
-                    elif _iter_verdict["verdict"] == "REVISE" and _iter_verdict.get(
-                        "suggested_plan"
-                    ):
-                        from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
-                            filter_executable_steps,
-                        )
 
-                        _filtered = filter_executable_steps(_iter_verdict["suggested_plan"])
-                        if _filtered:
-                            log.info(
-                                "webui_configure_plan_revised_by_vision",
-                                action_id=action_id,
-                                iteration=iteration,
-                                original_steps=len(plan),
-                                suggested_steps=len(_iter_verdict["suggested_plan"]),
-                                executable_steps=len(_filtered),
+                            _suggested = _iter_verdict.get("suggested_plan") or []
+                            _filtered = filter_executable_steps(_suggested) if _suggested else []
+                            if _filtered:
+                                log.info(
+                                    "webui_configure_plan_reject_promoted_to_revise",
+                                    action_id=action_id,
+                                    iteration=iteration,
+                                    reason=_iter_verdict["reason"],
+                                    risks=_iter_verdict.get("risks", []),
+                                    original_steps=len(plan),
+                                    suggested_steps=len(_suggested),
+                                    executable_steps=len(_filtered),
+                                )
+                                plan = _filtered
+                                # Falls through to existing _plan_hash stuck-detection.
+                            else:
+                                mark_failed(action_id)
+                                close_all_sessions()
+                                log.error(
+                                    "webui_configure_plan_rejected_by_vision",
+                                    action_id=action_id,
+                                    iteration=iteration,
+                                    reason=_iter_verdict["reason"],
+                                    tier=_iter_verdict.get("tier"),
+                                    familiarity_score=_iter_verdict.get("familiarity_score"),
+                                )
+                                _dump_vision_rejection(action_id, _iter_verdict, _iter_settings)
+                                return {
+                                    "error": "plan_rejected_by_vision",
+                                    "reason": _iter_verdict["reason"],
+                                    "tier": _iter_verdict.get("tier"),
+                                    "familiarity_score": _iter_verdict.get("familiarity_score"),
+                                }
+                        elif _iter_verdict["verdict"] == "REVISE" and _iter_verdict.get(
+                            "suggested_plan"
+                        ):
+                            from backend.orchestration.plan_vision_check import (  # noqa: PLC0415
+                                filter_executable_steps,
                             )
-                            plan = _filtered
-                            # Falls through to existing _plan_hash stuck-detection below.
+
+                            _filtered = filter_executable_steps(_iter_verdict["suggested_plan"])
+                            if _filtered:
+                                log.info(
+                                    "webui_configure_plan_revised_by_vision",
+                                    action_id=action_id,
+                                    iteration=iteration,
+                                    original_steps=len(plan),
+                                    suggested_steps=len(_iter_verdict["suggested_plan"]),
+                                    executable_steps=len(_filtered),
+                                )
+                                plan = _filtered
+                                # Falls through to existing _plan_hash stuck-detection below.
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "plan_vision_check_iter_failed",
@@ -1605,6 +1661,53 @@ def _webui_configure(**kwargs: Any) -> dict:
                     step=step,
                     failure=step_result,
                 )
+
+                # Fix 3 — convergence early-abort: build a stable key from
+                # the step's selector identity (role+name) and the failure
+                # reason. If the same key has failed before, the loop cannot
+                # make progress — abort immediately with `no_progress`.
+                # This complements inner_plan_stuck (hash-based re-draft
+                # detection) by catching repeated Playwright element failures
+                # even when the inner LLM re-words the plan slightly.
+                _step_fail_role = step.get("intent", {}).get("role", "")
+                _step_fail_name = step.get("intent", {}).get("name", "")
+                _step_fail_reason = step_result.get("error") or step_result.get(
+                    "failure_reason", ""
+                )
+                _failure_key: tuple[str, str] = (
+                    f"{_step_fail_role}|{_step_fail_name}",
+                    str(_step_fail_reason),
+                )
+                _step_failure_counts[_failure_key] = (
+                    _step_failure_counts.get(_failure_key, 0) + 1
+                )
+                if _step_failure_counts[_failure_key] >= 2:
+                    mark_failed(action_id)
+                    close_all_sessions()
+                    log.error(
+                        "webui_configure_no_progress",
+                        action_id=action_id,
+                        iteration=iteration,
+                        step_role=_step_fail_role,
+                        step_name=_step_fail_name,
+                        failure_reason=_step_fail_reason,
+                        failure_count=_step_failure_counts[_failure_key],
+                    )
+                    return {
+                        "error": "no_progress",
+                        "message": (
+                            f"Step '{_step_fail_name}' (role={_step_fail_role!r}) "
+                            f"failed with '{_step_fail_reason}' on "
+                            f"{_step_failure_counts[_failure_key]} consecutive iterations — "
+                            "aborting to avoid spinning to the cap."
+                        ),
+                        "step": step,
+                        "failure_reason": _step_fail_reason,
+                        "failure_count": _step_failure_counts[_failure_key],
+                        "iteration": iteration,
+                        "completed_steps": executed_steps,
+                    }
+
                 # Stop the batch — feed the failure back to the inner LLM
                 # for the next iteration instead of running more steps on
                 # what may now be an unexpected page state.
@@ -1788,6 +1891,19 @@ def _webui_configure(**kwargs: Any) -> dict:
                 "completed_steps": executed_steps,
             }
         last_plan_hash = next_hash
+
+        # Fix 7 — approve-vs-execute visibility: emit a structured event when
+        # the re-drafted plan grows beyond the operator-approved step count.
+        # Lightweight — does NOT block execution; full bounding is a later phase.
+        if len(next_plan) > _approved_step_count:
+            log.warning(
+                "webui_configure_replan_beyond_approved",
+                action_id=action_id,
+                iteration=iteration,
+                approved_step_count=_approved_step_count,
+                replanned_step_count=len(next_plan),
+                delta=len(next_plan) - _approved_step_count,
+            )
 
         log.info(
             "webui_configure_iteration_complete",

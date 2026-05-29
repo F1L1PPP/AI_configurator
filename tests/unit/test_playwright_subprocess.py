@@ -1326,3 +1326,73 @@ def test_act_by_intent_uses_eid_first_when_describe_has_match(tmp_path):
     assert do_act_calls[0]["msg"]["eid"] == "e_020"
     assert reply["ok"] is True
     assert reply["chosen_eid"] == "e_020"
+
+
+# ---------------------------------------------------------------------------
+# Per-action timeout constants — fail-fast budget for form actions
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_constants_click_larger_than_form():
+    """Click timeout must be >= form timeout.
+
+    Click fires an XHR that may have already reached the router before
+    Playwright reports a timeout — we never retry it and a slightly
+    larger window reduces false positives.  Form actions (fill/select/
+    check/hover) use a tighter budget so missing elements fail fast.
+    """
+    assert _sub_mod._ACT_TIMEOUT_CLICK_MS >= _sub_mod._ACT_TIMEOUT_FORM_MS
+    # Sanity: neither value is absurdly large (>10 s would reintroduce the bug).
+    assert _sub_mod._ACT_TIMEOUT_CLICK_MS <= 10_000
+    assert _sub_mod._ACT_TIMEOUT_FORM_MS <= 10_000
+    # And neither is suspiciously small (<1 s would cause healthy-page false positives).
+    assert _sub_mod._ACT_TIMEOUT_CLICK_MS >= 1_000
+    assert _sub_mod._ACT_TIMEOUT_FORM_MS >= 1_000
+
+
+def test_invoke_action_click_uses_click_timeout():
+    """_invoke_action must pass _ACT_TIMEOUT_CLICK_MS to locator.click."""
+    loc = MagicMock()
+    _sub_mod._invoke_action(loc, "click", None)
+    loc.click.assert_called_once_with(timeout=_sub_mod._ACT_TIMEOUT_CLICK_MS)
+
+
+def test_invoke_action_fill_uses_form_timeout():
+    """_invoke_action must pass _ACT_TIMEOUT_FORM_MS to locator.fill."""
+    loc = MagicMock()
+    _sub_mod._invoke_action(loc, "fill", "192.168.1.1")
+    loc.fill.assert_called_once_with("192.168.1.1", timeout=_sub_mod._ACT_TIMEOUT_FORM_MS)
+
+
+def test_invoke_action_select_uses_form_timeout():
+    """_invoke_action must pass _ACT_TIMEOUT_FORM_MS to locator.select_option."""
+    loc = MagicMock()
+    _sub_mod._invoke_action(loc, "select", "enabled")
+    loc.select_option.assert_called_once_with("enabled", timeout=_sub_mod._ACT_TIMEOUT_FORM_MS)
+
+
+def test_invoke_action_check_uses_form_timeout():
+    """_invoke_action must pass _ACT_TIMEOUT_FORM_MS to locator.check."""
+    loc = MagicMock()
+    _sub_mod._invoke_action(loc, "check", None)
+    loc.check.assert_called_once_with(timeout=_sub_mod._ACT_TIMEOUT_FORM_MS)
+
+
+def test_invoke_action_hover_uses_form_timeout():
+    """_invoke_action must pass _ACT_TIMEOUT_FORM_MS to locator.hover."""
+    loc = MagicMock()
+    _sub_mod._invoke_action(loc, "hover", None)
+    loc.hover.assert_called_once_with(timeout=_sub_mod._ACT_TIMEOUT_FORM_MS)
+
+
+def test_fill_timeout_is_strictly_bounded():
+    """Regression guard: _ACT_TIMEOUT_FORM_MS must be <= 4000 ms.
+
+    The DHCP smoke burned 50-67 s on a single missing-element fill because
+    the prior form timeout was too long.  This constant is the primary
+    control — tighten this assertion if the timeout is further reduced.
+    """
+    assert _sub_mod._ACT_TIMEOUT_FORM_MS <= 4_000, (
+        f"_ACT_TIMEOUT_FORM_MS={_sub_mod._ACT_TIMEOUT_FORM_MS} exceeds 4000 ms "
+        "— re-check DHCP smoke regression risk"
+    )

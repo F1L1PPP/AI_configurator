@@ -59,6 +59,51 @@ _sessions_lock = threading.Lock()
 # tests/unit/test_generic_driver.py.
 _pre_snapshotted: set[str] = set()
 
+# Vision-selector failure registry.
+#
+# Vision eids (format: "vision_<hex>") are synthetic keys emitted by
+# describe_page when Playwright's accessibility-tree lookup falls back to
+# a coordinate-based / screenshot-derived locator strategy. They are
+# session-scoped and may not survive DOM mutations — a form re-render,
+# Angular digest, or page navigation can silently invalidate them.
+#
+# When a webui_act / webui_act_by_intent call returns
+# failure_reason="element_missing" for a vision eid, that eid is added to
+# this set for the lifetime of the session.  Any subsequent call that
+# re-presents the same (session_id, eid) pair is immediately refused with
+# failure_reason="element_missing" — no round-trip to the child, no
+# 4–5 s Playwright timeout, no silent re-resolve.  Using the same reason
+# keeps the convergence guard in tool_registry.py tripping on the same
+# signal in 2 iterations (it keys on failure_reason).
+#
+# Shape: { session_id: {vision_eid, ...} }
+# Cleared per-test by the autouse fixture in tests/unit/test_generic_driver.py.
+_vision_eid_failures: dict[str, set[str]] = {}
+_vision_eid_failures_lock = threading.Lock()
+
+
+def _is_vision_eid(eid: str) -> bool:
+    """Return True if ``eid`` was produced by a vision/fallback strategy.
+
+    describe_page emits vision eids with the prefix ``vision_`` when it
+    cannot find a stable ARIA-rooted locator.  These are the only eids
+    subject to eviction — stable numeric eids (``e_NNN``) from the
+    accessibility tree survive DOM mutations and are not evicted.
+    """
+    return eid.startswith("vision_")
+
+
+def _record_vision_failure(session_id: str, eid: str) -> None:
+    """Persist a vision-eid element_missing failure for ``session_id``."""
+    with _vision_eid_failures_lock:
+        _vision_eid_failures.setdefault(session_id, set()).add(eid)
+
+
+def _is_vision_eid_evicted(session_id: str, eid: str) -> bool:
+    """Return True if ``eid`` was previously evicted for ``session_id``."""
+    with _vision_eid_failures_lock:
+        return eid in _vision_eid_failures.get(session_id, set())
+
 
 def webui_open(
     path: str,
@@ -275,6 +320,27 @@ def webui_act(
             "session_id": session_id,
         }
 
+    # Vision-eid eviction guard — refuse immediately if this eid was
+    # previously evicted for this session (element_missing on a vision
+    # selector). No child round-trip, no Playwright timeout. Return the
+    # same failure_reason="element_missing" so the convergence guard in
+    # tool_registry.py trips on the same signal in 2 iterations.
+    if _is_vision_eid(eid) and _is_vision_eid_evicted(session_id, eid):
+        log.info(
+            "webui_act_vision_eid_evicted",
+            session_id=session_id,
+            action_id=action_id,
+            eid=eid,
+        )
+        return {
+            "ok": False,
+            "failure_reason": "element_missing",
+            "chosen_eid": eid,
+            "view": None,
+            "attempts": 0,
+            "session_id": session_id,
+        }
+
     with _sessions_lock:
         sess = _sessions.get(session_id)
     if sess is None or not sess.is_alive():
@@ -311,17 +377,28 @@ def webui_act(
         }
 
     if not reply.get("ok"):
+        failure_reason = reply.get("failure_reason")
+        # When a vision eid fails element_missing, evict it immediately so
+        # no future call to webui_act wastes Playwright timeout budget on it.
+        if failure_reason == "element_missing" and _is_vision_eid(eid):
+            _record_vision_failure(session_id, eid)
+            log.info(
+                "webui_act_vision_eid_recorded",
+                session_id=session_id,
+                action_id=action_id,
+                eid=eid,
+            )
         # Soft failure — surface the failure_reason to the caller without
         # transitioning the action_id. The planner re-describes and retries.
         log.info(
             "webui_act_soft_failure",
             session_id=session_id,
             action_id=action_id,
-            failure_reason=reply.get("failure_reason"),
+            failure_reason=failure_reason,
         )
         return {
             "ok": False,
-            "failure_reason": reply.get("failure_reason"),
+            "failure_reason": failure_reason,
             "view": reply.get("view"),
             "attempts": reply.get("attempts", 0),
             "session_id": session_id,
@@ -405,17 +482,34 @@ def webui_act_by_intent(
         }
 
     if not reply.get("ok"):
+        failure_reason = reply.get("failure_reason")
+        chosen_eid = reply.get("chosen_eid")
+        # When the child resolved the intent to a vision eid and that eid
+        # failed element_missing, evict it so future direct webui_act calls
+        # with the same eid are refused immediately.
+        if (
+            failure_reason == "element_missing"
+            and isinstance(chosen_eid, str)
+            and _is_vision_eid(chosen_eid)
+        ):
+            _record_vision_failure(session_id, chosen_eid)
+            log.info(
+                "webui_act_by_intent_vision_eid_recorded",
+                session_id=session_id,
+                action_id=action_id,
+                chosen_eid=chosen_eid,
+            )
         log.info(
             "webui_act_by_intent_soft_failure",
             session_id=session_id,
             action_id=action_id,
-            failure_reason=reply.get("failure_reason"),
-            chosen_eid=reply.get("chosen_eid"),
+            failure_reason=failure_reason,
+            chosen_eid=chosen_eid,
         )
         return {
             "ok": False,
-            "failure_reason": reply.get("failure_reason"),
-            "chosen_eid": reply.get("chosen_eid"),
+            "failure_reason": failure_reason,
+            "chosen_eid": chosen_eid,
             "view": reply.get("view"),
             "attempts": reply.get("attempts", 0),
             "session_id": session_id,

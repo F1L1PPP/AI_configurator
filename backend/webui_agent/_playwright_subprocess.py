@@ -288,9 +288,22 @@ _SENSITIVE_DENY_LIST = frozenset(
     }
 )
 
-# Per-action Playwright timeout (ms). Five seconds is plenty for a click /
-# fill against a healthy WebUI; anything longer is a real problem.
-_ACT_TIMEOUT_MS = 5000
+# Per-action Playwright timeout (ms).
+#
+# Click keeps a 5 s budget: it fires an XHR that may have already landed
+# at the router before Playwright sees the timeout — we must not retry it,
+# so a slightly longer window reduces false positives.
+#
+# Fill / select / check / hover use a 4 s budget: these are read-modify
+# operations on form fields. An absent or intercepted field should fail
+# fast so the planner sees the error quickly and the convergence guard
+# (tool_registry.py) can abort rather than burning 50+ s per iteration.
+_ACT_TIMEOUT_CLICK_MS = 5000
+_ACT_TIMEOUT_FORM_MS = 4000
+
+# Legacy alias — external code that imports this constant keeps working.
+# Internally _invoke_action now selects the right budget per action.
+_ACT_TIMEOUT_MS = _ACT_TIMEOUT_CLICK_MS
 
 # Settle budget after a successful action — Playwright tries networkidle first
 # (covers Cisco's chatty Angular XHR bursts), and if the page never reaches
@@ -372,17 +385,25 @@ def _invoke_action(locator: Any, action: str, value: str | None) -> None:
     Raises whatever Playwright raises (TimeoutError on intercepted / hidden /
     detached elements). Caller distinguishes via `isinstance` against
     `playwright.sync_api.TimeoutError`.
+
+    Click uses ``_ACT_TIMEOUT_CLICK_MS`` (5 s): it fires an XHR that may
+    have already reached the router before Playwright reports a timeout, so
+    a slightly longer budget reduces false positives on congested WebUIs.
+
+    All form actions (fill / select / check / hover) use ``_ACT_TIMEOUT_FORM_MS``
+    (4 s): absent or intercepted form fields should fail fast so the planner
+    convergence guard can abort rather than burning >50 s per iteration.
     """
     if action == "click":
-        locator.click(timeout=_ACT_TIMEOUT_MS)
+        locator.click(timeout=_ACT_TIMEOUT_CLICK_MS)
     elif action == "fill":
-        locator.fill(str(value or ""), timeout=_ACT_TIMEOUT_MS)
+        locator.fill(str(value or ""), timeout=_ACT_TIMEOUT_FORM_MS)
     elif action == "select":
-        locator.select_option(str(value or ""), timeout=_ACT_TIMEOUT_MS)
+        locator.select_option(str(value or ""), timeout=_ACT_TIMEOUT_FORM_MS)
     elif action == "check":
-        locator.check(timeout=_ACT_TIMEOUT_MS)
+        locator.check(timeout=_ACT_TIMEOUT_FORM_MS)
     elif action == "hover":
-        locator.hover(timeout=_ACT_TIMEOUT_MS)
+        locator.hover(timeout=_ACT_TIMEOUT_FORM_MS)
     else:  # pragma: no cover — caller pre-validates against _VALID_ACTIONS
         raise ValueError(f"unknown action: {action!r}")
 

@@ -320,3 +320,279 @@ def test_inner_prompt_documents_cidr_splitting():
     # Negative example warns against putting CIDR in Prefix Mask
     assert "WRONG" in _INNER_SYSTEM_PROMPT
     assert "Prefix Mask" in _INNER_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — forced tool-use JSON path (no prose fallback on normal path)
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_use_client(plan_input: dict) -> MagicMock:
+    """Build a mock client whose messages.create returns a tool_use block
+    for the submit_plan tool, simulating the forced-tool-choice path."""
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    tool_block = MagicMock()
+    tool_block.type = "tool_use"
+    tool_block.name = "submit_plan"
+    tool_block.input = plan_input
+    mock_response.content = [tool_block]
+    mock_client.messages.create.return_value = mock_response
+    return mock_client
+
+
+def test_draft_plan_uses_tool_use_on_normal_path():
+    """Normal path: model returns a tool_use block → result parsed from
+    block.input, no prose extraction. draft_plan_recovered_from_prose must
+    NOT be logged."""
+    payload = {
+        "plan": [
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": "Pool Name"},
+                "value": "DHCP_POOL",
+            }
+        ],
+        "verify_text": "DHCP_POOL",
+        "risk": "Creates DHCP pool.",
+        "equivalent_cli_commands": ["ip dhcp pool DHCP_POOL"],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(
+        intent="create DHCP pool named DHCP_POOL",
+        rag_chunks=[],
+        view={"elements": [{"role": "textbox", "name": "Pool Name"}]},
+        client=client,
+    )
+
+    assert result["plan"][0]["intent"]["name"] == "Pool Name"
+    assert result["verify_text"] == "DHCP_POOL"
+    assert result["equivalent_cli_commands"] == ["ip dhcp pool DHCP_POOL"]
+
+
+def test_draft_plan_tool_use_call_includes_tools_and_tool_choice():
+    """The Anthropic call must include tools= and tool_choice= forcing
+    submit_plan — confirms the API call shape, not just the output."""
+    payload = {
+        "plan": [],
+        "verify_text": None,
+        "risk": "noop",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_tool_use_client(payload)
+
+    draft_plan(intent="test", rag_chunks=[], view={}, client=client)
+
+    call_kwargs = client.messages.create.call_args.kwargs
+    assert "tools" in call_kwargs, "tools= must be passed to messages.create"
+    assert "tool_choice" in call_kwargs, "tool_choice= must be passed to messages.create"
+    assert call_kwargs["tool_choice"]["type"] == "tool"
+    assert call_kwargs["tool_choice"]["name"] == "submit_plan"
+    # The tool list must contain exactly the submit_plan definition
+    tool_names = [t["name"] for t in call_kwargs["tools"]]
+    assert "submit_plan" in tool_names
+
+
+def test_draft_plan_prose_fallback_still_parses():
+    """Fallback path: model returns a text block instead of tool_use
+    (should not happen with forced tool_choice, but the safety net must
+    still extract JSON from prose and return a valid dict.)"""
+    payload = {
+        "plan": [
+            {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None}
+        ],
+        "verify_text": "Applied",
+        "risk": "Low.",
+        "equivalent_cli_commands": [],
+    }
+    prose = f"Here is the plan:\n{json.dumps(payload)}\nDone."
+    # Use text-only mock (no tool_use block)
+    client = _make_mock_client(prose)
+
+    result = draft_plan(intent="apply config", rag_chunks=[], view={}, client=client)
+
+    assert len(result["plan"]) == 1
+    assert result["plan"][0]["action"] == "click"
+    assert result["verify_text"] == "Applied"
+
+
+# ---------------------------------------------------------------------------
+# Fix 5a — empty/invalid step filtering
+# ---------------------------------------------------------------------------
+
+
+def test_draft_plan_drops_step_with_empty_name():
+    """A step where intent.name is an empty string must be silently dropped."""
+    payload = {
+        "plan": [
+            # valid step
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": "Pool Name"},
+                "value": "POOL1",
+            },
+            # invalid step — name is empty string
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": ""},
+                "value": "bad",
+            },
+        ],
+        "verify_text": "POOL1",
+        "risk": "Creates pool.",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(intent="add pool", rag_chunks=[], view={}, client=client)
+
+    assert len(result["plan"]) == 1
+    assert result["plan"][0]["intent"]["name"] == "Pool Name"
+
+
+def test_draft_plan_drops_step_with_missing_role():
+    """A step where intent.role is missing (None / absent) must be dropped."""
+    payload = {
+        "plan": [
+            # invalid step — role is None
+            {
+                "action": "click",
+                "intent": {"role": None, "name": "Add"},
+                "value": None,
+            },
+            # valid step
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": "Network Address"},
+                "value": "10.0.0.0",
+            },
+        ],
+        "verify_text": None,
+        "risk": "Fills network.",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(intent="fill network", rag_chunks=[], view={}, client=client)
+
+    assert len(result["plan"]) == 1
+    assert result["plan"][0]["intent"]["role"] == "textbox"
+
+
+def test_draft_plan_drops_step_with_whitespace_only_name():
+    """A step where intent.name is purely whitespace must be treated as
+    invalid and dropped (the failing DHCP run had textbox||... steps where
+    name was effectively blank after separator stripping)."""
+    payload = {
+        "plan": [
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": "   "},
+                "value": "192.168.1.0",
+            }
+        ],
+        "verify_text": None,
+        "risk": "No valid steps.",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(intent="fill subnet", rag_chunks=[], view={}, client=client)
+
+    # All steps invalid → can't-map signal
+    assert result["plan"] == []
+    assert result["verify_text"] is None
+    assert "Cannot map" in result["risk"]
+
+
+def test_draft_plan_all_invalid_steps_returns_cant_map_signal():
+    """If every step is invalid (empty role/name), draft_plan must return the
+    standard can't-map signal: plan=[], verify_text=None, and a risk note
+    explaining the validation failure. Callers already handle this shape."""
+    payload = {
+        "plan": [
+            {"action": "fill", "intent": {"role": "", "name": ""}, "value": "x"},
+            {"action": "click", "intent": {"role": "", "name": "  "}, "value": None},
+        ],
+        "verify_text": "should be ignored",
+        "risk": "should be replaced",
+        "equivalent_cli_commands": ["some cmd"],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(intent="do something", rag_chunks=[], view={}, client=client)
+
+    assert result["plan"] == []
+    assert result["verify_text"] is None
+    assert "Cannot map" in result["risk"]
+    # equivalent_cli_commands must be empty when we return the cant-map signal
+    assert result["equivalent_cli_commands"] == []
+
+
+# ---------------------------------------------------------------------------
+# Nit #6 — truncation guard (stop_reason == "max_tokens")
+# ---------------------------------------------------------------------------
+
+
+def _make_truncated_client() -> MagicMock:
+    """Build a mock client whose response simulates a max_tokens truncation."""
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.stop_reason = "max_tokens"
+    # Content is intentionally incomplete — the guard should fire before any
+    # attempt to inspect the blocks.
+    mock_response.content = []
+    mock_client.messages.create.return_value = mock_response
+    return mock_client
+
+
+def test_draft_plan_raises_on_max_tokens_truncation():
+    """If stop_reason is 'max_tokens' the function must raise RuntimeError
+    rather than trying to parse a potentially broken partial block.input."""
+    client = _make_truncated_client()
+
+    with pytest.raises(RuntimeError, match="max_tokens"):
+        draft_plan(
+            intent="configure many routes",
+            rag_chunks=[],
+            view={},
+            client=client,
+        )
+
+
+def test_draft_plan_normal_stop_reason_does_not_raise():
+    """stop_reason == 'tool_use' (normal forced-tool path) must not trigger
+    the truncation guard."""
+    payload = {
+        "plan": [],
+        "verify_text": None,
+        "risk": "noop",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_tool_use_client(payload)
+    # _make_tool_use_client returns a MagicMock; stop_reason is MagicMock()
+    # which is truthy but != "max_tokens" — guard must not fire.
+    client.messages.create.return_value.stop_reason = "tool_use"
+
+    result = draft_plan(intent="test", rag_chunks=[], view={}, client=client)
+    assert isinstance(result, dict)
+
+
+def test_draft_plan_empty_plan_from_model_passes_through():
+    """An intentionally empty plan (model says 'can't map') must pass through
+    unchanged — the filter must not interfere with legitimately empty plans
+    returned by the model when no elements match."""
+    payload = {
+        "plan": [],
+        "verify_text": None,
+        "risk": "Page mismatch — no form fields visible.",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(intent="add route", rag_chunks=[], view={}, client=client)
+
+    # Empty plan from model must be preserved as-is (not replaced by cant-map)
+    assert result["plan"] == []
+    assert result["risk"] == "Page mismatch — no form fields visible."

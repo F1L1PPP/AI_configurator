@@ -289,31 +289,92 @@ def draft_plan(
         steps_blob = json.dumps(previous_steps, indent=2)
         user_msg += f"\n\nPrevious steps executed:\n{steps_blob}"
 
+    # --- Fix 1: Force structured JSON via tool use ---
+    # Defining submit_plan as a tool and forcing its selection guarantees that
+    # Haiku returns the plan as a parsed tool_use input block instead of prose.
+    # This eliminates the need for brace-extraction on the normal path and
+    # prevents the draft_plan_recovered_from_prose warning from firing every
+    # time the model chooses to narrate before/around the JSON.
+    _SUBMIT_PLAN_TOOL: list[dict[str, Any]] = [
+        {
+            "name": "submit_plan",
+            "description": (
+                "Submit the finalized WebUI step plan. Call this ONCE with the complete plan object."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string"},
+                                "intent": {
+                                    "type": "object",
+                                    "properties": {
+                                        "role": {"type": "string"},
+                                        "name": {"type": "string"},
+                                    },
+                                    "required": ["role", "name"],
+                                },
+                                "value": {},
+                            },
+                            "required": ["action", "intent", "value"],
+                        },
+                    },
+                    "verify_text": {},
+                    "risk": {"type": "string"},
+                    "equivalent_cli_commands": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["plan", "risk", "equivalent_cli_commands"],
+            },
+        }
+    ]
+
     response = client.messages.create(
         model=_PLANNER_MODEL,
         max_tokens=_PLANNER_MAX_TOKENS,
         system=_INNER_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
+        tools=_SUBMIT_PLAN_TOOL,
+        tool_choice={"type": "tool", "name": "submit_plan"},
     )
 
-    # Concatenate text blocks (getattr avoids union-attr mypy error on the
-    # Anthropic SDK's heterogeneous content union type).
-    text = "\n".join(
-        getattr(b, "text", "") for b in response.content if getattr(b, "type", None) == "text"
-    ).strip()
+    # Guard: forced tool-use plans can truncate silently when stop_reason is
+    # "max_tokens", producing an incomplete (and unparse-able) block.input
+    # dict. Raise immediately rather than forwarding a broken partial result.
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "draft_plan truncated at max_tokens — reduce plan complexity or raise _PLANNER_MAX_TOKENS"
+        )
 
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError as exc:
-        # Inner LLM narrated instead of returning JSON. Try to extract the
-        # first {...} block from the prose. Haiku 4.5 has a tendency to
-        # explain its reasoning before/around the JSON when the case is
-        # ambiguous; the brace-balanced extractor recovers from that. If
-        # there's no JSON object in the prose at all, fall through to raise.
+    # Primary path: read the tool_use block input directly (already a dict,
+    # no JSON parsing needed). This is the path that fires when the model
+    # obeys the forced tool_choice — i.e., the normal production path.
+    result: dict[str, Any] | None = None
+    for block in response.content:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_plan":
+            result = block.input  # type: ignore[assignment]
+            break
+
+    if result is None:
+        # Fallback: model produced text instead of a tool_use call (should
+        # not happen with forced tool_choice, but kept as a safety net so the
+        # function never silently swallows output). Attempt brace-extraction
+        # from any text blocks, then raise if nothing parseable is found.
+        text = "\n".join(
+            getattr(b, "text", "")
+            for b in response.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
         extracted = _extract_first_json_object(text)
         if extracted is None:
-            log.error("draft_plan_json_parse_failed", text=text[:500], error=str(exc))
-            raise RuntimeError(f"inner LLM returned non-JSON: {text[:200]}") from exc
+            log.error("draft_plan_json_parse_failed", text=text[:500])
+            raise RuntimeError(f"inner LLM returned non-JSON: {text[:200]}")
         try:
             result = json.loads(extracted)
             log.warning(
@@ -329,15 +390,55 @@ def draft_plan(
             )
             raise RuntimeError(f"inner LLM returned non-JSON: {text[:200]}") from exc2
 
-    # Minimal validation
+    # Minimal structural validation (applies to both paths)
     if not isinstance(result, dict) or "plan" not in result:
-        raise RuntimeError(f"inner LLM output missing 'plan': {text[:200]}")
+        raise RuntimeError(f"inner LLM output missing 'plan': {str(result)[:200]}")
     if not isinstance(result["plan"], list):
         raise RuntimeError(f"inner LLM 'plan' not a list: {type(result['plan'])}")
 
+    # --- Fix 5a: Drop steps with empty/missing intent.role or intent.name ---
+    # An invalid step is one where role or name is absent or purely whitespace.
+    # Keeping such steps causes WebUI actions against non-existent elements
+    # (e.g. textbox||... observed in the failing DHCP run). The sibling
+    # propose guard enforces the same rule; keep the definition identical.
+    raw_plan: list[dict[str, Any]] = result["plan"]
+    valid_steps: list[dict[str, Any]] = []
+    for step in raw_plan:
+        step_intent = step.get("intent") or {}
+        role = str(step_intent.get("role") or "").strip()
+        name = str(step_intent.get("name") or "").strip()
+        if role and name:
+            valid_steps.append(step)
+        else:
+            log.warning(
+                "draft_plan_dropped_invalid_step",
+                action=step.get("action"),
+                intent=step_intent,
+            )
+
+    # If filtering removed steps that were originally present, and the result
+    # is now empty, surface the standard "can't map" signal rather than
+    # returning a silently-empty plan (which callers interpret as "model says
+    # no elements visible" — correct for model decisions, wrong for validation
+    # failures).
+    if raw_plan and not valid_steps:
+        log.error(
+            "draft_plan_all_steps_invalid",
+            dropped=len(raw_plan),
+        )
+        return {
+            "plan": [],
+            "verify_text": None,
+            "risk": (
+                "Inner planner produced only invalid steps (empty role or name). "
+                "Cannot map the intent to the current view."
+            ),
+            "equivalent_cli_commands": [],
+        }
+
     raw_equiv = result.get("equivalent_cli_commands")
     return {
-        "plan": result["plan"],
+        "plan": valid_steps,
         "verify_text": result.get("verify_text"),
         "risk": result.get("risk", "Inner LLM did not provide risk note."),
         "equivalent_cli_commands": (raw_equiv if isinstance(raw_equiv, list) else []),

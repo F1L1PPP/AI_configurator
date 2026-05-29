@@ -26,14 +26,17 @@ pytestmark = pytest.mark.webui
 def _clean_sessions():
     """Reset module-level state before and after every test.
 
-    Both `_sessions` and `_pre_snapshotted` are guarded so test order
-    (including pytest --random-order) cannot leak state across tests.
+    ``_sessions``, ``_pre_snapshotted``, and ``_vision_eid_failures`` are
+    all cleared so test order (including pytest --random-order) cannot
+    leak state across tests.
     """
     generic_driver._sessions.clear()
     generic_driver._pre_snapshotted.clear()
+    generic_driver._vision_eid_failures.clear()
     yield
     generic_driver._sessions.clear()
     generic_driver._pre_snapshotted.clear()
+    generic_driver._vision_eid_failures.clear()
 
 
 def _make_fake_session(open_reply: dict | None = None) -> MagicMock:
@@ -695,3 +698,168 @@ def test_close_all_sessions_closes_every_cached_session():
     sess_a.close.assert_called_once()
     sess_b.close.assert_called_once()
     assert generic_driver._sessions == {}
+
+
+# ---------------------------------------------------------------------------
+# Vision-eid eviction — no-retry-on-vision-element_missing behavior
+# ---------------------------------------------------------------------------
+
+
+def test_webui_act_evicts_vision_eid_on_element_missing(_act_patches):
+    """When a vision eid fails element_missing, it must be recorded so any
+    subsequent call with the same (session_id, eid) is refused immediately
+    without a child round-trip.
+    """
+    from backend.webui_agent.generic_driver import webui_act
+
+    vision_eid = "vision_526b1241"
+    sess = _act_session(
+        {
+            "ok": False,
+            "failure_reason": "element_missing",
+            "view": {"view_id": "v"},
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_VIS1"] = sess
+
+    # First call — fails element_missing; should evict the vision eid.
+    result = webui_act(
+        session_id="sess_VIS1",
+        view_id="v",
+        eid=vision_eid,
+        action="fill",
+        action_id="act_V1",
+        value="192.168.1.1",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == "element_missing"
+    # Eid must have been recorded in the eviction registry.
+    assert vision_eid in generic_driver._vision_eid_failures.get("sess_VIS1", set())
+
+
+def test_webui_act_refuses_evicted_vision_eid_immediately(_act_patches):
+    """A pre-evicted vision eid must be refused without calling sess.send.
+
+    Specifically: zero child round-trips, zero Playwright timeout budget
+    consumed. The failure_reason must be 'element_missing' so the
+    convergence guard in tool_registry.py trips on the same signal.
+    """
+    from backend.webui_agent.generic_driver import webui_act
+
+    vision_eid = "vision_526b1241"
+    sess = _act_session({"ok": True, "view": {"view_id": "v"}, "attempts": 0})
+    generic_driver._sessions["sess_VIS2"] = sess
+
+    # Pre-seed the eviction registry as if a prior call already evicted it.
+    generic_driver._vision_eid_failures["sess_VIS2"] = {vision_eid}
+
+    result = webui_act(
+        session_id="sess_VIS2",
+        view_id="v",
+        eid=vision_eid,
+        action="fill",
+        action_id="act_V2",
+        value="192.168.1.1",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == "element_missing"
+    # THE CRUCIAL ASSERTION — child was never contacted.
+    sess.send.assert_not_called()
+    _act_patches["mark_failed"].assert_not_called()
+
+
+def test_webui_act_does_not_evict_non_vision_eid_on_element_missing(_act_patches):
+    """Stable numeric eids (e_NNN) must NOT be evicted on element_missing.
+
+    They are ARIA-tree rooted and survive most DOM mutations; evicting
+    them would prematurely kill valid retry paths.
+    """
+    from backend.webui_agent.generic_driver import webui_act
+
+    stable_eid = "e_003"
+    sess = _act_session(
+        {
+            "ok": False,
+            "failure_reason": "element_missing",
+            "view": {"view_id": "v"},
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_VIS3"] = sess
+
+    result = webui_act(
+        session_id="sess_VIS3",
+        view_id="v",
+        eid=stable_eid,
+        action="fill",
+        action_id="act_V3",
+        value="X",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == "element_missing"
+    # Stable eid must NOT appear in the eviction registry.
+    assert stable_eid not in generic_driver._vision_eid_failures.get("sess_VIS3", set())
+
+
+def test_webui_act_by_intent_evicts_vision_eid_on_element_missing(_act_patches):
+    """webui_act_by_intent must also evict the chosen_eid when it is a vision
+    eid and the child reports element_missing.
+    """
+    from backend.webui_agent.generic_driver import webui_act_by_intent
+
+    vision_eid = "vision_aabbccdd"
+    sess = _act_session(
+        {
+            "ok": False,
+            "failure_reason": "element_missing",
+            "chosen_eid": vision_eid,
+            "view": {"view_id": "v"},
+            "attempts": 0,
+        }
+    )
+    generic_driver._sessions["sess_VIS4"] = sess
+
+    result = webui_act_by_intent(
+        session_id="sess_VIS4",
+        intent={"role": "textbox", "name": "IP Address", "action": "fill", "value": "10.0.0.1"},
+        action_id="act_V4",
+    )
+
+    assert result["ok"] is False
+    assert result["failure_reason"] == "element_missing"
+    assert result["chosen_eid"] == vision_eid
+    # Vision eid must be recorded for future eviction.
+    assert vision_eid in generic_driver._vision_eid_failures.get("sess_VIS4", set())
+
+
+def test_webui_act_eviction_is_scoped_to_session(_act_patches):
+    """An evicted vision eid in sess_A must NOT block the same eid in sess_B.
+
+    Each WebUI session gets its own locator tree; the same vision eid
+    string in a different session refers to a different DOM element.
+    """
+    from backend.webui_agent.generic_driver import webui_act
+
+    vision_eid = "vision_11223344"
+    # sess_A: eid is evicted
+    generic_driver._vision_eid_failures["sess_A"] = {vision_eid}
+
+    sess_b = _act_session({"ok": True, "view": {"view_id": "v"}, "attempts": 0})
+    generic_driver._sessions["sess_B"] = sess_b
+
+    result = webui_act(
+        session_id="sess_B",
+        view_id="v",
+        eid=vision_eid,
+        action="fill",
+        action_id="act_V5",
+        value="X",
+    )
+
+    # sess_B must not be affected by sess_A's eviction.
+    assert result["ok"] is True
+    sess_b.send.assert_called_once()
