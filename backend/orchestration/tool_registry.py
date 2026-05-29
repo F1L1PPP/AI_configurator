@@ -53,6 +53,7 @@ from backend.webui_agent.generic_driver import (
     webui_act_by_intent,
     webui_describe_page,
     webui_open,
+    webui_open_form_for_planning,
     webui_verify,
 )
 
@@ -74,6 +75,24 @@ _NEXT_STEP_INLINE = "Use the APPROVE and EXECUTE NOW buttons below this message.
 _NEXT_STEP_WEBUI = (
     _NEXT_STEP_INLINE + " Headed Chromium will open when you click EXECUTE NOW so you "
     "can watch the clicks."
+)
+
+# Button/link names (lowercased, stripped) that indicate a Cisco WebUI list-page
+# "open form" trigger.  When the describe view contains one of these and has NO
+# fillable textboxes, _propose_webui_configure opens the form at propose-time so
+# the authoritative draft_plan call sees the real field names rather than just
+# the Add button label.
+# "add process" is included because the OSPF planner prompt names it explicitly
+# as a valid single-step form-open click.
+_FORM_TRIGGER_NAMES_LOWER: frozenset[str] = frozenset(
+    {"add", "create", "new", "+", "add dhcp pool", "add process"}
+)
+
+# Buttons/links whose presence means the form is ALREADY open (e.g. "Apply to
+# Device", "Save", "Submit").  Used by the open-form heuristic: if a submit
+# button is visible, the form is already rendered — skip the form-open step.
+_FORM_SUBMIT_NAMES_LOWER: frozenset[str] = frozenset(
+    {"apply", "apply to device", "save", "submit", "ok", "commit"}
 )
 
 
@@ -1136,6 +1155,92 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
         close_all_sessions()
         return desc_result
     view = desc_result["view"]
+
+    # 3c. Open-form probe: structural heuristic (no LLM call).
+    # Many Cisco WebUI config pages land on a list/table view with only an
+    # "Add" (or "+" / "Create") button visible.  The real form with actual
+    # field names is hidden behind that button and only rendered after it is
+    # clicked.
+    #
+    # Heuristic: open the form at propose-time (HITL-safe — no router write) IF:
+    #   (a) there is a visible button/link whose lowercased, stripped name is in
+    #       _FORM_TRIGGER_NAMES_LOWER, AND
+    #   (b) the view has NO submit/apply button — i.e. no visible button/link
+    #       whose lowercased, stripped name is in _FORM_SUBMIT_NAMES_LOWER.
+    #       A LIST page has an "Add" button but no submit; an already-OPEN form
+    #       has the submit ("Apply to Device" / "Save").  This signal is immune
+    #       to search/filter textboxes (e.g. the "Search Menu Items" box on the
+    #       Cisco DHCP list page), which the old "no textboxes" check was not.
+    # When both conditions hold we take that button's {role, name} from the view
+    # and call webui_open_form_for_planning with action="click", then re-describe
+    # so the authoritative draft_plan call sees the real field names.
+    #
+    # Why propose-time is the right moment:
+    #   - The Chromium session is already open and stays alive across propose
+    #     → execute (session_id is preserved in webui_params["session_id"]).
+    #   - Opening a modal is read-only from the router's perspective.
+    #   - The executor sees the form already open; its first act is a fill,
+    #     not another Add click — so there is no double-Add-click.
+    #
+    # Backward compat: if a submit button is already present (form already open)
+    # OR there is no trigger button → skip this block entirely.
+    _elements = view.get("elements") or []
+    _has_submit = any(
+        str(_e.get("role") or "").lower() in ("button", "link")
+        and str(_e.get("name") or "").strip().lower() in _FORM_SUBMIT_NAMES_LOWER
+        for _e in _elements
+    )
+    _trigger_btn: dict | None = None
+    if not _has_submit:
+        for _elem in _elements:
+            _elem_role = str(_elem.get("role") or "").lower()
+            _elem_name_lower = str(_elem.get("name") or "").strip().lower()
+            if _elem_role in ("button", "link") and _elem_name_lower in _FORM_TRIGGER_NAMES_LOWER:
+                _trigger_btn = _elem
+                break
+
+    if _trigger_btn is not None:
+        _open_intent: dict = {
+            "role": _trigger_btn.get("role"),
+            "name": _trigger_btn.get("name"),
+            "action": "click",
+        }
+        try:
+            _form_result = webui_open_form_for_planning(session_id, _open_intent)
+            if _form_result.get("ok"):
+                # Click landed — re-describe so the authoritative draft sees
+                # the open form with real field names.
+                _form_desc = webui_describe_page(session_id=session_id)
+                if "error" not in _form_desc:
+                    view = _form_desc["view"]
+                    log.info(
+                        "propose_webui_configure_opened_form_for_planning",
+                        intent=intent,
+                        open_step_name=_open_intent.get("name"),
+                    )
+                else:
+                    # Re-describe after click failed — fall back to list view.
+                    log.warning(
+                        "propose_webui_configure_form_describe_failed",
+                        intent=intent,
+                        error=_form_desc.get("message"),
+                    )
+            else:
+                # Click failed — fall back to list view, proceed normally.
+                log.warning(
+                    "propose_webui_configure_form_open_click_failed",
+                    intent=intent,
+                    failure_reason=_form_result.get("failure_reason"),
+                    error=_form_result.get("error"),
+                )
+        except Exception as _open_exc:  # noqa: BLE001
+            # Form-open failed — absorb, fall back to list view.
+            log.warning(
+                "propose_webui_configure_form_open_failed",
+                intent=intent,
+                error=str(_open_exc),
+                error_type=type(_open_exc).__name__,
+            )
 
     # 3b. Fetch running-config for conflict detection. Soft-fail: if SSH is
     # down or any other error, we still proceed without conflict info.

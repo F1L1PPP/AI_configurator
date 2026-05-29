@@ -614,3 +614,103 @@ def close_all_sessions() -> None:
 
 
 atexit.register(close_all_sessions)
+
+
+def webui_open_form_for_planning(
+    session_id: str,
+    intent: dict[str, Any],
+) -> dict[str, Any]:
+    """Perform a single form-opening click in a propose-time session WITHOUT an approval gate.
+
+    SECURITY RATIONALE — why this is safe without ``is_approved``:
+      - This helper is ONLY called during ``_propose_webui_configure``, before
+        any ``action_id`` exists (``propose_action`` has not run yet).
+      - It is intentionally constrained to a SINGLE CLICK that opens a modal
+        or form on the current page — it must never be used for fills, selects,
+        or submits.  The caller enforces this by only passing an intent whose
+        ``action`` is ``"click"``.  Any non-click action supplied here is
+        rejected immediately (no subprocess round-trip).
+      - Opening a modal is a READ-ONLY navigation from the router's perspective:
+        no router config change is committed, no XHR write lands at the device.
+        The actual writes ("Apply to Device", "Save") remain plan steps that
+        are gated by the full ``propose_action → approve → execute`` flow.
+      - This function MUST NOT be exposed as a public tool and MUST NOT be
+        called from any HITL-approved execute path.  Its sole purpose is to
+        reveal the real form so ``draft_plan`` plans against actual field names
+        instead of hallucinating them from the list-view.
+
+    Args:
+        session_id: The live session opened by ``webui_open`` inside
+            ``_propose_webui_configure``.  Must already be alive.
+        intent: Dict with keys ``role``, ``name``, ``action`` (must be
+            ``"click"``), and optionally ``value`` (ignored for clicks).
+
+    Returns:
+        ``{"ok": True, "view": ..., "session_id": str}`` on success.
+        ``{"error": "<reason>", ...}`` on any failure — caller should soft-fail
+        and continue with the original list-view plan.
+    """
+    # Hard constraint: this helper performs ONLY clicks.  Anything else is
+    # a programming error in the caller — refuse loudly so tests catch it.
+    if intent.get("action") != "click":
+        log.error(
+            "webui_open_form_for_planning_non_click_refused",
+            session_id=session_id,
+            action=intent.get("action"),
+        )
+        return {
+            "error": "non_click_refused",
+            "message": (
+                "webui_open_form_for_planning only accepts action='click'. "
+                f"Got action={intent.get('action')!r}."
+            ),
+            "session_id": session_id,
+        }
+
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        return _session_not_found(session_id)
+
+    log.info(
+        "webui_open_form_for_planning_click",
+        session_id=session_id,
+        intent_role=intent.get("role"),
+        intent_name=intent.get("name"),
+    )
+
+    try:
+        reply = sess.send({"op": "act_by_intent", "intent": intent})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        log.error(
+            "webui_open_form_for_planning_subprocess_error",
+            session_id=session_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "open_form_subprocess_error",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        log.warning(
+            "webui_open_form_for_planning_click_failed",
+            session_id=session_id,
+            failure_reason=reply.get("failure_reason"),
+        )
+        return {
+            "error": "open_form_click_failed",
+            "failure_reason": reply.get("failure_reason"),
+            "view": reply.get("view"),
+            "session_id": session_id,
+        }
+
+    return {
+        "ok": True,
+        "view": reply.get("view"),
+        "session_id": session_id,
+    }

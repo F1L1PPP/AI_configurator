@@ -1396,3 +1396,154 @@ def test_fill_timeout_is_strictly_bounded():
         f"_ACT_TIMEOUT_FORM_MS={_sub_mod._ACT_TIMEOUT_FORM_MS} exceeds 4000 ms "
         "— re-check DHCP smoke regression risk"
     )
+
+
+# ---------------------------------------------------------------------------
+# Kendo UI dropdown support — _is_kendo_listbox / _kendo_select / _invoke_action
+# ---------------------------------------------------------------------------
+
+
+def test_is_kendo_listbox_returns_true_for_listbox_role():
+    """Locator with role='listbox' is identified as a Kendo widget."""
+    loc = MagicMock()
+    loc.get_attribute.return_value = "listbox"
+    assert _sub_mod._is_kendo_listbox(loc) is True
+
+
+def test_is_kendo_listbox_returns_false_for_other_roles():
+    """Locators with other roles are not Kendo listboxes."""
+    for role in ("combobox", "select", "textbox", "button", None, ""):
+        loc = MagicMock()
+        loc.get_attribute.return_value = role
+        assert _sub_mod._is_kendo_listbox(loc) is False, f"role={role!r} should not be kendo"
+
+
+def test_is_kendo_listbox_returns_false_on_exception():
+    """get_attribute() exception is swallowed; falls back to False."""
+    loc = MagicMock()
+    loc.get_attribute.side_effect = RuntimeError("timeout")
+    assert _sub_mod._is_kendo_listbox(loc) is False
+
+
+def test_kendo_select_dispatches_js_and_logs_on_success():
+    """_kendo_select calls locator.evaluate() with the JS + value and succeeds."""
+    loc = MagicMock()
+    loc.evaluate.return_value = {
+        "ok": True,
+        "selected": "255.255.255.0",
+        "select_name": "subnetmaskOptions",
+    }
+
+    _sub_mod._kendo_select(loc, "255.255.255.0")
+
+    # evaluate must be called exactly once with the JS snippet and the value.
+    loc.evaluate.assert_called_once()
+    call_args = loc.evaluate.call_args
+    js_arg = call_args.args[0]
+    value_arg = call_args.args[1]
+    assert "dispatchEvent" in js_arg, "JS must dispatch change event"
+    assert "listboxEl" in js_arg, "JS must walk up from the listbox element"
+    assert value_arg == "255.255.255.0"
+
+
+def test_kendo_select_raises_value_error_when_not_found():
+    """_kendo_select raises ValueError when the JS returns ok=False."""
+    loc = MagicMock()
+    loc.evaluate.return_value = {
+        "ok": False,
+        "error": "value not in options. available: 255.255.255.0, 255.255.255.128",
+    }
+
+    with pytest.raises(ValueError, match="kendo_select failed"):
+        _sub_mod._kendo_select(loc, "/32")
+
+
+def test_kendo_select_raises_runtime_error_on_evaluate_exception():
+    """_kendo_select raises RuntimeError when evaluate() itself throws."""
+    loc = MagicMock()
+    loc.evaluate.side_effect = RuntimeError("page closed")
+
+    with pytest.raises(RuntimeError, match="JS evaluation failed"):
+        _sub_mod._kendo_select(loc, "255.255.255.0")
+
+
+def test_invoke_action_select_routes_kendo_to_kendo_select():
+    """When action='select' on a Kendo listbox, _kendo_select is used (not select_option)."""
+    loc = MagicMock()
+    # Simulate role='listbox'.
+    loc.get_attribute.return_value = "listbox"
+    loc.evaluate.return_value = {
+        "ok": True,
+        "selected": "255.255.255.0",
+        "select_name": "subnetmaskOptions",
+    }
+
+    _sub_mod._invoke_action(loc, "select", "255.255.255.0")
+
+    # evaluate() called (kendo path); select_option NEVER called.
+    loc.evaluate.assert_called_once()
+    loc.select_option.assert_not_called()
+
+
+def test_invoke_action_select_uses_select_option_for_plain_select():
+    """Plain <select> (role != 'listbox') goes through the standard select_option path."""
+    loc = MagicMock()
+    loc.get_attribute.return_value = "combobox"  # native <select> is mapped to combobox
+
+    _sub_mod._invoke_action(loc, "select", "VLAN46")
+
+    loc.select_option.assert_called_once_with("VLAN46", timeout=_sub_mod._ACT_TIMEOUT_FORM_MS)
+    loc.evaluate.assert_not_called()
+
+
+def test_invoke_action_select_uses_select_option_when_role_is_none():
+    """If get_attribute returns None (no role attr), treat as plain select — safe default."""
+    loc = MagicMock()
+    loc.get_attribute.return_value = None
+
+    _sub_mod._invoke_action(loc, "select", "option1")
+
+    loc.select_option.assert_called_once_with("option1", timeout=_sub_mod._ACT_TIMEOUT_FORM_MS)
+    loc.evaluate.assert_not_called()
+
+
+def test_invoke_action_kendo_select_exception_propagates():
+    """If _kendo_select raises (e.g. backing select not found), the exception
+    propagates to the caller (which classifies it as unknown_error in _do_act)."""
+    loc = MagicMock()
+    loc.get_attribute.return_value = "listbox"
+    loc.evaluate.return_value = {"ok": False, "error": "backing select not found"}
+
+    with pytest.raises(ValueError):
+        _sub_mod._invoke_action(loc, "select", "bad_value")
+
+
+def test_do_act_kendo_select_classifies_value_error_as_unknown_error():
+    """A ValueError from _kendo_select surfaces as failure_reason=unknown_error
+    in _do_act (matches the non-Playwright exception branch)."""
+    loc = _make_locator_for_act()
+    loc.get_attribute.return_value = "listbox"
+    # _kendo_select will raise ValueError because evaluate returns ok=False.
+    loc.evaluate.return_value = {"ok": False, "error": "value not in options"}
+
+    page = MagicMock()
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+
+    with _patched_describe_page(locator_map={"e_001": loc}):
+        reply, _new_map, _new_vid = _do_act(
+            page=page,
+            locator_map={"e_001": loc},
+            current_view_id="v",
+            msg={
+                "view_id": "v",
+                "eid": "e_001",
+                "action": "select",
+                "value": "/32",
+            },
+            ev=ev,
+        )
+
+    assert reply["ok"] is False
+    assert reply["failure_reason"] == "unknown_error"
+    assert reply["exc_type"] == "ValueError"

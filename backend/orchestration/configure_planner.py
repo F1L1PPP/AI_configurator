@@ -118,6 +118,37 @@ NEVER positionally. A few load-bearing conventions for Cisco WebUI forms:
   `10.0.0.0/24` must split into Prefix=`10.0.0.0` + Prefix Mask=
   `255.255.255.0` across TWO fill steps.
 
+## Action type by element role
+
+6. **`role: "combobox"` → use `action: "select"`.** Set `value` to an
+   EXACT label from that element's `options` list in the describe_page
+   view (e.g. if the view shows `"options": ["IPv4", "IPv6"]` and the
+   intent implies IPv4, set `"value": "IPv4"`). NEVER use `action: "fill"`
+   on a combobox — fill does not open the dropdown and will produce a
+   visible error on Cisco WebUI forms. The `{role, name}` must still be a
+   verbatim copy from the view, as per Rule 1.
+
+7. **`role: "textbox"` → use `action: "fill"`.** NEVER use `action:
+   "select"` on a textbox — there is no dropdown to choose from.
+
+## One value per field
+
+8. **Each fill or select step targets exactly ONE field with exactly ONE
+   value.** Do NOT concatenate two values into one field. Example of what
+   NOT to do: putting `"192.168.100.0 255.255.255.0"` into a single
+   textbox. Network and Subnet Mask are always separate textboxes; fill
+   them in separate steps.
+
+## DHCP pool — range field semantics
+
+9. **"Starting ip" and "Ending ip" define the contiguous range the pool
+   will LEASE to clients.** When the user's intent includes "exclude
+   addresses A through B" (or similar), translate that exclusion to a
+   lease range that excludes them. Example: /24 pool with exclude .1–.10
+   → `Starting ip = <network>.11`, `Ending ip = <network>.254`. Use the
+   exact field names present in the view (e.g. `"Starting ip"`, `"Ending
+   ip"` — never invent alternatives like "Start Address" or "First IP").
+
 ## Equivalent CLI commands (for server-side conflict detection)
 
 After the WebUI plan, infer the IOS XE configuration commands that would land

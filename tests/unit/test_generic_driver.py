@@ -16,6 +16,7 @@ from backend.webui_agent.generic_driver import (
     close_all_sessions,
     webui_describe_page,
     webui_open,
+    webui_open_form_for_planning,
     webui_verify,
 )
 
@@ -863,3 +864,88 @@ def test_webui_act_eviction_is_scoped_to_session(_act_patches):
     # sess_B must not be affected by sess_A's eviction.
     assert result["ok"] is True
     sess_b.send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# webui_open_form_for_planning — HITL-safe propose-time helper
+# ---------------------------------------------------------------------------
+
+
+def _make_form_open_session(reply: dict) -> MagicMock:
+    sess = MagicMock()
+    sess.is_alive.return_value = True
+    sess.send.return_value = reply
+    return sess
+
+
+def test_open_form_for_planning_happy_path():
+    """Click lands, op=act_by_intent is sent, view returned."""
+    post_view = {"view_id": "form_open_view", "elements": [{"role": "textbox", "name": "Pool Name"}]}
+    sess = _make_form_open_session({"ok": True, "view": post_view})
+    generic_driver._sessions["sess_plan"] = sess
+
+    intent = {"role": "button", "name": "Add", "action": "click"}
+    result = webui_open_form_for_planning("sess_plan", intent)
+
+    assert result["ok"] is True
+    assert result["view"]["view_id"] == "form_open_view"
+    assert result["session_id"] == "sess_plan"
+    # Must send act_by_intent (not act or open).
+    sess.send.assert_called_once_with({"op": "act_by_intent", "intent": intent})
+
+
+def test_open_form_for_planning_non_click_refused():
+    """Any non-click action is rejected without touching the session."""
+    sess = _make_form_open_session({"ok": True, "view": {}})
+    generic_driver._sessions["sess_noclick"] = sess
+
+    result = webui_open_form_for_planning(
+        "sess_noclick", {"role": "textbox", "name": "Pool Name", "action": "fill", "value": "x"}
+    )
+
+    assert result["error"] == "non_click_refused"
+    # Session must NOT be touched — helper enforces read-only at the Python level.
+    sess.send.assert_not_called()
+
+
+def test_open_form_for_planning_session_not_found():
+    """Unknown session_id returns session_not_found error."""
+    result = webui_open_form_for_planning(
+        "sess_ghost", {"role": "button", "name": "+", "action": "click"}
+    )
+    assert result["error"] == "session_not_found"
+
+
+def test_open_form_for_planning_click_failure_propagated():
+    """Child reports the click failed (element not found) — surface gracefully."""
+    sess = _make_form_open_session({"ok": False, "failure_reason": "unknown_eid"})
+    generic_driver._sessions["sess_fail_click"] = sess
+
+    result = webui_open_form_for_planning(
+        "sess_fail_click", {"role": "button", "name": "Add", "action": "click"}
+    )
+
+    assert result["error"] == "open_form_click_failed"
+    assert result["failure_reason"] == "unknown_eid"
+
+
+def test_open_form_for_planning_subprocess_error():
+    """Subprocess crash on send closes the session and returns an error."""
+    sess = MagicMock()
+    sess.is_alive.return_value = True
+    sess.send.side_effect = SubprocessFlowError(
+        flow="webui_session",
+        error="pipe broken",
+        exc_type="BrokenPipeError",
+        stderr="",
+    )
+    generic_driver._sessions["sess_crash"] = sess
+
+    result = webui_open_form_for_planning(
+        "sess_crash", {"role": "button", "name": "Add", "action": "click"}
+    )
+
+    assert result["error"] == "open_form_subprocess_error"
+    assert result["exc_type"] == "BrokenPipeError"
+    # Session removed after crash so the next caller rebuilds.
+    assert "sess_crash" not in generic_driver._sessions

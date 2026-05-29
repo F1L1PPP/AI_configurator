@@ -655,6 +655,75 @@ def test_button_does_not_emit_value_or_required():
     assert "required" not in el
 
 
+def test_combobox_emits_options_list_from_select():
+    """Native <select> combobox serialises its <option> labels into `options`."""
+    sel = _make_locator(
+        tag="SELECT",
+        attrs={"aria-label": "Subnet Mask"},
+        input_value="255.255.255.0",
+    )
+    # Simulate loc.locator("option").all_text_contents() returning option labels.
+    option_texts = ["255.255.255.0", "255.255.255.128", "255.255.254.0"]
+    option_locator = MagicMock()
+    option_locator.all_text_contents.return_value = option_texts
+    sel.locator.return_value = option_locator
+
+    page = _make_page(locators=[sel])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["role"] == "combobox"
+    assert el["value"] == "255.255.255.0"
+    assert el["options"] == option_texts
+    # Verify the option sub-locator was queried with "option" selector.
+    sel.locator.assert_called_with("option")
+
+
+def test_combobox_options_capped_at_fifty():
+    """Option list is truncated to 50 entries to protect the token budget."""
+    sel = _make_locator(
+        tag="SELECT",
+        attrs={"aria-label": "Long List"},
+        input_value="Item 1",
+    )
+    # 70 options — only the first 50 must appear in the serialised output.
+    many_options = [f"Item {i}" for i in range(1, 71)]
+    option_locator = MagicMock()
+    option_locator.all_text_contents.return_value = many_options
+    sel.locator.return_value = option_locator
+
+    page = _make_page(locators=[sel])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert len(el["options"]) == 50
+    assert el["options"] == many_options[:50]
+
+
+def test_combobox_options_omitted_gracefully_on_error():
+    """If all_text_contents() raises, `options` is omitted — never raises."""
+    sel = _make_locator(
+        tag="SELECT",
+        attrs={"aria-label": "IP Type"},
+        input_value="Static",
+    )
+    option_locator = MagicMock()
+    option_locator.all_text_contents.side_effect = RuntimeError("DOM gone")
+    sel.locator.return_value = option_locator
+
+    page = _make_page(locators=[sel])
+
+    # Must not raise; value still emitted; options absent.
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["role"] == "combobox"
+    assert el["value"] == "Static"
+    assert "options" not in el
+
+
 # ---------------------------------------------------------------------------
 # Token-budget sanity
 # ---------------------------------------------------------------------------
@@ -773,3 +842,213 @@ def test_worst_case_view_fits_under_realistic_budget():
     # real Cisco pages are 5-15 elements with sub-30-char labels. Even this
     # pathological case is still <$0.001 per call at Haiku 4.5 pricing.
     assert len(serialised) < 5_600, f"worst-case view bloated to {len(serialised)} chars"
+
+
+# ---------------------------------------------------------------------------
+# Kendo UI listbox / combobox support
+# ---------------------------------------------------------------------------
+
+
+def _make_kendo_listbox(
+    *,
+    select_name: str = "subnetmaskOptions",
+    options: list[str] | None = None,
+    current_value: str = "255.255.255.0",
+    spatial_label: str = "Subnet Mask",
+) -> MagicMock:
+    """Return a MagicMock Locator that looks like a Kendo <span role='listbox'>.
+
+    The locator has role='listbox'; its evaluate() call simulates the JS that
+    walks up the DOM and finds the backing hidden <select> by name.
+
+    The locator's page.locator() call for the hidden select returns a sub-mock
+    that provides input_value() and locator("option").all_text_contents().
+    """
+    if options is None:
+        options = ["255.255.255.0", "255.255.255.128", "255.255.254.0"]
+
+    loc = MagicMock()
+    loc.is_visible.return_value = True
+    loc.is_enabled.return_value = True
+    loc.bounding_box.return_value = {"x": 200.0, "y": 200.0, "width": 150.0, "height": 30.0}
+    loc.inner_text.return_value = ""
+    loc.input_value.return_value = ""  # visible listbox has no input_value
+    loc.get_attribute.side_effect = lambda name, **kw: {
+        "role": "listbox",
+        "aria-label": None,
+        "aria-labelledby": None,
+        "placeholder": None,
+        "title": None,
+        "name": None,
+        "id": None,
+    }.get(name)
+    loc.evaluate.return_value = select_name
+
+    # Simulate loc.page.evaluate() for spatial label discovery.
+    loc.page.evaluate.return_value = spatial_label
+
+    # Build the hidden select sub-mock (accessed via page.locator("select[name=...]")).
+    hidden_sel_mock = MagicMock()
+    hidden_sel_mock.input_value.return_value = current_value
+    option_loc_mock = MagicMock()
+    option_loc_mock.all_text_contents.return_value = options
+    hidden_sel_mock.locator.return_value = option_loc_mock
+
+    # page.locator() is called with the CSS for the hidden select AND with "#lbl..."
+    # for aria-labelledby. Route the hidden-select CSS to our mock; everything
+    # else to a generic MagicMock.
+    def _page_locator(selector, **kw):
+        if f"select[name='{select_name}']" in selector:
+            return hidden_sel_mock
+        return MagicMock()
+
+    loc.page.locator.side_effect = _page_locator
+    return loc
+
+
+def test_kendo_listbox_surfaced_as_combobox():
+    """A <span role='listbox'> with a backing hidden <select> is surfaced as
+    role='combobox' with options[] and kendo_select_name in the output."""
+    loc = _make_kendo_listbox(
+        select_name="subnetmaskOptions",
+        options=["255.255.255.0", "255.255.255.128", "255.255.254.0"],
+        current_value="255.255.255.0",
+        spatial_label="Subnet Mask",
+    )
+    page = _make_page(locators=[loc])
+
+    view, locator_map = describe_page(page)
+
+    assert len(view["elements"]) == 1
+    el = view["elements"][0]
+    assert el["role"] == "combobox", "listbox must be re-classified as combobox"
+    assert el["name"] == "Subnet Mask"
+    assert el["value"] == "255.255.255.0"
+    assert el["options"] == ["255.255.255.0", "255.255.255.128", "255.255.254.0"]
+    assert el["kendo_select_name"] == "subnetmaskOptions"
+    # The locator_map entry still points at the original listbox locator.
+    assert locator_map["e_001"] is loc
+
+
+def test_kendo_listbox_without_backing_select_is_dropped():
+    """A <span role='listbox'> that has NO backing hidden <select> is filtered
+    out (it's a non-form menu list, not a fillable dropdown)."""
+    loc = _make_kendo_listbox(select_name="subnetmaskOptions")
+    # Override: evaluate returns None (no backing select found).
+    loc.evaluate.return_value = None
+
+    page = _make_page(locators=[loc])
+
+    view, locator_map = describe_page(page)
+
+    assert view["elements"] == [], "listbox without backing select must be dropped"
+    assert locator_map == {}
+
+
+def test_kendo_listbox_options_read_from_hidden_select():
+    """Options are read from the hidden <select> (not from the visible listbox)."""
+    options = ["Static", "Dynamic", "PPPoE"]
+    loc = _make_kendo_listbox(
+        select_name="ipTypeOptions",
+        options=options,
+        current_value="Static",
+        spatial_label="IP Type",
+    )
+    page = _make_page(locators=[loc])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["options"] == options
+    assert el["kendo_select_name"] == "ipTypeOptions"
+
+
+def test_kendo_listbox_options_omitted_gracefully_on_error():
+    """If the hidden select raises when reading options, the element is still
+    emitted but `options` is omitted — never raises."""
+    loc = _make_kendo_listbox(
+        select_name="leaseOptions",
+        options=["1 day", "7 days"],
+        current_value="1 day",
+        spatial_label="Lease",
+    )
+    # Make all_text_contents raise on the hidden-select's option sub-locator.
+    # _make_kendo_listbox routes page.locator("select[name='leaseOptions']") to
+    # hidden_sel_mock; we override that mock's option locator to raise.
+    broken_option_loc = MagicMock()
+    broken_option_loc.all_text_contents.side_effect = RuntimeError("DOM gone")
+    # hidden_sel_mock is set up with a side_effect-based page.locator; we need
+    # to find it and patch its .locator() to return the broken option locator.
+    # Easiest: replace the entire side_effect so the hidden select returns a
+    # fresh mock whose .locator("option").all_text_contents raises.
+    broken_hidden_sel = MagicMock()
+    broken_hidden_sel.input_value.return_value = "1 day"
+    broken_hidden_sel.locator.return_value = broken_option_loc
+
+    def _page_locator_broken(selector, **kw):
+        if "select[name='leaseOptions']" in selector:
+            return broken_hidden_sel
+        return MagicMock()
+
+    loc.page.locator.side_effect = _page_locator_broken
+
+    page = _make_page(locators=[loc])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["role"] == "combobox"
+    # options must be absent — error was swallowed
+    assert "options" not in el
+    # But name and value must still be populated (different paths).
+    assert el["name"] == "Lease"
+
+
+def test_kendo_listbox_evaluate_exception_is_dropped():
+    """If evaluate() raises when probing for backing select, the listbox is
+    safely filtered out — describe_page never raises."""
+    loc = _make_kendo_listbox(select_name="x")
+    loc.evaluate.side_effect = RuntimeError("page closed")
+
+    page = _make_page(locators=[loc])
+
+    # Must not raise.
+    view, _ = describe_page(page)
+    assert view["elements"] == []
+
+
+def test_kendo_and_plain_select_coexist():
+    """A Kendo listbox and a plain <select> can appear on the same page without
+    interference — both are surfaced as combobox with correct data."""
+    kendo_loc = _make_kendo_listbox(
+        select_name="subnetmaskOptions",
+        options=["255.255.255.0"],
+        current_value="255.255.255.0",
+        spatial_label="Subnet Mask",
+    )
+
+    plain_sel = _make_locator(
+        tag="SELECT",
+        attrs={"aria-label": "VLAN List"},
+        input_value="VLAN46",
+    )
+    option_loc = MagicMock()
+    option_loc.all_text_contents.return_value = ["VLAN46", "VLAN100"]
+    plain_sel.locator.return_value = option_loc
+
+    page = _make_page(locators=[kendo_loc, plain_sel])
+
+    view, _ = describe_page(page)
+
+    roles = [el["role"] for el in view["elements"]]
+    names = [el["name"] for el in view["elements"]]
+
+    assert roles.count("combobox") == 2
+    assert "Subnet Mask" in names
+    assert "VLAN List" in names
+
+    # Kendo element carries kendo_select_name; plain select does not.
+    kendo_el = next(el for el in view["elements"] if el["name"] == "Subnet Mask")
+    plain_el = next(el for el in view["elements"] if el["name"] == "VLAN List")
+    assert kendo_el.get("kendo_select_name") == "subnetmaskOptions"
+    assert "kendo_select_name" not in plain_el

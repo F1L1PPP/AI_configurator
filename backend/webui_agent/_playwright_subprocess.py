@@ -379,6 +379,106 @@ def _describe_with_retry(page: Any, max_attempts: int = 2) -> tuple[dict[str, An
     return view, locator_map
 
 
+def _is_kendo_listbox(locator: Any) -> bool:
+    """Return True if ``locator`` points at a Kendo UI listbox widget.
+
+    Kendo dropdowns render a visible ``<span role='listbox'>`` (the clickable
+    widget) backed by a HIDDEN ``<select>`` in the same container. Calling
+    ``select_option()`` on the visible span does nothing — Kendo ignores DOM
+    mutations on the visible widget; only the hidden select + a ``change``
+    event updates the Kendo model.
+
+    Fast-path: a single ``get_attribute("role")`` call with a short timeout.
+    Best-effort: returns False on any exception so the caller falls back to
+    the standard ``select_option`` path.
+    """
+    try:
+        role = locator.get_attribute("role", timeout=_ACT_TIMEOUT_FORM_MS)
+        return isinstance(role, str) and role.strip().lower() == "listbox"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _kendo_select(locator: Any, value: str) -> None:
+    """Drive a Kendo UI dropdown to select ``value``.
+
+    Kendo wraps a hidden ``<select>`` with a visible ``<span role='listbox'>``
+    widget. Calling ``select_option()`` on the visible span has no effect on
+    the Kendo model. The correct approach is:
+
+      1. Walk up from the listbox to find the backing hidden ``<select>``.
+      2. Set its value via JS (``select.value = value``).
+      3. Dispatch a ``change`` event on the hidden select so AngularJS /
+         Kendo's own event listeners pick up the new value.
+
+    Step 3 uses ``dispatchEvent(new Event('change', {bubbles: true}))`` — the
+    ``bubbles: true`` is required for AngularJS ng-change listeners which
+    listen at the document/form level, not on the select itself.
+
+    Raises ``ValueError`` if the backing select cannot be found. Raises
+    ``ValueError`` if ``value`` is not an available option.
+
+    Logs the selector path used so the live smoke is debuggable.
+    """
+    from backend.core.logging import get_logger  # noqa: PLC0415
+
+    _log = get_logger(__name__)
+
+    # JS: find backing hidden select, set value, dispatch change event.
+    # Returns {"ok": true, "selected": value} on success or {"ok": false,
+    # "error": "..."} on failure. Single round-trip.
+    js = """
+    ([listboxEl, targetValue]) => {
+        // Walk up the DOM to find a hidden <select> in the same Kendo wrapper.
+        let node = listboxEl;
+        let select = null;
+        for (let i = 0; i < 6; i++) {
+            if (!node || !node.parentElement) break;
+            node = node.parentElement;
+            select = node.querySelector('select');
+            if (select) break;
+        }
+        if (!select) {
+            return {ok: false, error: 'backing select not found (walked 6 levels)'};
+        }
+        // Find the matching option (exact value match first, then text match).
+        let found = false;
+        for (const opt of select.options) {
+            if (opt.value === targetValue || opt.text === targetValue) {
+                select.value = opt.value;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            const available = Array.from(select.options).map(o => o.text).join(', ');
+            return {ok: false, error: 'value not in options. available: ' + available};
+        }
+        // Dispatch change event so Kendo/AngularJS model updates.
+        select.dispatchEvent(new Event('change', {bubbles: true}));
+        // Also dispatch input event for Angular 1.x watchers.
+        select.dispatchEvent(new Event('input', {bubbles: true}));
+        const selectName = select.getAttribute('name') || select.getAttribute('id') || '(unnamed)';
+        return {ok: true, selected: select.value, select_name: selectName};
+    }
+    """
+    try:
+        result = locator.evaluate(js, value)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"kendo_select JS evaluation failed: {exc}") from exc
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        error_detail = result.get("error", "unknown") if isinstance(result, dict) else repr(result)
+        raise ValueError(f"kendo_select failed: {error_detail}")
+
+    _log.info(
+        "kendo_select_success",
+        select_name=result.get("select_name"),
+        selected=result.get("selected"),
+        requested_value=value,
+    )
+
+
 def _invoke_action(locator: Any, action: str, value: str | None) -> None:
     """Dispatch one Playwright action against ``locator``.
 
@@ -393,13 +493,24 @@ def _invoke_action(locator: Any, action: str, value: str | None) -> None:
     All form actions (fill / select / check / hover) use ``_ACT_TIMEOUT_FORM_MS``
     (4 s): absent or intercepted form fields should fail fast so the planner
     convergence guard can abort rather than burning >50 s per iteration.
+
+    **Kendo UI dropdowns**: if the locator points to a ``<span role='listbox'>``
+    (Kendo's visible widget), ``select_option()`` has no effect on the Kendo
+    model. We detect this and route through ``_kendo_select()`` which writes
+    to the backing hidden ``<select>`` and dispatches the change event that
+    Kendo/AngularJS listen for. Plain ``<select>`` handling is unchanged.
     """
     if action == "click":
         locator.click(timeout=_ACT_TIMEOUT_CLICK_MS)
     elif action == "fill":
         locator.fill(str(value or ""), timeout=_ACT_TIMEOUT_FORM_MS)
     elif action == "select":
-        locator.select_option(str(value or ""), timeout=_ACT_TIMEOUT_FORM_MS)
+        if _is_kendo_listbox(locator):
+            # Kendo UI dropdown: hidden <select> + change event dispatch.
+            _kendo_select(locator, str(value or ""))
+        else:
+            # Plain <select> — standard Playwright path. Unchanged.
+            locator.select_option(str(value or ""), timeout=_ACT_TIMEOUT_FORM_MS)
     elif action == "check":
         locator.check(timeout=_ACT_TIMEOUT_FORM_MS)
     elif action == "hover":

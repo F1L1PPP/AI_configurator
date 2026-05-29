@@ -79,6 +79,11 @@ log = get_logger(__name__)
 # One locator round-trip rather than 12 separate get_by_role calls; the Cisco
 # WebUI is Angular with mixed-quality ARIA, so we want both native tags AND
 # role attributes to catch the same element via either path.
+#
+# [role="listbox"] is included for Kendo UI dropdowns. The Cisco IOS XE WebUI
+# uses Kendo throughout: visible interaction is a <span role="listbox"> backed
+# by a HIDDEN <select name="...">. Without listbox here the planner never sees
+# Subnet Mask / IP Type / Lease dropdowns on the DHCP Create Pool form.
 _UNION_SELECTOR = ",".join(
     [
         "button",
@@ -89,6 +94,7 @@ _UNION_SELECTOR = ",".join(
         "a[href]",
         '[role="textbox"]',
         '[role="combobox"]',
+        '[role="listbox"]',
         '[role="checkbox"]',
         '[role="radio"]',
         '[role="tab"]',
@@ -140,6 +146,13 @@ _INPUT_TYPE_ROLE_MAP: dict[str, str] = {
 _MODAL_ROLES = frozenset({"dialog", "alertdialog"})
 _ALERT_ROLES = frozenset({"alert"})
 
+# Kendo UI listbox widgets that are surfaced as combobox to the planner.
+# The visible widget carries role="listbox"; it wraps a HIDDEN <select>
+# that holds the real option values and has the field's `name` attribute.
+# We surface the visible bbox (for scoring/display) but record the name
+# of the backing hidden select so the executor can drive it correctly.
+_KENDO_LISTBOX_ROLE = "listbox"
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -182,6 +195,24 @@ def describe_page(
         name = _resolve_name(loc)
         score = _score(bbox, visible, enabled, viewport)
 
+        # Kendo UI listbox: the visible <span role="listbox"> widget must be
+        # surfaced as a fillable combobox. We resolve the backing hidden
+        # <select> to get: options[], the field's real name attribute (which
+        # the executor needs to target the hidden select), and input_value.
+        kendo_select_name: str | None = None
+        if role == _KENDO_LISTBOX_ROLE:
+            role = "combobox"  # re-classify as combobox for the planner
+            kendo_select_name = _resolve_kendo_select_name(loc)
+            # If the listbox has no backing select, skip it — it's likely a
+            # non-interactive menu list, not a form dropdown.
+            if kendo_select_name is None:
+                continue
+            # Override name: use spatial label or the select's name attr,
+            # whichever is more informative. _resolve_name runs on the visible
+            # widget which usually has a spatial label; fall back to select name.
+            if not name:
+                name = kendo_select_name
+
         candidates.append(
             {
                 "loc": loc,
@@ -191,6 +222,7 @@ def describe_page(
                 "enabled": enabled,
                 "bbox": bbox,
                 "score": score,
+                "kendo_select_name": kendo_select_name,
             }
         )
 
@@ -277,11 +309,61 @@ def _serialise(eid: str, cand: dict[str, Any]) -> dict[str, Any]:
     # pre-filled form state on a re-describe (don't overwrite already-correct
     # fields). Only emitted for the roles that actually carry these concepts.
     role = cand["role"]
+    kendo_select_name: str | None = cand.get("kendo_select_name")
+
     if role in ("textbox", "combobox"):
-        loc = cand["loc"]
-        value = _safe_call(lambda: loc.input_value(timeout=_PROBE_TIMEOUT_MS), default="")
+        if kendo_select_name:
+            # Kendo combobox: value lives in the hidden <select>, not the
+            # visible listbox widget. Read input_value from the hidden select.
+            loc = cand["loc"]
+            try:
+                hidden_sel = loc.page.locator(f"select[name='{kendo_select_name}']")
+                value = _safe_call(
+                    lambda: hidden_sel.input_value(timeout=_PROBE_TIMEOUT_MS), default=""
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug("kendo_value_read_failed", select_name=kendo_select_name, error=str(exc))
+                value = ""
+        else:
+            loc = cand["loc"]
+            value = _safe_call(lambda: loc.input_value(timeout=_PROBE_TIMEOUT_MS), default="")
         if isinstance(value, str):
             out["value"] = value
+
+    if role == "combobox":
+        # Capture the selectable option labels so the inner planner can pick a
+        # valid value (e.g. for "Subnet Mask", "IP Type", "Lease" dropdowns).
+        # Best-effort: never raise — omit `options` entirely on any failure.
+        # Cap at 50 entries to avoid bloating the token budget.
+        _MAX_OPTIONS = 50
+        if kendo_select_name:
+            # Kendo combobox: options live in the backing hidden <select>.
+            loc = cand["loc"]
+            try:
+                hidden_sel = loc.page.locator(f"select[name='{kendo_select_name}']")
+                raw_options = hidden_sel.locator("option").all_text_contents()
+                if isinstance(raw_options, list):
+                    options = [o.strip() for o in raw_options if isinstance(o, str) and o.strip()]
+                    out["options"] = options[:_MAX_OPTIONS]
+                # Emit the kendo_select_name so the executor can target the
+                # hidden select directly without a second DOM search.
+                out["kendo_select_name"] = kendo_select_name
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "kendo_options_read_failed",
+                    select_name=kendo_select_name,
+                    error=str(exc),
+                )
+        else:
+            loc = cand["loc"]
+            try:
+                raw_options = loc.locator("option").all_text_contents()
+                if isinstance(raw_options, list):
+                    options = [o.strip() for o in raw_options if isinstance(o, str) and o.strip()]
+                    out["options"] = options[:_MAX_OPTIONS]
+            except Exception as exc:  # noqa: BLE001
+                log.debug("combobox_options_read_failed", error=str(exc))
+
     if role == "textbox":
         # HTML5 boolean attr: present (even with empty string) means required.
         loc = cand["loc"]
@@ -573,3 +655,49 @@ def _safe_call(fn: Any, *, default: Any) -> Any:
         return fn()
     except Exception:
         return default
+
+
+def _resolve_kendo_select_name(listbox_loc: Locator) -> str | None:
+    """Find the backing hidden <select> for a Kendo UI listbox widget.
+
+    Kendo UI renders dropdowns as a visible <span role="listbox"> paired with
+    a HIDDEN <select name="..."> in the same form container. The IOS XE WebUI
+    uses this pattern for Subnet Mask, IP Type, and Lease on the DHCP Create
+    Pool form.
+
+    Search strategy (JS-side, single round-trip):
+      1. Walk UP from the listbox widget to find a common Kendo wrapper
+         (``k-widget`` / ``k-dropdown`` class, or any parent within 5 levels).
+      2. Inside that wrapper search for a ``<select>`` element.
+      3. Also check the listbox's immediate siblings and parent's siblings.
+
+    Returns the ``name`` attribute of the found hidden select, or None if no
+    backing select is found (e.g. the listbox is a non-form menu list).
+
+    Best-effort: never raises.
+    """
+    js = """
+    (listboxEl) => {
+        // Walk up to find the Kendo widget wrapper (up to 6 levels).
+        let node = listboxEl;
+        for (let i = 0; i < 6; i++) {
+            if (!node || !node.parentElement) break;
+            node = node.parentElement;
+            // Look for a hidden <select> anywhere inside this ancestor.
+            const sel = node.querySelector('select');
+            if (sel) {
+                const name = sel.getAttribute('name') || sel.getAttribute('id') || '';
+                if (name) return name;
+            }
+        }
+        return null;
+    }
+    """
+    try:
+        result = listbox_loc.evaluate(js)
+    except Exception as exc:
+        log.debug("kendo_select_name_resolve_failed", error=str(exc))
+        return None
+    if not isinstance(result, str) or not result.strip():
+        return None
+    return result.strip()

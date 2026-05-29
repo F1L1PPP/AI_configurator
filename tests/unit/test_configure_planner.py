@@ -596,3 +596,94 @@ def test_draft_plan_empty_plan_from_model_passes_through():
     # Empty plan from model must be preserved as-is (not replaced by cant-map)
     assert result["plan"] == []
     assert result["risk"] == "Page mismatch — no form fields visible."
+
+
+# ---------------------------------------------------------------------------
+# New rules — combobox/select, one-value-per-field, DHCP range semantics
+# ---------------------------------------------------------------------------
+
+
+def test_inner_prompt_combobox_rule_present():
+    """Prompt must instruct the planner to use action='select' for combobox
+    elements and forbid using 'fill' on a combobox."""
+    assert 'role: "combobox"' in _INNER_SYSTEM_PROMPT
+    assert "select" in _INNER_SYSTEM_PROMPT
+    assert "NEVER use" in _INNER_SYSTEM_PROMPT
+    # Explicit mention of fill being wrong for comboboxes
+    assert "fill" in _INNER_SYSTEM_PROMPT and "combobox" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_select_requires_options_label():
+    """Prompt must tell the model to pick the value from the element's
+    'options' list — not invent it."""
+    assert "options" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_one_value_per_field_rule():
+    """Prompt must explicitly forbid concatenating two values into one field."""
+    assert "One value per field" in _INNER_SYSTEM_PROMPT
+    # The concrete bad example (network + mask crammed together) must be present
+    assert "192.168.100.0 255.255.255.0" in _INNER_SYSTEM_PROMPT
+
+
+def test_inner_prompt_dhcp_range_semantics():
+    """Prompt must explain Starting ip / Ending ip lease-range semantics and
+    how to map an exclusion intent to the correct range."""
+    assert "Starting ip" in _INNER_SYSTEM_PROMPT
+    assert "Ending ip" in _INNER_SYSTEM_PROMPT
+    assert "exclude" in _INNER_SYSTEM_PROMPT.lower()
+
+
+def test_draft_plan_select_step_passes_through():
+    """A valid select step produced by the model (combobox element) must
+    survive the invalid-step filter and be returned unchanged."""
+    payload = {
+        "plan": [
+            {
+                "action": "select",
+                "intent": {"role": "combobox", "name": "IP Version"},
+                "value": "IPv4",
+            },
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": "Starting ip"},
+                "value": "192.168.100.11",
+            },
+            {
+                "action": "fill",
+                "intent": {"role": "textbox", "name": "Ending ip"},
+                "value": "192.168.100.254",
+            },
+        ],
+        "verify_text": "192.168.100",
+        "risk": "Creates DHCP pool with lease range .11–.254.",
+        "equivalent_cli_commands": [
+            "ip dhcp pool LAN",
+            "network 192.168.100.0 255.255.255.0",
+        ],
+    }
+    client = _make_tool_use_client(payload)
+
+    result = draft_plan(
+        intent="configure DHCP pool, exclude .1 through .10",
+        rag_chunks=[],
+        view={
+            "elements": [
+                {"role": "combobox", "name": "IP Version", "options": ["IPv4", "IPv6"]},
+                {"role": "textbox", "name": "Starting ip"},
+                {"role": "textbox", "name": "Ending ip"},
+            ]
+        },
+        client=client,
+    )
+
+    assert len(result["plan"]) == 3
+    select_step = result["plan"][0]
+    assert select_step["action"] == "select"
+    assert select_step["intent"]["role"] == "combobox"
+    assert select_step["value"] == "IPv4"
+    # Range steps preserved exactly
+    assert result["plan"][1]["intent"]["name"] == "Starting ip"
+    assert result["plan"][1]["value"] == "192.168.100.11"
+    assert result["plan"][2]["intent"]["name"] == "Ending ip"
+    assert result["plan"][2]["value"] == "192.168.100.254"
