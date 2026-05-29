@@ -18,7 +18,7 @@ Iterating against the live router is where architecture meets reality. Unit test
 
 4. **Backup-tag discipline.** Tag a `backup-YYYYMMDD-HHMM` safety net at mid-day and end-of-day on a live-iteration day (e.g. `backup-20260523-1259` mid-day, `backup-20260523-1842` end-of-day). These are informational, never moved, never release tags. They let you revert a wrong architectural turn (like the 14g inversion) without losing the day.
 
-5. **Deep-audit, no skipping.** Never skip the Opus 4.7 deep audit on a smoke-touching chunk, no matter how "small" the surface looks (`director-blueprint` tier rule). The 14k dead-code burn happened *because* the audit was skipped on "small surface, exactly what was recommended."
+5. **Deep-audit, no skipping.** Never skip the Opus 4.8 deep audit on a smoke-touching chunk, no matter how "small" the surface looks (`director-blueprint` tier rule). The 14k dead-code burn happened *because* the audit was skipped on "small surface, exactly what was recommended."
 
 ## Architectural lessons from the vision stack
 

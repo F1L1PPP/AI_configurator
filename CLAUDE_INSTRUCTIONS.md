@@ -93,7 +93,7 @@ using the tool name correctly in context, skip the explanation for that one.
 - LLM calls go through the Anthropic SDK directly — no LangChain. Reach for LangGraph only if state graphs become genuinely unwieldy (justify first).
 - WebUI flows are **AI-planned, deterministically-executed Playwright subprocess**: the LLM drafts the click-path via `propose_webui_configure(intent)` grounded by RAG + semantic DOM, then each click runs through deterministic Python with HITL approval (see [`docs/plan-ai-first-webui.md`](docs/plan-ai-first-webui.md) for the execution model). Playwright MCP is for discovery/debug only — not the production execution path.
 - Embeddings are local (`sentence-transformers/all-MiniLM-L6-v2`). ChromaDB persisted. Don't add cloud embedding providers without my approval.
-- Model split: **Production backend is Haiku 4.5 only** — every backend Anthropic call (outer planner, inner CLI planner, inner WebUI planner) uses `claude-haiku-4-5-20251001`. Opus 4.7 for architecture, hard debugging, release-gate review. Sonnet 4.6 for bulk implementation, page analysis, tests. Opus/Sonnet are dev-time roles for THIS Claude Code session, not the runtime LLM — never silently bump production for "better quality" (fix the prompt instead).
+- Model split: **Production backend is Haiku 4.5 only** — every backend Anthropic call (outer planner, inner CLI planner, inner WebUI planner) uses `claude-haiku-4-5-20251001`. Opus 4.8 for architecture, hard debugging, release-gate review. Sonnet 4.6 for bulk implementation, page analysis, tests. Opus/Sonnet are dev-time roles for THIS Claude Code session, not the runtime LLM — never silently bump production for "better quality" (fix the prompt instead).
 
 ## Communication rules
 

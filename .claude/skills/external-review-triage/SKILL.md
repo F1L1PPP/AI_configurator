@@ -34,7 +34,7 @@ Record the count. A typical pass is roughly two-thirds real (the 2026-05-21 pass
 Each chunk is one focused commit with its own tests.
 
 ### 3. Ship with a deep audit per chunk
-Anything review-driven is touching contracts, security surfaces, or error paths almost by definition — so default to an **Opus 4.7 deep audit** (per `director-blueprint`'s tier rule). Escalate mid-flight if a chunk's scope turns out to touch a security surface (the WS strict-origin item escalated chunk D). Run `ruff` + `pytest` green before each commit.
+Anything review-driven is touching contracts, security surfaces, or error paths almost by definition — so default to an **Opus 4.8 deep audit** (per `director-blueprint`'s tier rule). Escalate mid-flight if a chunk's scope turns out to touch a security surface (the WS strict-origin item escalated chunk D). Run `ruff` + `pytest` green before each commit.
 
 ### 4 & 5. Document and propose a tag
 Update the kickoff doc with three lists — **landed**, **deferred** (with the reason and the follow-up it's tracked under), **misread/already-fixed** (so no one re-investigates). Then propose a release tag to the Director. **Never create the tag yourself.**

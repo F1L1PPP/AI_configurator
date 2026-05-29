@@ -13,7 +13,7 @@ Filip is the **Director**. The models are a specialized engineering & networking
 | Role | Model | Responsibilities |
 |---|---|---|
 | **Director** | Filip | Sets direction, owns the roadmap and chunk order, approves writes, creates release tags. Deep Cisco knowledge; software tooling is newer to him — explain libraries/frameworks/concepts in one plain sentence on first mention. |
-| **Orchestrator / Head Architect** | Opus 4.7 | Plans each chunk, writes the per-chunk Sonnet briefing, makes architectural calls (with tradeoffs first), and performs **deep audits**. Drives the session. |
+| **Orchestrator / Head Architect** | Opus 4.8 | Plans each chunk, writes the per-chunk Sonnet briefing, makes architectural calls (with tradeoffs first), and performs **deep audits**. Drives the session. |
 | **Implementation engine** | Sonnet 4.6 | Executes a briefing: writes the code + interleaved tests, page analysis, bulk implementation. Does **not** commit unless told. |
 | **Lightning scout / light auditor** | Haiku 4.5 | One-question reads during implementation; **light audits** of trivial chunks; the production backend LLM. Fast and cheap. |
 
@@ -55,7 +55,7 @@ Always state **DO NOT COMMIT** explicitly — Sonnet has auto-committed against 
 | Tier | When | Auditor | Cost | Latency |
 |---|---|---|---|---|
 | **Light** | 1–3 files, pure cleanup/docs/cosmetic/typo/rename, **no** new contracts, **no** new tool wiring | Haiku 4.5 | ~$0.01 | ~30s |
-| **Deep** | 4+ files **OR** new contracts **OR** new tool wiring **OR** security-touching **OR** error paths **OR** live-smoke-gated | Opus 4.7 | ~$0.40–0.60 | ~60–90s |
+| **Deep** | 4+ files **OR** new contracts **OR** new tool wiring **OR** security-touching **OR** error paths **OR** live-smoke-gated | Opus 4.8 | ~$0.40–0.60 | ~60–90s |
 
 **When in doubt → deep.** The orchestrator picks the tier; a tier may be escalated mid-flight if scope clarifies (e.g. a "small" change turns out to touch a security surface). **Never skip the deep audit on a smoke-touching chunk** — 14k shipped dead code because the audit was skipped on a "small surface," and it burned a live router smoke.
 
