@@ -207,11 +207,11 @@ def describe_page(
             # non-interactive menu list, not a form dropdown.
             if kendo_select_name is None:
                 continue
-            # Override name: use spatial label or the select's name attr,
-            # whichever is more informative. _resolve_name runs on the visible
-            # widget which usually has a spatial label; fall back to select name.
-            if not name:
-                name = kendo_select_name
+            # _resolve_name picked the widget's inner_text (the selected VALUE, e.g.
+            # "255.255.255.0") at step 3, before spatial-label. For a Kendo combobox the
+            # human label lives in a sibling text node — re-resolve it here: spatial label
+            # wins, then the backing select's name, then whatever _resolve_name found.
+            name = _spatial_label(loc) or kendo_select_name or name
 
         candidates.append(
             {

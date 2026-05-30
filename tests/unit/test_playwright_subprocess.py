@@ -1426,44 +1426,107 @@ def test_is_kendo_listbox_returns_false_on_exception():
 
 
 def test_kendo_select_dispatches_js_and_logs_on_success():
-    """_kendo_select calls locator.evaluate() with the JS + value and succeeds."""
+    """_kendo_select calls locator.evaluate() with the JS + value and succeeds via strategy 1.
+
+    Strategy 1 (widget API): evaluate returns ok=True → log + return immediately.
+    The JS uses kendo.widgetInstance(...).trigger('change') not dispatchEvent —
+    this is the widget-API approach, which replaced the bare dispatchEvent call.
+    """
     loc = MagicMock()
     loc.evaluate.return_value = {
         "ok": True,
         "selected": "255.255.255.0",
-        "select_name": "subnetmaskOptions",
     }
 
     _sub_mod._kendo_select(loc, "255.255.255.0")
 
-    # evaluate must be called exactly once with the JS snippet and the value.
+    # evaluate called exactly once (strategy 1 succeeds; no fallthrough).
     loc.evaluate.assert_called_once()
     call_args = loc.evaluate.call_args
     js_arg = call_args.args[0]
     value_arg = call_args.args[1]
-    assert "dispatchEvent" in js_arg, "JS must dispatch change event"
+    # Strategy 1 JS uses listboxEl parameter and kendo widgetInstance API.
     assert "listboxEl" in js_arg, "JS must walk up from the listbox element"
+    assert "kendo" in js_arg, "Strategy 1 JS must reference the kendo global"
     assert value_arg == "255.255.255.0"
+    # Playwright click must NOT have been called (strategy 1 succeeded).
+    loc.click.assert_not_called()
 
 
-def test_kendo_select_raises_value_error_when_not_found():
-    """_kendo_select raises ValueError when the JS returns ok=False."""
+def test_kendo_select_value_not_in_options_falls_through_to_strategy2():
+    """Strategy 1 matches by VALUE only, so a value-only 'value_not_in_options'
+    is NOT a dead-end — it must fall through to strategy 2 (Playwright has_text
+    click), which matches by display text. Only strategy 3 declares the hard
+    dead-end. (Audit fix: strategy 1 used to raise ValueError here, which would
+    surface as unknown_error on a field the text-based fallbacks could resolve.)
+    """
     loc = MagicMock()
+    page = MagicMock()
+    loc.page = page
+    # Strategy 1: value-only match failed.
     loc.evaluate.return_value = {
         "ok": False,
-        "error": "value not in options. available: 255.255.255.0, 255.255.255.128",
+        "reason": "value_not_in_options",
+        "available": ["255.255.255.0", "255.255.255.128"],
     }
+    # Strategy 2: not already open; open-click + list-item click both succeed.
+    loc.get_attribute.return_value = None  # no aria-expanded
+    list_item_mock = MagicMock()
+    page.locator.return_value = list_item_mock
+
+    # Must NOT raise — strategy 2 resolves it by display text.
+    _sub_mod._kendo_select(loc, "255.255.255.0")
+
+    # Strategy 1 evaluated once, then fell through to strategy 2's clicks.
+    assert loc.evaluate.call_count == 1
+    loc.click.assert_called_once()
+    list_item_mock.click.assert_called_once()
+
+
+def test_kendo_select_raises_value_error_when_hidden_select_strategy_fails():
+    """_kendo_select raises ValueError when all strategies fail (no value found).
+
+    Strategy 1: kendo_unavailable. Strategy 2: structural error (not timeout).
+    Strategy 3 JS returns ok=False → ValueError.
+    """
+    loc = MagicMock()
+    page = MagicMock()
+    loc.page = page
+    # Strategy 1: kendo unavailable.
+    # Strategy 3 evaluate returns ok=False (value not in backing select options).
+    # Use side_effect list: first call → kendo_unavailable; second call → not_found.
+    loc.evaluate.side_effect = [
+        {"ok": False, "reason": "kendo_unavailable"},
+        {"ok": False, "error": "value not in options. available: 255.255.255.0, 255.255.255.128"},
+    ]
+    # Strategy 2: click raises a structural RuntimeError → fall through.
+    loc.get_attribute.return_value = None
+    loc.click.side_effect = RuntimeError("element detached")
 
     with pytest.raises(ValueError, match="kendo_select failed"):
         _sub_mod._kendo_select(loc, "/32")
 
 
-def test_kendo_select_raises_runtime_error_on_evaluate_exception():
-    """_kendo_select raises RuntimeError when evaluate() itself throws."""
-    loc = MagicMock()
-    loc.evaluate.side_effect = RuntimeError("page closed")
+def test_kendo_select_raises_value_error_when_all_strategies_fail():
+    """_kendo_select raises ValueError when all three strategies fail.
 
-    with pytest.raises(RuntimeError, match="JS evaluation failed"):
+    New 3-strategy contract (chunk 1):
+    - Strategy 1: evaluate() raises RuntimeError → caught, fall through.
+    - Strategy 2: click() raises RuntimeError (non-timeout structural error) → fall through.
+    - Strategy 3: evaluate() raises RuntimeError → wrapped as ValueError.
+    The old test expected RuntimeError("JS evaluation failed") which was the
+    single-strategy contract; the new contract surfaces ValueError from strategy 3.
+    """
+    loc = MagicMock()
+    page = MagicMock()
+    loc.page = page
+    # All evaluate calls raise — strategy 1 caught+fallthrough, strategy 3 wraps to ValueError.
+    loc.evaluate.side_effect = RuntimeError("page closed")
+    # Strategy 2: aria-expanded not set, click raises a NON-timeout error → fall through.
+    loc.get_attribute.return_value = None
+    loc.click.side_effect = RuntimeError("element detached")
+
+    with pytest.raises(ValueError, match="all strategies"):
         _sub_mod._kendo_select(loc, "255.255.255.0")
 
 
@@ -1508,23 +1571,46 @@ def test_invoke_action_select_uses_select_option_when_role_is_none():
 
 
 def test_invoke_action_kendo_select_exception_propagates():
-    """If _kendo_select raises (e.g. backing select not found), the exception
-    propagates to the caller (which classifies it as unknown_error in _do_act)."""
+    """If _kendo_select hits a genuine dead-end (all 3 strategies fail), the
+    ValueError propagates to the caller (which classifies it as unknown_error
+    in _do_act).
+    """
     loc = MagicMock()
-    loc.get_attribute.return_value = "listbox"
-    loc.evaluate.return_value = {"ok": False, "error": "backing select not found"}
+    page = MagicMock()
+    loc.page = page
+    # _is_kendo_listbox reads get_attribute("role") → "listbox"; strategy 2 reads
+    # get_attribute("aria-expanded") → None.
+    loc.get_attribute.side_effect = lambda name, **kw: (
+        "listbox" if name == "role" else None
+    )
+    # Strategy 1: kendo_unavailable → fall through. Strategy 3: ok=False → ValueError.
+    loc.evaluate.side_effect = [
+        {"ok": False, "reason": "kendo_unavailable"},
+        {"ok": False, "error": "value not in options"},
+    ]
+    # Strategy 2: structural (non-timeout) error → fall through.
+    loc.click.side_effect = RuntimeError("element detached")
 
     with pytest.raises(ValueError):
         _sub_mod._invoke_action(loc, "select", "bad_value")
 
 
 def test_do_act_kendo_select_classifies_value_error_as_unknown_error():
-    """A ValueError from _kendo_select surfaces as failure_reason=unknown_error
-    in _do_act (matches the non-Playwright exception branch)."""
+    """A genuine dead-end ValueError from _kendo_select (all 3 strategies fail)
+    surfaces as failure_reason=unknown_error in _do_act (the non-Playwright
+    exception branch).
+    """
     loc = _make_locator_for_act()
-    loc.get_attribute.return_value = "listbox"
-    # _kendo_select will raise ValueError because evaluate returns ok=False.
-    loc.evaluate.return_value = {"ok": False, "error": "value not in options"}
+    # Drive a genuine dead-end: strategy 1 unavailable → strategy 2 structural
+    # (non-timeout) error → strategy 3 ok=False → ValueError → unknown_error.
+    loc.get_attribute.side_effect = lambda name, **kw: (
+        "listbox" if name == "role" else None
+    )
+    loc.evaluate.side_effect = [
+        {"ok": False, "reason": "kendo_unavailable"},
+        {"ok": False, "error": "value not in options"},
+    ]
+    loc.click.side_effect = RuntimeError("element detached")
 
     page = MagicMock()
     ev = MagicMock()
@@ -1547,3 +1633,124 @@ def test_do_act_kendo_select_classifies_value_error_as_unknown_error():
     assert reply["ok"] is False
     assert reply["failure_reason"] == "unknown_error"
     assert reply["exc_type"] == "ValueError"
+
+
+# ---------------------------------------------------------------------------
+# Chunk 1 — 3-strategy _kendo_select + timeout taxonomy regression lock
+# ---------------------------------------------------------------------------
+
+
+def test_kendo_select_uses_widget_api_then_falls_back():
+    """Strategy 1 (widget API) succeeds → no Playwright click attempted.
+
+    Also verifies the fallback variant: when strategy 1 returns 'kendo_unavailable',
+    strategy 2 (dom_click) is taken.
+    """
+    # --- Variant A: strategy 1 succeeds ---
+    loc_a = MagicMock()
+    # page attribute required by the new _kendo_select implementation.
+    loc_a.page = MagicMock()
+    # evaluate is called for strategy 1; return ok=True.
+    loc_a.evaluate.return_value = {"ok": True, "selected": "255.255.255.0"}
+
+    _sub_mod._kendo_select(loc_a, "255.255.255.0")
+
+    # evaluate called once for strategy 1; Playwright click never reached.
+    assert loc_a.evaluate.call_count == 1
+    loc_a.click.assert_not_called()
+
+    # --- Variant B: strategy 1 unavailable (kendo_unavailable) → strategy 2 (dom_click) ---
+    loc_b = MagicMock()
+    page_b = MagicMock()
+    loc_b.page = page_b
+    # Strategy 1: kendo_unavailable.
+    loc_b.evaluate.return_value = {"ok": False, "reason": "kendo_unavailable"}
+    # Strategy 2: aria-expanded not set (not already open) → click to open.
+    loc_b.get_attribute.return_value = None  # no aria-expanded
+    # page.locator("ul.k-list li.k-item", has_text=value).click succeeds.
+    list_item_mock = MagicMock()
+    page_b.locator.return_value = list_item_mock
+
+    _sub_mod._kendo_select(loc_b, "255.255.255.128")
+
+    # evaluate still called once for strategy 1 (unavailable response).
+    assert loc_b.evaluate.call_count == 1
+    # Strategy 2: the widget's click was called to open the dropdown.
+    loc_b.click.assert_called_once()
+    # And the list item was clicked.
+    list_item_mock.click.assert_called_once()
+
+
+def test_kendo_select_timeout_bubbles_as_intercepted_not_unknown_error():
+    """THE REGRESSION LOCK: Chunk 1's primary correctness contract.
+
+    When strategy 1 is unavailable (kendo_unavailable) and strategy 2's
+    locator.click() raises playwright.sync_api.TimeoutError, the timeout
+    MUST propagate OUT of _kendo_select uncaught, so _do_act classifies it
+    as element_intercepted (retried once) — NOT unknown_error (not retried).
+
+    Before chunk 1, _kendo_select wrapped the entire body in try/except and
+    raised RuntimeError("kendo_select JS evaluation failed: ..."), which
+    _do_act caught as a non-Playwright exception → unknown_error → no retry.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act
+
+    # Build a Kendo listbox locator whose strategy-1 evaluate is unavailable
+    # and strategy-2 click raises PlaywrightTimeoutError.
+    loc = MagicMock()
+    page = MagicMock()
+    loc.page = page
+
+    # _is_kendo_listbox checks get_attribute("role") → must return "listbox" to
+    # route through _kendo_select. _kendo_select's strategy 2 checks
+    # get_attribute("aria-expanded") → None (not already open). Use side_effect
+    # to return the right value per call:
+    #   call 1 (from _is_kendo_listbox): "role" → "listbox"
+    #   call 2 (from _kendo_select strategy 2): "aria-expanded" → None
+    #   call 3+ (retry attempt from _do_act): "role" → "listbox" again
+    def _get_attr_side_effect(name, **kw):
+        if name == "role":
+            return "listbox"
+        return None  # aria-expanded and anything else
+
+    loc.get_attribute.side_effect = _get_attr_side_effect
+    # Strategy 1: kendo_unavailable (first evaluate call).
+    loc.evaluate.return_value = {"ok": False, "reason": "kendo_unavailable"}
+    # click() raises TimeoutError — simulates a transient stall opening the dropdown.
+    loc.click.side_effect = PlaywrightTimeoutError("Timeout opening Kendo dropdown")
+    # is_visible / is_enabled used by _do_act self-heal probes after the timeout.
+    loc.is_visible.return_value = True
+    loc.is_enabled.return_value = True
+
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+
+    # After the timeout, _do_act re-describes to probe the element state.
+    # Provide the same loc so the probe finds it (visible + enabled → intercepted).
+    with _patched_describe_page(locator_map={"e_001": loc}):
+        reply, _new_map, _new_vid = _do_act(
+            page=page,
+            locator_map={"e_001": loc},
+            current_view_id="v",
+            msg={
+                "view_id": "v",
+                "eid": "e_001",
+                "action": "select",
+                "value": "255.255.255.128",
+            },
+            ev=ev,
+        )
+
+    # THE CRITICAL ASSERTION — must be element_intercepted (not unknown_error).
+    assert reply["failure_reason"] == "element_intercepted", (
+        f"Expected element_intercepted, got {reply['failure_reason']!r}. "
+        "PlaywrightTimeoutError from _kendo_select must propagate uncaught so "
+        "_do_act classifies it as element_intercepted, not unknown_error."
+    )
+    assert reply["ok"] is False
+    # Prove the retry actually fired: with max_attempts=2, strategy 2's open-click
+    # is reached on BOTH the initial attempt and the post-intercept retry.
+    assert loc.click.call_count == 2, (
+        f"expected 2 open-click attempts (initial + one retry), got {loc.click.call_count}"
+    )
+    assert reply["attempts"] == 1

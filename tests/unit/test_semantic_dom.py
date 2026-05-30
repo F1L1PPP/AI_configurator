@@ -1017,6 +1017,64 @@ def test_kendo_listbox_evaluate_exception_is_dropped():
     assert view["elements"] == []
 
 
+def test_kendo_combobox_named_by_spatial_label_not_value():
+    """Kendo widget whose inner_text is the selected VALUE must be named by the
+    spatial label ('Subnet Mask'), NOT by the selected value ('255.255.255.0').
+
+    Bug scenario: _resolve_name step-3 inner_text returns "255.255.255.0" (the
+    currently-selected value of the Kendo widget). The old code only ran
+    `if not name: name = kendo_select_name`, so the value string stayed as the
+    name. The fix unconditionally re-resolves: spatial label wins, then
+    kendo_select_name, then the original _resolve_name result.
+    """
+    loc = _make_kendo_listbox(
+        select_name="subnetmaskOptions",
+        options=["255.255.255.0", "255.255.255.128", "255.255.254.0"],
+        current_value="255.255.255.0",
+        spatial_label="Subnet Mask",
+    )
+    # Simulate inner_text returning the selected value (the bug trigger).
+    loc.inner_text.return_value = "255.255.255.0"
+
+    page = _make_page(locators=[loc])
+    view, locator_map = describe_page(page)
+
+    assert len(view["elements"]) == 1
+    el = view["elements"][0]
+    # Name must be the human label, NOT the selected value.
+    assert el["name"] == "Subnet Mask", (
+        f"Expected 'Subnet Mask', got {el['name']!r} — Kendo combobox is named by "
+        "selected value instead of spatial label"
+    )
+    assert el["role"] == "combobox"
+    # The selected value is still preserved in the `value` field (different key).
+    assert el["value"] == "255.255.255.0"
+
+
+def test_kendo_combobox_falls_back_to_select_name_when_no_spatial():
+    """When spatial label returns empty (no nearby text node), the name falls
+    back to the backing select's `name` attribute — not the selected value.
+    """
+    loc = _make_kendo_listbox(
+        select_name="subnetmaskOptions",
+        options=["255.255.255.0", "255.255.255.128"],
+        current_value="255.255.255.0",
+        spatial_label="",  # no spatial label found
+    )
+    # Ensure inner_text would return the value (the old bug trigger).
+    loc.inner_text.return_value = "255.255.255.0"
+    # spatial JS returns empty string — no label found.
+    loc.page.evaluate.return_value = ""
+
+    page = _make_page(locators=[loc])
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    # Must fall back to kendo_select_name, not the selected value.
+    assert el["name"] == "subnetmaskOptions"
+    assert el["role"] == "combobox"
+
+
 def test_kendo_and_plain_select_coexist():
     """A Kendo listbox and a plain <select> can appear on the same page without
     interference — both are surfaced as combobox with correct data."""

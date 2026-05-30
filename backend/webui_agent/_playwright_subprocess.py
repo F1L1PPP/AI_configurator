@@ -404,30 +404,171 @@ def _kendo_select(locator: Any, value: str) -> None:
 
     Kendo wraps a hidden ``<select>`` with a visible ``<span role='listbox'>``
     widget. Calling ``select_option()`` on the visible span has no effect on
-    the Kendo model. The correct approach is:
+    the Kendo model. Three strategies are tried in order:
 
-      1. Walk up from the listbox to find the backing hidden ``<select>``.
-      2. Set its value via JS (``select.value = value``).
-      3. Dispatch a ``change`` event on the hidden select so AngularJS /
-         Kendo's own event listeners pick up the new value.
+      1. Kendo widget JS API (kendo.widgetInstance + .value() + .trigger("change"))
+         — cleanest path; skipped if the global kendo/$ object is unavailable.
+      2. Real DOM via Playwright — click to open popup, click the list item.
+         PlaywrightTimeoutError PROPAGATES (not caught) so the _do_act self-heal
+         loop classifies it as element_intercepted and retries once.
+      3. Hidden-select + change dispatch (original vanilla-JS path) — final fallback.
 
-    Step 3 uses ``dispatchEvent(new Event('change', {bubbles: true}))`` — the
-    ``bubbles: true`` is required for AngularJS ng-change listeners which
-    listen at the document/form level, not on the select itself.
+    EXCEPTION CONTRACT (matches _do_act self-heal loop):
+    - PlaywrightTimeoutError  → propagates uncaught → classified element_intercepted → retried once.
+    - ValueError              → dead-end (value not in option set) → not retried.
+    - Widget-API JS errors    → caught; fall through to next strategy (never become unknown_error).
 
-    Raises ``ValueError`` if the backing select cannot be found. Raises
-    ``ValueError`` if ``value`` is not an available option.
-
-    Logs the selector path used so the live smoke is debuggable.
+    Logs the winning strategy with log.info("kendo_select_success", strategy=...).
     """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: PLC0415
+
     from backend.core.logging import get_logger  # noqa: PLC0415
 
     _log = get_logger(__name__)
+    page = locator.page
 
-    # JS: find backing hidden select, set value, dispatch change event.
-    # Returns {"ok": true, "selected": value} on success or {"ok": false,
-    # "error": "..."} on failure. Single round-trip.
-    js = """
+    # -----------------------------------------------------------------------
+    # Strategy 1 — Kendo widget JS API.
+    # Guard: typeof kendo !== 'undefined'. Walks up to the .k-widget/.k-dropdown
+    # wrapper, calls kendo.widgetInstance(wrapper).value(target) then .trigger("change").
+    # Returns a structured dict: {ok, reason?, selected?, available?}.
+    # On ok=true → log + return.
+    # On any non-ok result (kendo_unavailable / value_not_in_options / JS error)
+    #   → fall through to strategy 2. Strategy 1 matches by VALUE only; the
+    #   authoritative text-or-value dead-end check is at the end of strategy 3.
+    # -----------------------------------------------------------------------
+    js_widget_api = """
+    ([listboxEl, targetValue]) => {
+        // Guard: kendo global must exist.
+        if (typeof kendo === 'undefined') {
+            return {ok: false, reason: 'kendo_unavailable'};
+        }
+        // Walk up to the Kendo widget wrapper (k-widget or k-dropdown-wrap).
+        let wrapper = listboxEl;
+        for (let i = 0; i < 8; i++) {
+            if (!wrapper || !wrapper.parentElement) break;
+            wrapper = wrapper.parentElement;
+            if (wrapper.classList && (
+                wrapper.classList.contains('k-widget') ||
+                wrapper.classList.contains('k-dropdown')
+            )) break;
+        }
+        let widget;
+        try {
+            widget = kendo.widgetInstance(wrapper);
+        } catch (e) {
+            return {ok: false, reason: 'widget_instance_failed', detail: String(e)};
+        }
+        if (!widget || typeof widget.value !== 'function') {
+            return {ok: false, reason: 'no_widget_instance'};
+        }
+        // Collect available options for error reporting.
+        const dataSource = widget.dataSource;
+        let available = [];
+        if (dataSource && typeof dataSource.data === 'function') {
+            available = dataSource.data().map(d => d.text || d.value || String(d));
+        }
+        // Try setting the value.
+        widget.value(targetValue);
+        const actual = widget.value();
+        if (actual !== targetValue) {
+            return {ok: false, reason: 'value_not_in_options', available: available};
+        }
+        widget.trigger('change');
+        return {ok: true, selected: actual};
+    }
+    """
+    try:
+        result = locator.evaluate(js_widget_api, value)
+        if isinstance(result, dict) and result.get("ok"):
+            _log.info(
+                "kendo_select_success",
+                strategy="widget_api",
+                selected=result.get("selected"),
+                requested_value=value,
+            )
+            return
+        # Strategy 1 matches by VALUE only (widget.value(target)). The
+        # authoritative text-OR-value check lives in strategy 3, so a value-only
+        # "not in options" here is NOT a dead-end — the planner may pass display
+        # text that strategy 2's has_text click (or strategy 3's text match)
+        # resolves. Fall through; the only hard ValueError is at end of strategy 3.
+        _log.info(
+            "kendo_select_strategy1_unavailable",
+            reason=result.get("reason") if isinstance(result, dict) else repr(result),
+            available=result.get("available") if isinstance(result, dict) else None,
+            requested_value=value,
+        )
+    except PlaywrightTimeoutError:
+        # Transient stall in the evaluate call itself → propagate so _do_act
+        # classifies it as element_intercepted and retries once.
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Any other JS/browser error — log and fall through to strategy 2.
+        _log.info(
+            "kendo_select_strategy1_error",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            requested_value=value,
+        )
+
+    # -----------------------------------------------------------------------
+    # Strategy 2 — Real DOM via Playwright.
+    # CLAUDE.md §4 compliance: selecting a list item from the Kendo popup is a
+    # UI interaction on a form field, NOT the "Apply to Device" XHR click. It is
+    # safe to re-click/re-open across a retry; only the final "Apply" click must
+    # remain single-attempt.
+    #
+    # Live-DOM caveats (partial — do not over-engineer; smoke validates):
+    #   - The popup <ul> may be body-level, possibly id="<select_name>_listbox"
+    #     or reachable via aria-owns / aria-controls on the visible widget.
+    #   - Re-opening an already-open widget on a retry can toggle it shut if
+    #     aria-expanded is already "true". Guard cheaply if detectable.
+    # PlaywrightTimeoutError PROPAGATES — this is intentional; _do_act self-heal
+    # catches it and classifies element_intercepted for a bounded retry.
+    # -----------------------------------------------------------------------
+    try:
+        # Guard: if widget is already open (aria-expanded="true"), skip the open click.
+        try:
+            aria_expanded = locator.get_attribute("aria-expanded", timeout=_ACT_TIMEOUT_FORM_MS)
+            already_open = isinstance(aria_expanded, str) and aria_expanded.lower() == "true"
+        except Exception:  # noqa: BLE001
+            already_open = False
+
+        if not already_open:
+            locator.click(timeout=_ACT_TIMEOUT_FORM_MS)
+
+        # Click the matching list item. The popup may be body-level (Kendo appends
+        # the <ul role="listbox"> to <body>); the has_text filter narrows it.
+        page.locator("ul.k-list li.k-item", has_text=value).click(
+            timeout=_ACT_TIMEOUT_FORM_MS
+        )
+        _log.info(
+            "kendo_select_success",
+            strategy="dom_click",
+            selected=value,
+            requested_value=value,
+        )
+        return
+    except PlaywrightTimeoutError:
+        # Propagate — this is the intended classification path (element_intercepted).
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Structural non-timeout errors (element detached, selector error, etc.) —
+        # fall through to strategy 3; these are not retriable by _do_act anyway.
+        _log.info(
+            "kendo_select_strategy2_error",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            requested_value=value,
+        )
+
+    # -----------------------------------------------------------------------
+    # Strategy 3 — Hidden-select + change/input dispatch (original path).
+    # This is the vanilla-JS approach that was the sole implementation before
+    # chunk 1. Kept verbatim as the last-resort fallback.
+    # -----------------------------------------------------------------------
+    js_hidden_select = """
     ([listboxEl, targetValue]) => {
         // Walk up the DOM to find a hidden <select> in the same Kendo wrapper.
         let node = listboxEl;
@@ -463,18 +604,23 @@ def _kendo_select(locator: Any, value: str) -> None:
     }
     """
     try:
-        result = locator.evaluate(js, value)
+        result3 = locator.evaluate(js_hidden_select, value)
+    except PlaywrightTimeoutError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"kendo_select JS evaluation failed: {exc}") from exc
+        raise ValueError(f"kendo_select failed (all strategies): evaluate error: {exc}") from exc
 
-    if not isinstance(result, dict) or not result.get("ok"):
-        error_detail = result.get("error", "unknown") if isinstance(result, dict) else repr(result)
-        raise ValueError(f"kendo_select failed: {error_detail}")
+    if not isinstance(result3, dict) or not result3.get("ok"):
+        error_detail = (
+            result3.get("error", "unknown") if isinstance(result3, dict) else repr(result3)
+        )
+        raise ValueError(f"kendo_select failed (all strategies): {error_detail}")
 
     _log.info(
         "kendo_select_success",
-        select_name=result.get("select_name"),
-        selected=result.get("selected"),
+        strategy="hidden_select",
+        select_name=result3.get("select_name"),
+        selected=result3.get("selected"),
         requested_value=value,
     )
 
@@ -844,6 +990,17 @@ def _do_act_by_intent(
         evict_from_selector_cache,
         resolve_via_vision,
     )
+
+    # Reactive resolution chain (runs in order; first hit wins):
+    #   1. EID forward-lookup: scan the current describe view for role+name — cheap,
+    #      uses the same spatial-label naming the inner LLM saw, no Anthropic call.
+    #   2. Vision fallback (resolve_via_vision): cache hit = ~free; miss = Anthropic call
+    #      + result cached. Handles elements describe_page cannot surface under the
+    #      planner's role+name (e.g. Network textbox with spatial-only label).
+    #   3. Heuristic first_match: role/name → label → text strategies via Playwright.
+    #   4. unknown_eid: all three paths returned None.
+    # _SENSITIVE_DENY_LIST is enforced on ALL branches — vision path checks inside
+    # _try_act_with_vision; eid/first_match path checks before the final dispatch.
 
     intent = msg.get("intent") or {}
     role = intent.get("role")

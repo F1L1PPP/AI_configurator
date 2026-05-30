@@ -281,7 +281,10 @@ def _call_haiku_vision(
                 "`form[name='dhcp'] input[name='networkIp']` — parent selector + child.\n"
                 "  4. Last resort: `:nth-match(:visible, N)` where N targets the "
                 "specific occurrence.\n"
-                "NEVER: xpath, `:nth-child`, bare text selectors that could collide."
+                "NEVER: xpath, `:nth-child`, bare text selectors that could collide.\n"
+                "If the target role is 'combobox', return the selector for the Kendo "
+                "`<span role='listbox'>` widget (or its backing `select[name=...]`), "
+                "NOT an individual list item."
             ),
         }
     )
