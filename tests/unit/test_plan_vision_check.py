@@ -17,6 +17,7 @@ from backend.orchestration.plan_vision_check import (
     _MODEL,
     _intent_key,
     _plan_sha1,
+    _plan_validation_signal,
     check_plan_via_vision,
     compute_familiarity_score,
     load_plan_validation_cache,
@@ -1040,3 +1041,80 @@ def test_filter_executable_steps_empty_on_all_invalid() -> None:
     ]
     out = filter_executable_steps(plan)
     assert out == []
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 — 3.1: Tier-0 at one success
+# ---------------------------------------------------------------------------
+
+
+def test_plan_validation_signal_one_success_is_tier0(tmp_path: Path) -> None:
+    """succeed_count=1 → _plan_validation_signal returns 1.0 (Tier-0 eligible).
+
+    Pre-chunk-2 behaviour was 0.5; one green run is now sufficient to
+    earn Tier-0 skip on the next proactive vision check.
+    """
+    settings = _make_settings(tmp_path)
+    page_url = "http://router/webui/#/dhcp"
+    plan = [
+        {"intent": {"role": "textbox", "name": "Network"}, "action": "fill", "value": "10.0.0.0"}
+    ]
+
+    from backend.webui_agent.vision_fallback import _hash_page_url
+
+    page_k = _hash_page_url(page_url)
+    intent_k = _intent_key(_DHCP_INTENT)
+    plan_h = _plan_sha1(plan)
+    composite_key = f"{page_k}|{intent_k}|{plan_h}"
+
+    cache = {composite_key: {"succeed_count": 1, "last_seen": "2026-05-30T10:00:00Z"}}
+    save_plan_validation_cache(settings.plan_validation_cache_path, cache)
+
+    signal = _plan_validation_signal(page_url, _DHCP_INTENT, plan, settings)
+
+    assert signal == 1.0, (
+        f"Expected 1.0 (one success → Tier-0 eligible), got {signal}. "
+        "Pre-chunk-2 bug: sc==1 returned 0.5."
+    )
+
+
+def test_plan_validation_signal_zero_successes_is_zero(tmp_path: Path) -> None:
+    """succeed_count=0 → signal=0.0 (no Tier-0 skip)."""
+    settings = _make_settings(tmp_path)
+    page_url = "http://router/webui/#/dhcp"
+    plan = [
+        {"intent": {"role": "textbox", "name": "Network"}, "action": "fill", "value": "10.0.0.0"}
+    ]
+
+    from backend.webui_agent.vision_fallback import _hash_page_url
+
+    page_k = _hash_page_url(page_url)
+    intent_k = _intent_key(_DHCP_INTENT)
+    plan_h = _plan_sha1(plan)
+    composite_key = f"{page_k}|{intent_k}|{plan_h}"
+
+    cache = {composite_key: {"succeed_count": 0, "last_seen": "2026-05-30T10:00:00Z"}}
+    save_plan_validation_cache(settings.plan_validation_cache_path, cache)
+
+    signal = _plan_validation_signal(page_url, _DHCP_INTENT, plan, settings)
+
+    assert signal == 0.0
+
+
+def test_familiarity_promotes_to_tier0_after_one_success(tmp_path: Path) -> None:
+    """Record one success → plan_validation_signal=1.0 → familiarity ≥ 0.15."""
+    settings = _make_settings(tmp_path)
+    page_url = "http://router/webui/#/dhcp"
+    plan = [
+        {"intent": {"role": "textbox", "name": "Network"}, "action": "fill", "value": "10.0.0.0"}
+    ]
+
+    record_plan_success(page_url=page_url, intent=_DHCP_INTENT, plan=plan, settings=settings)
+
+    # plan_validation_signal alone contributes 0.15; total score ≥ 0.15.
+    score = compute_familiarity_score(page_url, _DHCP_INTENT, plan, settings)
+    assert score >= 0.15, f"Expected ≥ 0.15 after one success, got {score}"
+
+    # The signal in isolation must be 1.0.
+    signal = _plan_validation_signal(page_url, _DHCP_INTENT, plan, settings)
+    assert signal == 1.0

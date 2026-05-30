@@ -48,7 +48,8 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODEL = "claude-haiku-4-5-20251001"
-_MAX_RETRIES = 5
+_MAX_RETRIES = 2
+_VISION_TIMEOUT_S = 20
 _CONFIDENCE_THRESHOLD = 0.7
 _MAX_PLAN_VISION_CALLS_PER_SESSION = 5
 # below 0.25 → Tier 3; 0.25–0.55 → Tier 2; 0.55–0.85 → Tier 1; ≥ 0.85 → Tier 0
@@ -249,7 +250,11 @@ def _plan_validation_signal(
 ) -> float:
     """Check if this exact (page, intent, plan_hash) trio has been verified before.
 
-    Returns 1.0 if succeed_count ≥ 2, 0.5 if succeed_count == 1, 0.0 otherwise.
+    Returns 1.0 if succeed_count ≥ 1, 0.0 otherwise.
+    One green run is enough to earn Tier-0 skip on the next run — the
+    blast-radius cost of a mis-config dwarfs the cost of an extra vision call
+    on first encounter; there is no middle tier (0.5) once a plan has
+    succeeded at least once.
     """
     cache = load_plan_validation_cache(settings.plan_validation_cache_path)
     page_k = _hash_page_url(page_url)
@@ -260,11 +265,7 @@ def _plan_validation_signal(
     if entry is None:
         return 0.0
     sc = entry.get("succeed_count", 0)
-    if sc >= 2:
-        return 1.0
-    if sc == 1:
-        return 0.5
-    return 0.0
+    return 1.0 if sc >= 1 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +346,11 @@ def _call_haiku_plan_vision(
     """
     from backend.core.settings import get_settings  # noqa: PLC0415
 
-    client = Anthropic(api_key=get_settings().anthropic_api_key, max_retries=_MAX_RETRIES)
+    client = Anthropic(
+        api_key=get_settings().anthropic_api_key,
+        max_retries=_MAX_RETRIES,
+        timeout=_VISION_TIMEOUT_S,
+    )
 
     content: list[dict[str, Any]] = [_build_image_block(screenshot_b64)]
 

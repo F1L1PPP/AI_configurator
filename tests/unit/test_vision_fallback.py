@@ -33,9 +33,19 @@ def _make_settings(tmp_path: Path) -> MagicMock:
     return settings
 
 
-def _make_page(url: str = "http://router/webui/#/dhcp") -> MagicMock:
+def _make_page(url: str = "http://router/webui/#/dhcp", locator_count: int = 1) -> MagicMock:
+    """Return a page mock; locator_count controls page.locator(sel).count() result.
+
+    Default is 1 so that existing cache-hit tests pass (count > 0 → cache valid).
+    Pass locator_count=0 to simulate a stale cached selector.
+    """
     page = MagicMock()
     page.url = url
+    # Configure locator().count() so the pre-trust probe (3.2c) gets a
+    # deterministic integer — MagicMock's default comparison is unreliable.
+    locator_mock = MagicMock()
+    locator_mock.count.return_value = locator_count
+    page.locator.return_value = locator_mock
     return page
 
 
@@ -46,7 +56,7 @@ def _make_ev(tmp_path: Path) -> MagicMock:
     screenshot_path = tmp_path / "vision-test.png"
     screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")  # minimal PNG header
 
-    def _vision_screenshot(page: object, intent_id: str) -> Path:
+    def _vision_screenshot(page: object, intent_id: str, viewport_only: bool = False) -> Path:
         return screenshot_path
 
     ev.vision_screenshot.side_effect = _vision_screenshot
@@ -185,7 +195,11 @@ def test_resolve_via_vision_malformed_json_returns_none(tmp_path: Path) -> None:
 
 
 def test_resolve_via_vision_with_prior_screenshots(tmp_path: Path) -> None:
-    """2 prior PNGs matching the page URL → messages.create called with 3 image blocks."""
+    """Prior PNGs matching the page URL → messages.create includes prior image blocks.
+
+    Chunk 2 (3.4c): reactive path now passes max_n=1, so at most 1 prior
+    screenshot is included → total image blocks = 2 (1 current + 1 prior).
+    """
     settings = _make_settings(tmp_path)
     page = _make_page(url="http://router/webui/#/dhcp")
     ev = _make_ev(tmp_path)
@@ -207,7 +221,8 @@ def test_resolve_via_vision_with_prior_screenshots(tmp_path: Path) -> None:
 
     # Count image blocks.
     image_blocks = [b for b in content if b.get("type") == "image"]
-    assert len(image_blocks) == 3  # 1 current + 2 priors
+    # Chunk 2 (3.4c): max_n=1 on the reactive path → 1 current + 1 prior = 2 total.
+    assert len(image_blocks) == 2  # 1 current + 1 prior (max_n=1)
 
 
 def test_resolve_via_vision_with_zero_priors(tmp_path: Path) -> None:
@@ -616,4 +631,218 @@ def test_vision_prompt_demands_unique_selectors(tmp_path: Path) -> None:
     # Must prefer attribute-based selectors.
     assert "aria-label" in prompt_text, (
         "Vision prompt no longer prefers aria-label / attribute selectors"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 — 3.2a: load_selector_cache drops malformed entries
+# ---------------------------------------------------------------------------
+
+
+def test_load_selector_cache_drops_malformed_entries(tmp_path: Path) -> None:
+    """load_selector_cache must silently drop entries with empty name, non-str
+    selector, or wrong key format, while keeping valid entries intact.
+
+    The live poison entry 'textbox||c737961f1b1a' (empty name → 2nd part is
+    empty) triggered wrong-page cache hits on the DHCP form.
+    """
+    cache_path = tmp_path / "selector_cache.json"
+    raw = {
+        # VALID: role|name|hash — all 3 parts non-empty, string selector.
+        "textbox|Network|abc123456789": "input[name='networkIp']",
+        # INVALID: empty name (the live poison entry shape).
+        "textbox||c737961f1b1a": "input[name='something']",
+        # INVALID: non-string selector.
+        "button|Add|def456789012": 42,
+        # INVALID: only 2 parts.
+        "button|Apply": "button.apply",
+        # INVALID: 4 parts.
+        "button|Apply|hash1|extra": "button.apply",
+        # INVALID: empty selector string.
+        "select|Proto|aaa111222333": "",
+    }
+    cache_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = load_selector_cache(cache_path)
+
+    # Only the valid entry survives.
+    assert len(result) == 1
+    assert "textbox|Network|abc123456789" in result
+    assert result["textbox|Network|abc123456789"] == "input[name='networkIp']"
+
+    # The poison entry is gone.
+    assert "textbox||c737961f1b1a" not in result
+
+
+def test_load_selector_cache_non_dict_json_returns_empty(tmp_path: Path) -> None:
+    """Valid JSON that isn't an object (list/scalar) is malformed → return {}.
+
+    Guards the load_selector_cache / resolve_via_vision "never raises" contract
+    against an AttributeError on .items().
+    """
+    cache_path = tmp_path / "selector_cache.json"
+
+    cache_path.write_text("[1, 2, 3]", encoding="utf-8")
+    assert load_selector_cache(cache_path) == {}
+
+    cache_path.write_text('"just a string"', encoding="utf-8")
+    assert load_selector_cache(cache_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 — 3.2b: _hash_page_url distinguishes fragments
+# ---------------------------------------------------------------------------
+
+
+def test_hash_page_url_distinguishes_fragments() -> None:
+    """Fragment-differing SPA URLs must produce distinct hashes.
+
+    Pre-chunk-2: fragment was stripped → #/dhcp and #/ospf collided.
+    """
+    from backend.webui_agent.vision_fallback import _hash_page_url
+
+    hash_dhcp = _hash_page_url("http://router/webui/#/dhcp")
+    hash_ospf = _hash_page_url("http://router/webui/#/ospf")
+
+    assert hash_dhcp != hash_ospf, (
+        "URLs with different fragments must produce different hashes. "
+        "Pre-chunk-2 bug: both were mapped to the same hash (fragment was stripped)."
+    )
+
+
+def test_hash_page_url_strips_query_params() -> None:
+    """Query params must still be stripped (unchanged behaviour)."""
+    from backend.webui_agent.vision_fallback import _hash_page_url
+
+    h1 = _hash_page_url("http://router/webui/?ts=1")
+    h2 = _hash_page_url("http://router/webui/?ts=9999")
+    assert h1 == h2
+
+
+def test_hash_page_url_includes_fragment_in_hash() -> None:
+    """Same path, same fragment → same hash; different fragment → different hash."""
+    from backend.webui_agent.vision_fallback import _hash_page_url
+
+    h_no_frag = _hash_page_url("http://router/webui/")
+    h_with_frag = _hash_page_url("http://router/webui/#/dhcp")
+
+    assert h_no_frag != h_with_frag
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 — 3.2c: pre-trust probe on cache hit
+# ---------------------------------------------------------------------------
+
+
+def test_cache_hit_valid_selector_returns_without_anthropic(tmp_path: Path) -> None:
+    """Cache hit where locator.count() > 0 → return cached selector; no Haiku call."""
+    settings = _make_settings(tmp_path)
+    # page.locator(sel).count() returns 1 → selector is live.
+    page = _make_page(locator_count=1)
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "20.20.20.0"}
+
+    key = _cache_key("textbox", "Network", page.url)
+    cached_selector = 'input[aria-label="Network"]'
+    save_selector_cache(settings.selector_cache_path, {key: cached_selector})
+
+    with patch("backend.webui_agent.vision_fallback.Anthropic") as mock_cls:
+        result = resolve_via_vision(page, intent, ev, settings)
+
+    assert result == cached_selector
+    mock_cls.assert_not_called()
+
+
+def test_cache_hit_stale_selector_evicted_and_reresolved(tmp_path: Path) -> None:
+    """Cache hit where locator.count() == 0 → evict stale entry + fall through to Haiku."""
+    settings = _make_settings(tmp_path)
+    # page.locator(sel).count() returns 0 → selector is stale.
+    page = _make_page(locator_count=0)
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "20.20.20.0"}
+
+    key = _cache_key("textbox", "Network", page.url)
+    stale_selector = 'input[aria-label="StaleNetwork"]'
+    save_selector_cache(settings.selector_cache_path, {key: stale_selector})
+
+    fresh_selector = 'input[name="networkIp"]'
+    mock_cls = _make_mock_anthropic(
+        json.dumps({"selector": fresh_selector, "confidence": 0.92, "reasoning": "re-resolved"})
+    )
+
+    with patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls):
+        result = resolve_via_vision(page, intent, ev, settings)
+
+    # The stale entry was evicted and Haiku returned a fresh selector.
+    assert result == fresh_selector
+    mock_cls.return_value.messages.create.assert_called_once()
+
+    # The cache now contains the fresh selector, not the stale one.
+    saved = load_selector_cache(settings.selector_cache_path)
+    assert saved.get(key) == fresh_selector
+    assert stale_selector not in saved.values()
+
+
+def test_cache_hit_exception_in_locator_count_treated_as_stale(tmp_path: Path) -> None:
+    """If page.locator(sel).count() raises, treat as stale (count=0) and re-resolve."""
+    settings = _make_settings(tmp_path)
+    page = _make_page()
+    page.locator.return_value.count.side_effect = RuntimeError("page crashed")
+    ev = _make_ev(tmp_path)
+    intent = {"role": "textbox", "name": "Network", "action": "fill", "value": "x"}
+
+    key = _cache_key("textbox", "Network", page.url)
+    save_selector_cache(settings.selector_cache_path, {key: "input[stale]"})
+
+    fresh_selector = 'input[name="networkIp"]'
+    mock_cls = _make_mock_anthropic(
+        json.dumps({"selector": fresh_selector, "confidence": 0.9, "reasoning": "ok"})
+    )
+
+    with patch("backend.webui_agent.vision_fallback.Anthropic", mock_cls):
+        result = resolve_via_vision(page, intent, ev, settings)
+
+    # Exception treated as stale → Haiku re-resolves.
+    assert result == fresh_selector
+    mock_cls.return_value.messages.create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 — 3.4a: viewport_only screenshot param
+# ---------------------------------------------------------------------------
+
+
+def test_vision_screenshot_viewport_only_param(tmp_path: Path) -> None:
+    """vision_screenshot with viewport_only=True must call page.screenshot(full_page=False)."""
+    import backend.webui_agent.evidence as ev_mod
+
+    fake_settings = MagicMock()
+    fake_settings.artifacts_dir = tmp_path
+
+    with patch.object(ev_mod, "get_settings", return_value=fake_settings):
+        from backend.webui_agent.evidence import EvidenceCollector
+
+        ec = EvidenceCollector("test_flow", action_id="act_vp")
+
+    page = MagicMock()
+
+    def fake_screenshot(path: str, full_page: bool = True) -> None:
+        Path(path).write_bytes(b"png")
+
+    page.screenshot.side_effect = fake_screenshot
+
+    # viewport_only=True → full_page=False
+    ec.vision_screenshot(page, "abc123", viewport_only=True)
+    call_kwargs = page.screenshot.call_args.kwargs
+    assert call_kwargs.get("full_page") is False, (
+        "viewport_only=True must call screenshot(full_page=False)"
+    )
+
+    page.screenshot.reset_mock()
+
+    # Default (viewport_only=False) → full_page=True
+    ec.vision_screenshot(page, "def456")
+    call_kwargs = page.screenshot.call_args.kwargs
+    assert call_kwargs.get("full_page") is True, (
+        "Default viewport_only=False must call screenshot(full_page=True)"
     )

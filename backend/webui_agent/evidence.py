@@ -61,15 +61,23 @@ class EvidenceCollector:
         log.info("evidence_step", n=self._n, label=label, path=str(path))
         return path
 
-    def vision_screenshot(self, page: Any, intent_id: str) -> Path:
+    def vision_screenshot(self, page: Any, intent_id: str, viewport_only: bool = False) -> Path:
         """Save ad-hoc PNG without advancing the step counter.
 
         Used by vision_fallback for the API call screenshot. Filename:
         vision-{intent_id}.png — keyed by intent so multiple fallbacks on
         the same flow don't collide.
+
+        Args:
+            page: Playwright page object.
+            intent_id: Short hash identifying the intent (used in filename).
+            viewport_only: When True, capture viewport only (full_page=False),
+                producing a smaller/faster PNG. The reactive resolve_via_vision
+                path passes True; proactive plan-check screenshots use the
+                default (full_page=True).
         """
         path = self.session_dir / f"vision-{intent_id}.png"
-        page.screenshot(path=str(path), full_page=True)
+        page.screenshot(path=str(path), full_page=not viewport_only)
         return path
 
     def dump_dom(self, page: Page, label: str = "dom") -> Path:

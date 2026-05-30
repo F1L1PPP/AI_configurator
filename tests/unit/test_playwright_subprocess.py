@@ -1754,3 +1754,68 @@ def test_kendo_select_timeout_bubbles_as_intercepted_not_unknown_error():
         f"expected 2 open-click attempts (initial + one retry), got {loc.click.call_count}"
     )
     assert reply["attempts"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 — 3.3: fill-timeout regression test
+# fill must NEVER surface click_timeout_unsafe_retry (CLAUDE.md §4)
+# ---------------------------------------------------------------------------
+
+
+def test_fill_timeout_never_returns_click_unsafe_retry():
+    """_do_act with action='fill' and TimeoutError must NOT produce
+    failure_reason='click_timeout_unsafe_retry'.
+
+    That reason is exclusively for click actions (CLAUDE.md §4: Cisco WebUI
+    Apply clicks fire via XHR and must never be retried). A fill timeout is
+    a separate, retriable failure — it must surface one of the element_*
+    reasons depending on the post-failure probe result.
+
+    Scenario: fill fails twice (initial + retry) while the element stays
+    visible+enabled on both re-describe probes → element_intercepted.
+    """
+    loc = _make_locator_for_act(action="fill")
+
+    # Post-fail probe: element is still visible and enabled → element_intercepted
+    # (the "looks fine but still timed out" branch — most common for fill on
+    # an overlaid form field).
+    refreshed_loc = MagicMock()
+    refreshed_loc.is_visible.return_value = True
+    refreshed_loc.is_enabled.return_value = True
+    # Both the initial attempt (loc) and the retry (refreshed_loc from
+    # re-describe) must time out so the function exhausts max_attempts=2
+    # and returns element_intercepted rather than succeeding.
+    loc.fill.side_effect = PlaywrightTimeoutError("fill timed out — element intercepted")
+    refreshed_loc.fill.side_effect = PlaywrightTimeoutError("fill timed out on retry")
+
+    page = MagicMock()
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+
+    with _patched_describe_page(locator_map={"e_001": refreshed_loc}):
+        reply, _new_map, _new_vid = _do_act(
+            page=page,
+            locator_map={"e_001": loc},
+            current_view_id="v",
+            msg={
+                "view_id": "v",
+                "eid": "e_001",
+                "action": "fill",
+                "value": "192.168.1.1",
+            },
+            ev=ev,
+        )
+
+    # THE CRITICAL ASSERTION: fill must NEVER surface click_timeout_unsafe_retry.
+    # That reason is exclusively for click (CLAUDE.md §4). Verify both that
+    # the reply is a failure AND that the specific unsafe reason is absent.
+    assert reply["ok"] is False
+    assert reply["failure_reason"] != "click_timeout_unsafe_retry", (
+        "fill action must NEVER surface click_timeout_unsafe_retry — that reason "
+        "is exclusively for click (CLAUDE.md §4). Got: " + repr(reply["failure_reason"])
+    )
+    # The actual reason must be element_intercepted (visible+enabled, timed out).
+    assert reply["failure_reason"] == "element_intercepted", (
+        f"Expected element_intercepted for fill with visible+enabled element, "
+        f"got {reply['failure_reason']!r}"
+    )

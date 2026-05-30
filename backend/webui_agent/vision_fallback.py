@@ -39,7 +39,8 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _MODEL = "claude-haiku-4-5-20251001"
-_MAX_RETRIES = 5
+_MAX_RETRIES = 2
+_VISION_TIMEOUT_S = 20
 _CONFIDENCE_THRESHOLD = 0.7
 _MAX_PRIOR_SCREENSHOTS = 2
 _MAX_RUNNING_CONFIG_BYTES = 8192
@@ -57,12 +58,19 @@ _MAX_VISION_CALLS_PER_SESSION = 15  # bumped from 5 in chunk 14g (vision-first
 
 
 def _hash_page_url(page_url: str) -> str:
-    """Normalize (strip query, strip fragment, lowercase host), sha1[:12]."""
+    """Normalize (strip query, keep fragment, lowercase host+scheme), sha1[:12].
+
+    Fragment is intentionally included so hash-routed SPA pages like
+    ``#/dhcp`` and ``#/ospf`` produce distinct cache keys. Previously the
+    fragment was stripped, causing wrong-page cache hits on SPAs.
+    """
     from urllib.parse import urlparse  # noqa: PLC0415
 
     parsed = urlparse(page_url)
-    # Reconstruct without query or fragment; lowercase scheme+host.
+    # Reconstruct without query but WITH fragment; lowercase scheme+host.
     normalized = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"
+    if parsed.fragment:
+        normalized = f"{normalized}#{parsed.fragment}"
     return hashlib.sha1(normalized.encode()).hexdigest()[:12]
 
 
@@ -72,11 +80,39 @@ def _cache_key(role: str, name: str, page_url: str) -> str:
 
 
 def load_selector_cache(path: Path) -> dict[str, str]:
-    """Read selector_cache.json; return {} on missing/malformed."""
+    """Read selector_cache.json; return {} on missing/malformed.
+
+    Drops malformed entries on load:
+    - value (selector) must be a non-empty str, AND
+    - key must split into exactly 3 non-empty parts on '|' (``role|name|hash``).
+
+    This removes poison entries like ``"textbox||c737961f1b1a"`` (empty name)
+    that previously caused wrong-element cache hits on the DHCP page.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
+
+    # Valid JSON that isn't an object (e.g. a list or scalar) is malformed for a
+    # cache — return {} rather than crash on .items() below.
+    if not isinstance(raw, dict):
+        return {}
+
+    cleaned: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(value, str) or not value:
+            continue
+        parts = key.split("|")
+        if len(parts) != 3 or not all(parts):
+            continue
+        cleaned[key] = value
+
+    dropped = len(raw) - len(cleaned)
+    if dropped > 0:
+        log.info("selector_cache_malformed_entries_dropped", count=dropped)
+
+    return cleaned
 
 
 def save_selector_cache(path: Path, cache: dict[str, str]) -> None:
@@ -229,7 +265,11 @@ def _call_haiku_vision(
     """Make the Anthropic vision call.  Returns parsed JSON dict or raises."""
     from backend.core.settings import get_settings  # noqa: PLC0415
 
-    client = Anthropic(api_key=get_settings().anthropic_api_key, max_retries=_MAX_RETRIES)
+    client = Anthropic(
+        api_key=get_settings().anthropic_api_key,
+        max_retries=_MAX_RETRIES,
+        timeout=_VISION_TIMEOUT_S,
+    )
 
     content: list[dict[str, Any]] = []
 
@@ -352,12 +392,25 @@ def resolve_via_vision(
     page_url: str = page.url
     key = _cache_key(role, name, page_url)
 
-    # 1. Cache hit — skip Anthropic entirely.
+    # 1. Cache hit — probe before trusting (3.2c: pre-trust probe).
     cache_path: Path = settings.selector_cache_path
     cache = load_selector_cache(cache_path)
     if key in cache:
-        log.info("vision_fallback_cache_hit", key=key, selector=cache[key])
-        return cache[key]
+        cached_selector = cache[key]
+        try:
+            match_count = page.locator(cached_selector).count()
+        except Exception:  # noqa: BLE001
+            match_count = 0
+        if match_count > 0:
+            log.info("vision_fallback_cache_hit", key=key, selector=cached_selector)
+            return cached_selector
+        # Stale entry — selector no longer matches. Evict and re-resolve via
+        # Anthropic below (turns a 30s action-timeout into one cheap probe + one
+        # fresh vision call).
+        log.info("vision_fallback_cache_stale_evict", key=key, selector=cached_selector)
+        evict_from_selector_cache(cache_path, role, name, page_url)
+        cache = load_selector_cache(cache_path)  # reload sans the evicted key
+        # fall through to the screenshot + Haiku path
 
     # Per-session budget guard — bound spend if Haiku misfires on a tricky page.
     if ev.vision_call_count >= _MAX_VISION_CALLS_PER_SESSION:
@@ -370,18 +423,18 @@ def resolve_via_vision(
         )
         return None
 
-    # 2. Take a screenshot of the current page.
+    # 2. Take a viewport-only screenshot (3.4a: smaller/faster PNG for reactive path).
     intent_id = hashlib.sha1(f"{role}|{name}".encode()).hexdigest()[:12]
     try:
-        screenshot_path: Path = ev.vision_screenshot(page, intent_id)
+        screenshot_path: Path = ev.vision_screenshot(page, intent_id, viewport_only=True)
         current_b64 = base64.b64encode(screenshot_path.read_bytes()).decode()
     except Exception:  # noqa: BLE001
         log.warning("vision_fallback_screenshot_failed", role=role, name=name)
         return None
 
-    # 3. Find prior screenshots for grounding context.
+    # 3. Find prior screenshots for grounding context (3.4c: cap at 1 for reactive path).
     screenshots_dir = settings.artifacts_dir / "screenshots"
-    prior_paths = _find_prior_screenshots(screenshots_dir, page_url)
+    prior_paths = _find_prior_screenshots(screenshots_dir, page_url, max_n=1)
     prior_b64s: list[str] = []
     for p in prior_paths:
         with suppress(OSError):
