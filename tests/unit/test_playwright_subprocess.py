@@ -1819,3 +1819,30 @@ def test_fill_timeout_never_returns_click_unsafe_retry():
         f"Expected element_intercepted for fill with visible+enabled element, "
         f"got {reply['failure_reason']!r}"
     )
+
+
+def test_kendo_select_js_uses_two_arg_signature_not_array_destructure():
+    """Regression lock for the live-smoke crash (IP Type combobox).
+
+    Playwright's ``locator.evaluate(fn, arg)`` calls ``fn(element, arg)`` — the
+    element is the FIRST positional argument. The Kendo JS must therefore use a
+    2-arg signature ``(listboxEl, targetValue) =>``, NOT
+    ``([listboxEl, targetValue]) =>`` which destructures the DOM element as an
+    array and throws ``TypeError: object is not iterable`` on the real page
+    (surfacing as ``unknown_error`` and aborting the configure run).
+
+    Mocks cannot catch this — they stub ``locator.evaluate`` to return a dict, so
+    the element is never actually destructured. We assert against the source.
+    """
+    import inspect  # noqa: PLC0415
+
+    src = inspect.getsource(_sub_mod._kendo_select)
+    assert "([listboxEl, targetValue])" not in src, (
+        "Kendo evaluate JS must not destructure the element arg as an array: "
+        "locator.evaluate passes (element, arg), so `([listboxEl, targetValue])` "
+        "treats the DOM element as iterable and throws 'object is not iterable' live."
+    )
+    # Both JS blocks (widget-API + hidden-select) must use the 2-arg form.
+    assert src.count("(listboxEl, targetValue) =>") >= 2, (
+        "Expected both Kendo evaluate functions to use the (element, value) 2-arg signature."
+    )

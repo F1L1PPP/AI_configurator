@@ -438,7 +438,7 @@ def _kendo_select(locator: Any, value: str) -> None:
     #   authoritative text-or-value dead-end check is at the end of strategy 3.
     # -----------------------------------------------------------------------
     js_widget_api = """
-    ([listboxEl, targetValue]) => {
+    (listboxEl, targetValue) => {
         // Guard: kendo global must exist.
         if (typeof kendo === 'undefined') {
             return {ok: false, reason: 'kendo_unavailable'};
@@ -569,7 +569,7 @@ def _kendo_select(locator: Any, value: str) -> None:
     # chunk 1. Kept verbatim as the last-resort fallback.
     # -----------------------------------------------------------------------
     js_hidden_select = """
-    ([listboxEl, targetValue]) => {
+    (listboxEl, targetValue) => {
         // Walk up the DOM to find a hidden <select> in the same Kendo wrapper.
         let node = listboxEl;
         let select = null;
@@ -582,10 +582,13 @@ def _kendo_select(locator: Any, value: str) -> None:
         if (!select) {
             return {ok: false, error: 'backing select not found (walked 6 levels)'};
         }
-        // Find the matching option (exact value match first, then text match).
+        // Find the matching option by value or visible text, case-insensitive
+        // and trimmed (the planner may pass "IPv4" while the option text is
+        // "IPV4" and the value is "ipv4").
         let found = false;
+        const tv = String(targetValue).trim().toLowerCase();
         for (const opt of select.options) {
-            if (opt.value === targetValue || opt.text === targetValue) {
+            if (opt.value.trim().toLowerCase() === tv || opt.text.trim().toLowerCase() === tv) {
                 select.value = opt.value;
                 found = true;
                 break;
