@@ -1226,13 +1226,42 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
                         error=_form_desc.get("message"),
                     )
             else:
-                # Click failed — fall back to list view, proceed normally.
-                log.warning(
-                    "propose_webui_configure_form_open_click_failed",
-                    intent=intent,
-                    failure_reason=_form_result.get("failure_reason"),
-                    error=_form_result.get("error"),
-                )
+                # The open click reported failure. Cisco's "Add" fires a slow XHR
+                # that opens the modal but can exceed the 5s click budget, so the
+                # click is (conservatively, per CLAUDE.md §4) classified
+                # click_timeout_unsafe_retry even though the form actually opened.
+                # Verify by re-describing: if a submit control ("Apply to Device")
+                # is now present, the form IS open — adopt that view so the planner
+                # does NOT re-include "click Add" (which at execute time can't find
+                # Add, mis-resolves to a Filter link, and hangs the child to the
+                # 90s session-kill -> "no live session").
+                _opened_anyway = False
+                if _form_result.get("failure_reason") == "click_timeout_unsafe_retry":
+                    _verify_desc = webui_describe_page(session_id=session_id)
+                    if "error" not in _verify_desc:
+                        _verify_view = _verify_desc["view"]
+                        _now_has_submit = any(
+                            str(_e.get("role") or "").lower() in ("button", "link")
+                            and str(_e.get("name") or "").strip().lower()
+                            in _FORM_SUBMIT_NAMES_LOWER
+                            for _e in (_verify_view.get("elements") or [])
+                        )
+                        if _now_has_submit:
+                            view = _verify_view
+                            _opened_anyway = True
+                            log.info(
+                                "propose_webui_configure_form_opened_despite_click_timeout",
+                                intent=intent,
+                                open_step_name=_open_intent.get("name"),
+                            )
+                if not _opened_anyway:
+                    # Genuine click failure — fall back to list view, proceed normally.
+                    log.warning(
+                        "propose_webui_configure_form_open_click_failed",
+                        intent=intent,
+                        failure_reason=_form_result.get("failure_reason"),
+                        error=_form_result.get("error"),
+                    )
         except Exception as _open_exc:  # noqa: BLE001
             # Form-open failed — absorb, fall back to list view.
             log.warning(
