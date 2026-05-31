@@ -391,7 +391,37 @@ def test_webui_configure_step_fail_recovers_via_re_plan(monkeypatch):
 def test_webui_configure_iteration_cap_hit(monkeypatch):
     """draft_plan always returns a non-empty NEW plan; verify always False.
     Loop must bail with iteration_cap_hit after _WEBUI_CONFIGURE_MAX_ITER
-    execute-batches and call mark_failed exactly once."""
+    execute-batches and call mark_failed exactly once.
+
+    Perf/determinism: this is the only test that intentionally drives the
+    loop all the way to the cap, so its runtime scales with the cap value.
+    Two things are pinned so it stays fast and cap-value-independent:
+
+      1. ``_WEBUI_CONFIGURE_MAX_ITER`` is monkeypatched to a small value (3).
+         Every assertion below references ``tr._WEBUI_CONFIGURE_MAX_ITER``
+         dynamically, so the expected iteration / draft counts track the
+         patched value automatically — the test asserts the cap behavior
+         without being coupled to whatever the production cap happens to be.
+      2. The per-iteration adversarial vision check is disabled by forcing
+         ``plan_vision_enabled=False``. With the real default (True), every
+         loop iteration past the first enters the vision block, globs
+         ``artifacts/screenshots/*<session_id>*`` and — if a prior live smoke
+         left a matching screenshot dir on disk — base64-encodes the PNG and
+         makes a REAL Anthropic vision API call. That single un-mocked call is
+         what blew the cap=10 run out to ~100s on a machine with real
+         artifacts; disabling it keeps the loop pure-in-memory.
+    """
+    # Pin the cap small so the loop is short regardless of the production value.
+    monkeypatch.setattr(tr, "_WEBUI_CONFIGURE_MAX_ITER", 3)
+
+    # Kill the real per-iteration vision path: with plan_vision_enabled=False
+    # the loop never globs screenshots or calls check_plan_via_vision, so no
+    # real LLM/vision request can fire no matter what's on disk.
+    from backend.core.settings import Settings
+
+    fake_settings = Settings.model_construct(plan_vision_enabled=False)
+    monkeypatch.setattr("backend.core.settings.get_settings", lambda: fake_settings)
+
     initial_plan = [
         {"action": "click", "intent": {"role": "button", "name": "Step 1"}, "value": None},
     ]
