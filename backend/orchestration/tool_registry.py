@@ -1490,14 +1490,13 @@ def _propose_webui_configure(**kwargs: Any) -> dict:
 # batches count against this budget so failure-recovery stays bounded.
 # Bumping this means trusting the inner LLM to converge on more pages — keep
 # tight until real flows demand more.
-# The no_progress guard (Fix 3) still kills genuine failure-spins at 2 identical
-# consecutive failures, so this hard cap only bounds LEGITIMATE multi-field flows
-# that progress each iteration. Raised 4 -> 10 (2026-05-31): the DHCP Create-Pool
-# form has ~8 fields and the mislabeled Network/Starting-IP textboxes force a
-# vision-fallback round-trip, so 4 ran out before reaching "Apply". 10 gives room
-# to converge; the describe_page labeling fix (follow-up) removes the vision
-# churn that makes the extra headroom necessary.
-_WEBUI_CONFIGURE_MAX_ITER = 10
+# Reverted 10 -> 4 (2026-05-31): bumping to 10 did NOT help the DHCP form — it
+# *cycles* (the "Apply to Device" button is not surfaced by describe_page, so the
+# executor mis-resolves it to "Cancel", which resets the form and re-fills) rather
+# than progressing, so more iterations only meant longer (18-min) failures. The
+# real fix is the form-interaction work in docs/plan-dhcp-form-interaction.md;
+# re-tune this cap once the form actually converges.
+_WEBUI_CONFIGURE_MAX_ITER = 4
 
 
 def _plan_hash(plan: list[dict[str, Any]]) -> str:
