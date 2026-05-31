@@ -8,9 +8,10 @@ side effects on the router or the WebUI.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from anthropic import Anthropic
+from anthropic.types import ToolChoiceToolParam, ToolParam
 
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
@@ -371,8 +372,10 @@ def draft_plan(
         max_tokens=_PLANNER_MAX_TOKENS,
         system=_INNER_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
-        tools=_SUBMIT_PLAN_TOOL,
-        tool_choice={"type": "tool", "name": "submit_plan"},
+        tools=cast("list[ToolParam]", _SUBMIT_PLAN_TOOL),
+        tool_choice=cast(
+            "ToolChoiceToolParam", {"type": "tool", "name": "submit_plan"}
+        ),
     )
 
     # Guard: forced tool-use plans can truncate silently when stop_reason is
@@ -389,7 +392,7 @@ def draft_plan(
     result: dict[str, Any] | None = None
     for block in response.content:
         if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_plan":
-            result = block.input  # type: ignore[assignment]
+            result = cast("dict[str, Any]", getattr(block, "input", None))
             break
 
     if result is None:
