@@ -1846,3 +1846,330 @@ def test_kendo_select_js_uses_two_arg_signature_not_array_destructure():
     assert src.count("(listboxEl, targetValue) =>") >= 2, (
         "Expected both Kendo evaluate functions to use the (element, value) 2-arg signature."
     )
+
+
+# ---------------------------------------------------------------------------
+# _eid_for_intent — field_key bridge (bounded resolver fix)
+# ---------------------------------------------------------------------------
+
+
+def test_eid_for_intent_exact_match_still_wins():
+    """Exact match wins even when a field_key would also bridge.
+
+    An element named exactly "Network" has role=textbox and field_key="networkIp".
+    Another element has name="255.255.255.0" and field_key="networkIp".
+    Intent (role=textbox, name="Network") → must return the exact-match eid,
+    NOT the bridge candidate.
+    """
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        # Exact match — name equals intent name.
+        {"eid": "e_001", "role": "textbox", "name": "Network", "enabled": True, "field_key": ""},
+        # Bridge candidate — would also fire via field_key bridge.
+        {
+            "eid": "e_002",
+            "role": "textbox",
+            "name": "255.255.255.0",
+            "enabled": True,
+            "field_key": "networkIp",
+        },
+    )
+    # Exact match must win; bridge must not interfere.
+    assert _eid_for_intent(view, "textbox", "Network") == "e_001"
+
+
+def test_eid_for_intent_bridges_network_to_networkip():
+    """field_key bridge: intent "Network" bridges to field_key "networkIp".
+
+    View has a textbox whose display name is a subnet mask value ("255.255.255.0")
+    but whose field_key is "networkIp".  No element is named "Network" exactly.
+    Intent (role=textbox, name="Network") must return that eid via the bridge.
+    """
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {
+            "eid": "e_005",
+            "role": "textbox",
+            "name": "255.255.255.0",
+            "enabled": True,
+            "required": True,
+            "field_key": "networkIp",
+        },
+    )
+    assert _eid_for_intent(view, "textbox", "Network") == "e_005"
+
+
+def test_eid_for_intent_bridges_starting_ip():
+    """field_key bridge: intent "Starting ip" bridges to field_key "startingIp".
+
+    View has a textbox named "10" (a spatial value label) with
+    field_key="startingIp".  Intent (role=textbox, name="Starting ip") bridges.
+    """
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {
+            "eid": "e_007",
+            "role": "textbox",
+            "name": "10",
+            "enabled": True,
+            "field_key": "startingIp",
+        },
+    )
+    assert _eid_for_intent(view, "textbox", "Starting ip") == "e_007"
+
+
+def test_eid_for_intent_bridge_respects_role():
+    """Bridge must NOT fire when the only candidate has a different role.
+
+    A "link" element has field_key="networkIp" but intent role is "textbox".
+    There is no textbox in the view.  Result must be None (no bridge across roles).
+    """
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        # Role mismatch: link not textbox.
+        {"eid": "e_003", "role": "link", "name": "networkIp", "enabled": True, "field_key": "networkIp"},
+    )
+    # Intent asks for textbox; only a link is available — no bridge.
+    assert _eid_for_intent(view, "textbox", "Network") is None
+
+
+def test_eid_for_intent_bridge_min_length():
+    """Bridge must NOT fire when normalized intent name is shorter than 4 chars.
+
+    Intent name "IP" normalises to "ip" (length 2) — must not bridge.
+    """
+    from backend.webui_agent._playwright_subprocess import _eid_for_intent
+
+    view = _view_with(
+        {
+            "eid": "e_009",
+            "role": "textbox",
+            "name": "10",
+            "enabled": True,
+            "field_key": "ipAddress",
+        },
+    )
+    # "IP" → normalized "ip" → len 2 < 4 → no bridge.
+    assert _eid_for_intent(view, "textbox", "IP") is None
+
+
+# ---------------------------------------------------------------------------
+# Cancel-resolution guard (plan #2 — apply intent must never click Cancel)
+# ---------------------------------------------------------------------------
+
+
+def test_is_apply_intent_token_matching():
+    """_is_apply_intent fires only on standalone apply/save/submit/ok tokens."""
+    from backend.webui_agent._playwright_subprocess import _is_apply_intent
+
+    for name in ("Apply to Device", "apply", "Save", "Save changes", "submit", "OK"):
+        assert _is_apply_intent(name) is True, name
+    # "ok" must not fire as a substring of "Lookup"/"Bookmark"; Cancel/Add are not apply.
+    for name in ("Lookup", "Bookmark", "Cancel", "Add", "Network"):
+        assert _is_apply_intent(name) is False, name
+    # Defensive: non-str returns False (a probe result may be absent).
+    assert _is_apply_intent(None) is False  # type: ignore[arg-type]
+
+
+def test_is_cancel_control_name_token_matching():
+    """_is_cancel_control_name fires only on standalone cancel/close tokens."""
+    from backend.webui_agent._playwright_subprocess import _is_cancel_control_name
+
+    for name in ("Cancel", "  Cancel ", "Close", "Close window"):
+        assert _is_cancel_control_name(name) is True, name
+    # "close" must not fire on "disclosure"/"closed-loop"; Apply is not cancel.
+    for name in ("disclosure", "closed-loop", "Apply to Device", "Add"):
+        assert _is_cancel_control_name(name) is False, name
+    assert _is_cancel_control_name(None) is False  # type: ignore[arg-type]
+
+
+def test_act_by_intent_apply_intent_never_resolves_to_cancel():
+    """An "Apply to Device" intent that resolves (via first_match) onto a
+    "Cancel" control must be refused — unknown_eid, and NO click.
+
+    This is the plan #2 loop-driver guard: clicking Cancel resets the DHCP
+    Create Pool form and drives the fill→cancel→refill cycle.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    # first_match mis-resolves the "Apply to Device" intent onto the Cancel button.
+    cancel_loc = MagicMock()
+    cancel_loc.get_attribute.return_value = ""  # no aria-label
+    cancel_loc.text_content.return_value = "Cancel"
+
+    settings_mock = _make_settings_mock()
+
+    fresh_view = {
+        "view_id": "dhcp_fresh",
+        "url": "http://router/webui/#/dhcp",
+        "title": "DHCP",
+        "elements": [],  # empty → eid forward-lookup misses → vision → first_match
+        "modals": [],
+        "errors": [],
+    }
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision", return_value=None),
+        patch("backend.webui_agent.login.first_match", return_value=cancel_loc),
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page",
+            return_value=(fresh_view, {}),
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg={
+                "intent": {
+                    "role": "button",
+                    "name": "Apply to Device",
+                    "action": "click",
+                    "value": None,
+                }
+            },
+            ev=ev,
+        )
+
+    # THE CRUCIAL ASSERTIONS — refused, and Cancel was never clicked.
+    assert reply["ok"] is False
+    assert reply["failure_reason"] == "unknown_eid"
+    assert reply["denied_reason"] == "apply_intent_resolved_to_cancel"
+    assert cancel_loc.click.call_count == 0
+
+
+def test_act_by_intent_apply_intent_allows_non_cancel_resolution():
+    """Control: an "Apply to Device" intent that resolves onto a genuine Apply
+    control (name "Apply to Device") proceeds and clicks — the guard only
+    blocks Cancel/Close, not every submit."""
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    apply_loc = _make_locator_for_act()
+    apply_loc.get_attribute.return_value = ""  # no aria-label
+    apply_loc.text_content.return_value = "Apply to Device"
+
+    settings_mock = _make_settings_mock()
+
+    # eid forward-lookup resolves directly to the Apply button (e_021).
+    fresh_view = {
+        "view_id": "dhcp_fresh",
+        "url": "http://router/webui/#/dhcp",
+        "title": "DHCP",
+        "elements": [
+            {"eid": "e_021", "role": "button", "name": "Apply to Device", "enabled": True},
+        ],
+        "modals": [],
+        "errors": [],
+    }
+    fresh_map = {"e_021": apply_loc}
+
+    with (
+        patch("backend.webui_agent.vision_fallback.resolve_via_vision") as mock_vision,
+        patch("backend.webui_agent.login.first_match") as mock_first_match,
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page",
+            return_value=(fresh_view, fresh_map),
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg={
+                "intent": {
+                    "role": "button",
+                    "name": "Apply to Device",
+                    "action": "click",
+                    "value": None,
+                }
+            },
+            ev=ev,
+        )
+
+    # Resolved via eid forward-lookup; the genuine Apply control was clicked.
+    mock_vision.assert_not_called()
+    mock_first_match.assert_not_called()
+    assert reply["ok"] is True
+    assert reply["chosen_eid"] == "e_021"
+    assert apply_loc.click.call_count == 1
+
+
+def test_act_by_intent_vision_apply_intent_denies_cancel():
+    """The vision path must also refuse an apply intent that resolves to Cancel.
+
+    Mirrors the heuristic guard inside _try_act_with_vision: a vision-resolved
+    Cancel control for an "Apply to Device" intent is refused before _do_act.
+    """
+    from backend.webui_agent._playwright_subprocess import _do_act_by_intent
+
+    page = MagicMock()
+    page.url = "http://router/webui/#/dhcp"
+    ev = MagicMock()
+    ev.session_dir = "/tmp/evid"
+    ev.vision_call_count = 0
+
+    # Vision returns a selector that points at the Cancel button.
+    vision_loc = MagicMock()
+    vision_loc.get_attribute.return_value = ""  # no aria-label
+    vision_loc.text_content.return_value = "Cancel"
+    page.locator.return_value = vision_loc
+
+    settings_mock = _make_settings_mock()
+    fresh_view, fresh_map = _fresh_view_and_map()
+
+    do_act_called = False
+
+    def fake_do_act(*args, **kwargs):
+        nonlocal do_act_called
+        do_act_called = True
+        return ({"ok": True, "attempts": 0}, {}, "v")
+
+    with (
+        patch(
+            "backend.webui_agent.vision_fallback.resolve_via_vision",
+            return_value="button.cancel",
+        ),
+        patch(
+            "backend.webui_agent.semantic_dom.describe_page", return_value=(fresh_view, fresh_map)
+        ),
+        patch("backend.core.settings.get_settings", return_value=settings_mock),
+        patch("backend.webui_agent._playwright_subprocess._do_act", side_effect=fake_do_act),
+    ):
+        reply, _new_map, _new_vid = _do_act_by_intent(
+            page=page,
+            locator_map={},
+            current_view_id="any",
+            msg={
+                "intent": {
+                    "role": "button",
+                    "name": "Apply to Device",
+                    "action": "click",
+                    "value": None,
+                }
+            },
+            ev=ev,
+        )
+
+    assert do_act_called is False, "vision-resolved Cancel reached _do_act for an apply intent"
+    assert reply["ok"] is False
+    assert reply["failure_reason"] == "unknown_eid"
+    assert reply["denied_reason"] == "apply_intent_resolved_to_cancel"
+    assert reply["resolved_via"] == "vision_denied"

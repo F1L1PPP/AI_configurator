@@ -288,6 +288,53 @@ _SENSITIVE_DENY_LIST = frozenset(
     }
 )
 
+# Cancel-resolution guard (plan #2 — destructive "Cancel" click).
+#
+# On the DHCP Create Pool form the "Apply to Device" submit control historically
+# went un-surfaced, so the planner's "Apply to Device" click mis-resolved (via
+# vision/heuristics) onto the nearby "Cancel" button — which reset the form and
+# drove the fill→cancel→refill loop. Even with the control now surfaced (plan #1),
+# the resolver must NEVER satisfy a submit/apply intent by landing on a
+# Cancel/Close element: doing so silently discards the user's form input.
+#
+# _APPLY_INTENT_TOKENS — if the INTENT name contains one of these, the resolution
+# is a submit/apply. _CANCEL_NAME_TOKENS — if the RESOLVED element's accessible
+# name contains one of these, it is a cancel/close control. The intersection is
+# refused (returns unknown_eid). Matched on word boundaries so "ok" does not fire
+# on "Lookup" and "close" does not fire on "disclosure".
+_APPLY_INTENT_TOKENS = frozenset({"apply", "save", "submit", "ok"})
+_CANCEL_NAME_TOKENS = frozenset({"cancel", "close"})
+
+
+def _is_apply_intent(intent_name: str) -> bool:
+    """True if the planner intent name denotes a submit/apply/save/ok action.
+
+    Tokenised on non-alphanumeric boundaries so a substring like the "ok" in
+    "Lookup" or "Bookmark" never counts — only a standalone token matches.
+    Returns False for non-str input (defensive — callers may pass a probe result).
+    """
+    import re  # noqa: PLC0415
+
+    if not isinstance(intent_name, str):
+        return False
+    tokens = {t for t in re.split(r"[^a-z0-9]+", intent_name.lower()) if t}
+    return bool(tokens & _APPLY_INTENT_TOKENS)
+
+
+def _is_cancel_control_name(accessible_name: str) -> bool:
+    """True if a resolved element's accessible name denotes Cancel/Close.
+
+    Token-boundary match (see ``_is_apply_intent``) so "close" does not fire on
+    "disclosure" / "closed-loop". Returns False for non-str input — the
+    accessible name comes from a best-effort Playwright probe that may be absent.
+    """
+    import re  # noqa: PLC0415
+
+    if not isinstance(accessible_name, str):
+        return False
+    tokens = {t for t in re.split(r"[^a-z0-9]+", accessible_name.lower()) if t}
+    return bool(tokens & _CANCEL_NAME_TOKENS)
+
 # Per-action Playwright timeout (ms).
 #
 # Click keeps a 5 s budget: it fires an XHR that may have already landed
@@ -912,16 +959,31 @@ def _eid_for_intent(view: dict[str, Any], role: str, name: str) -> str | None:
       1. Prefer ``required=True`` (form inputs that MUST be filled).
       2. Prefer ``enabled=True`` (filter out disabled mirrors).
       3. Otherwise return the first hit (stable across rebuilds).
+
+    When the exact match yields no candidates, a conservative field_key bridge
+    is attempted (see ``_normalize_for_field_key``).  The bridge only fires
+    when the exact path returns nothing — it cannot override an exact match.
     """
     if not isinstance(role, str) or not isinstance(name, str):
         return None
+
+    all_elements = list(view.get("elements") or []) + list(view.get("modals") or [])
+
     candidates = [
         el
-        for el in list(view.get("elements") or []) + list(view.get("modals") or [])
+        for el in all_elements
         if el.get("role") == role and el.get("name") == name and isinstance(el.get("eid"), str)
     ]
     if not candidates:
+        # Conservative field_key bridge: only fires on exact-match MISS.
+        # Requires same role + non-empty field_key + normalised prefix match.
+        # Minimum intent length 4 prevents short tokens like "ip" or "id"
+        # from bridging accidentally.
+        bridge_result = _eid_for_intent_field_key_bridge(all_elements, role, name)
+        if bridge_result is not None:
+            return bridge_result
         return None
+
     if len(candidates) == 1:
         return candidates[0]["eid"]
     # Tie-break — required first, then enabled, then first.
@@ -932,6 +994,75 @@ def _eid_for_intent(view: dict[str, Any], role: str, name: str) -> str | None:
     if enabled:
         return enabled[0]["eid"]
     return candidates[0]["eid"]
+
+
+def _normalize_for_field_key(s: str) -> str:
+    """Lowercase and strip every non-alphanumeric character.
+
+    Examples:
+        "Starting ip"  → "startingip"
+        "Network"      → "network"
+        "networkIp"    → "networkip"
+    """
+    return "".join(c for c in s.lower() if c.isalnum())
+
+
+def _eid_for_intent_field_key_bridge(
+    all_elements: list[dict[str, Any]], role: str, name: str
+) -> str | None:
+    """Conservative bridge from intent name to element via field_key.
+
+    Only called from ``_eid_for_intent`` after exact-match returns no hits.
+    Same tie-break order as the primary path (required → enabled → first).
+
+    Match condition (``ni`` = normalized intent, ``fk`` = normalized field_key):
+      - ``len(ni) >= 4``                          (blocks "ip", "id", etc.)
+      - ``ni == fk`` OR ``fk.startswith(ni)`` OR ``ni.startswith(fk)``
+    """
+    from backend.core.logging import get_logger  # noqa: PLC0415
+
+    _log = get_logger(__name__)
+
+    ni = _normalize_for_field_key(name)
+    if len(ni) < 4:
+        return None
+
+    bridge_candidates = []
+    for el in all_elements:
+        if el.get("role") != role:
+            continue
+        fk_raw = el.get("field_key")
+        if not isinstance(fk_raw, str) or not fk_raw:
+            continue
+        if not isinstance(el.get("eid"), str):
+            continue
+        fk = _normalize_for_field_key(fk_raw)
+        if ni == fk or fk.startswith(ni) or ni.startswith(fk):
+            bridge_candidates.append(el)
+
+    if not bridge_candidates:
+        return None
+
+    # Tie-break — required first, then enabled, then first.
+    pool = bridge_candidates
+    required = [c for c in pool if c.get("required") is True]
+    if required:
+        pool = required
+    else:
+        enabled = [c for c in pool if c.get("enabled") is True]
+        if enabled:
+            pool = enabled
+
+    winner = pool[0]
+    matched_fk = winner["field_key"]
+    eid = winner["eid"]
+    _log.info(
+        "eid_for_intent_field_key_bridge",
+        intent_name=name,
+        field_key=matched_fk,
+        eid=eid,
+    )
+    return eid
 
 
 def _reverse_lookup_eid(target_loc: Any, locator_map: dict[str, Any]) -> str | None:
@@ -1101,6 +1232,34 @@ def _do_act_by_intent(
                     fresh_view_id,
                 )
 
+            # Cancel-resolution guard (plan #2): an apply/save/submit/ok intent
+            # must never be satisfied by a Cancel/Close control even when vision
+            # picks it — clicking Cancel discards the form. Refuse → unknown_eid.
+            if _is_apply_intent(name) and _is_cancel_control_name(accessible_name):
+                from backend.core.logging import get_logger  # noqa: PLC0415
+
+                get_logger(__name__).info(
+                    "apply_intent_cancel_resolution_denied",
+                    intent_name=name,
+                    accessible_name=accessible_name,
+                    resolved_via="vision",
+                )
+                return (
+                    {
+                        "ok": False,
+                        "failure_reason": "unknown_eid",
+                        "denied_reason": "apply_intent_resolved_to_cancel",
+                        "accessible_name": accessible_name,
+                        "chosen_eid": None,
+                        "view": view,
+                        "attempts": 0,
+                        "resolved_via": "vision_denied",
+                        "vision_attempt": attempt,
+                    },
+                    fresh_map_with_vision,
+                    fresh_view_id,
+                )
+
             synthetic_msg = {
                 "view_id": fresh_view_id,
                 "eid": synthetic_eid,
@@ -1205,6 +1364,34 @@ def _do_act_by_intent(
                 "ok": False,
                 "failure_reason": "sensitive_text_denied",
                 "denied_phrase": matched_phrase,
+                "accessible_name": accessible_name,
+                "chosen_eid": None,
+                "view": view,
+                "attempts": 0,
+            },
+            fresh_map,
+            fresh_view_id,
+        )
+
+    # Cancel-resolution guard (plan #2): an apply/save/submit/ok intent must
+    # NEVER be satisfied by a Cancel/Close control. Resolving "Apply to Device"
+    # onto "Cancel" silently discards the user's form input and drives the
+    # fill→cancel→refill loop. Refuse it — return unknown_eid rather than click
+    # Cancel. Applies to the eid-forward and first_match paths (the vision path
+    # enforces the same guard inside _try_act_with_vision).
+    if _is_apply_intent(name) and _is_cancel_control_name(accessible_name):
+        from backend.core.logging import get_logger  # noqa: PLC0415
+
+        get_logger(__name__).info(
+            "apply_intent_cancel_resolution_denied",
+            intent_name=name,
+            accessible_name=accessible_name,
+        )
+        return (
+            {
+                "ok": False,
+                "failure_reason": "unknown_eid",
+                "denied_reason": "apply_intent_resolved_to_cancel",
                 "accessible_name": accessible_name,
                 "chosen_eid": None,
                 "view": view,

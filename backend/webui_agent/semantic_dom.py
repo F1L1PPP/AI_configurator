@@ -103,6 +103,14 @@ _UNION_SELECTOR = ",".join(
         '[role="dialog"]',
         '[role="alertdialog"]',
         '[role="alert"]',
+        # "Apply to Device" submit control (plan #1). In the captured DOM this is
+        # a <button>, already caught above. These two add the defensive case the
+        # plan calls out: a NON-<button> clickable wrapper (an <a>/<div> with an
+        # ng-click) that carries the save glyph. :has() scopes the match to the
+        # ng-click ancestor of a save icon, so it surfaces the wrapper without
+        # flooding the view with the (non-interactive) icon spans themselves.
+        "[ng-click]:has(> .pl-save)",
+        "[ng-click]:has(> .icon-save-device)",
     ]
 )
 
@@ -153,6 +161,43 @@ _ALERT_ROLES = frozenset({"alert"})
 # of the backing hidden select so the executor can drive it correctly.
 _KENDO_LISTBOX_ROLE = "listbox"
 
+# "Apply to Device" surfacing (DHCP Create Pool form submit control).
+#
+# The Cisco IOS XE WebUI marks every form-submit / save control with a
+# save GLYPH rather than an accessible role or label:
+#     <button ... ng-click="doneAddEditKendoWindow()">
+#         <i class="icon-save-device"></i> Apply to Device
+#     </button>
+#     <button ... ng-click="apply()"><span class="fa pl-save"></span> Apply to Device</button>
+#
+# Two problems this glyph lets us solve conservatively (icon classes appear
+# ONLY on apply/save controls, so keying on them does not flood the view with
+# non-interactive spans):
+#
+#   1. Classification — if the clickable ancestor is ever NOT a <button>
+#      (an <a>/<div> carrying an ``ng-click`` plus the save glyph), _classify_role
+#      would return "unknown" and drop it. _is_apply_control lets us re-classify
+#      such a wrapper as a button so it is still addressable.
+#
+#   2. Survival past the 30-element score cap — the real submit button sits at the
+#      bottom of a tall modal (low centrality) and otherwise scores below the
+#      Cancel button beside it, so it gets cut and the planner's "Apply to Device"
+#      click mis-resolves to "Cancel" (the form-reset loop, plan #1). We add a
+#      score bonus so apply controls cannot be capped out.
+#
+# Matched against the element's class attribute AND the class of any descendant
+# icon (the glyph lives on a child <i>/<span>, not the clickable element itself).
+_APPLY_ICON_CLASSES = ("pl-save", "icon-save-device")
+
+# Class on the primary submit <button> of Cisco's kendo-window forms. Used only
+# as a secondary apply-affinity signal (the glyph above is the primary one).
+_APPLY_PRIMARY_CLASS = "primaryActionButton"
+
+# Score added to an apply/save control so it always clears the max_elements cap.
+# Larger than any composite _score (which is bounded at 1.0) so apply controls
+# sort to the front of the candidate list regardless of centrality/size.
+_APPLY_SCORE_BONUS = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -194,6 +239,25 @@ def describe_page(
         role = _classify_role(loc)
         name = _resolve_name(loc)
         score = _score(bbox, visible, enabled, viewport)
+        field_key = _resolve_field_key(loc)
+
+        # "Apply to Device" surfacing (plan #1 — the form-reset loop driver).
+        # The DHCP Create Pool submit control is marked by a save glyph
+        # (pl-save / icon-save-device). Two adjustments keep it addressable:
+        #   (a) if its clickable ancestor is a non-<button> wrapper that
+        #       _classify_role left as "unknown", re-classify it as a button;
+        #   (b) boost its score so it clears the max_elements cap — otherwise it
+        #       sits low (bottom of a tall modal) and "Apply to Device" mis-
+        #       resolves to the nearby "Cancel" button, resetting the form.
+        # Only probe visible elements that look interactive or unclassified, so
+        # this never flickers across the read-only spans on the page. We do NOT
+        # gate on score>0 here: the submit button sits at the bottom of a tall
+        # modal where centrality drives _score to 0.0 — that is exactly the
+        # element the boost must rescue, so gating on score>0 would defeat it.
+        if role in ("button", "link", "unknown") and _is_apply_control(loc):
+            if role == "unknown":
+                role = "button"
+            score += _APPLY_SCORE_BONUS
 
         # Kendo UI listbox: the visible <span role="listbox"> widget must be
         # surfaced as a fillable combobox. We resolve the backing hidden
@@ -223,6 +287,7 @@ def describe_page(
                 "bbox": bbox,
                 "score": score,
                 "kendo_select_name": kendo_select_name,
+                "field_key": field_key,
             }
         )
 
@@ -304,6 +369,14 @@ def _serialise(eid: str, cand: dict[str, Any]) -> dict[str, Any]:
             int(round(bbox["width"])),
             int(round(bbox["height"])),
         ]
+
+    # field_key bridges intent names to DOM field identifiers when the element
+    # has no clean display label (e.g. DHCP Network/StartingIp/EndingIp inputs
+    # whose spatial label is a subnet mask value, not a human name). Omit when
+    # empty to keep the token budget flat for well-labelled elements.
+    field_key: str = cand.get("field_key") or ""
+    if field_key:
+        out["field_key"] = field_key
 
     # value and required let Phase 4's propose_webui_configure reason about
     # pre-filled form state on a re-describe (don't overwrite already-correct
@@ -598,6 +671,52 @@ def _classify_role(loc: Locator) -> str:
     return _TAG_ROLE_MAP.get(tag, "unknown")
 
 
+def _is_apply_control(loc: Locator) -> bool:
+    """True if this locator is a form-submit / "Apply to Device" save control.
+
+    Detection is by the save GLYPH the Cisco IOS XE WebUI puts on every apply/
+    save control (``pl-save`` / ``icon-save-device``) — those classes appear
+    ONLY on apply controls, so this never matches an ordinary span/icon. The
+    glyph lives on the clickable element itself OR on a descendant ``<i>`` /
+    ``<span>``, so we check both. ``primaryActionButton`` is accepted as a
+    secondary signal (the class Cisco puts on the primary kendo-window submit
+    button).
+
+    Detection is in two cheap steps:
+      1. the element's OWN ``class`` attribute (catches the create-pool submit
+         button, which carries ``primaryActionButton`` directly); and
+      2. a scoped descendant lookup for the save glyph (catches the variant
+         where the glyph sits on a child ``<i>``/``<span>``).
+
+    Used for two things in describe_page:
+      * re-classify a non-``<button>`` clickable wrapper (``<a>``/``<div>`` with
+        an ``ng-click`` + the save glyph) as a button so it stays addressable;
+      * boost the candidate's score so the submit control clears the element cap
+        (otherwise it is cut and "Apply to Device" mis-resolves to "Cancel").
+
+    Best-effort: never raises — returns False on any probe failure.
+    """
+    markers = (*_APPLY_ICON_CLASSES, _APPLY_PRIMARY_CLASS)
+
+    # 1. The clickable element's own class list.
+    cls = _safe_attr(loc, "class") or ""
+    if any(marker in cls for marker in markers):
+        return True
+
+    # 2. A descendant save glyph (the icon lives on a child <i>/<span>). Use a
+    #    scoped sub-locator + count(). Guard the read: ``count()`` must return a
+    #    real int > 0 — this keeps the check deterministic under MagicMock stubs
+    #    (a stubbed locator returns a MagicMock from count(), which fails the
+    #    isinstance test and is treated as "no glyph").
+    icon_selector = ",".join(f".{ic}" for ic in _APPLY_ICON_CLASSES)
+    try:
+        glyph_count = loc.locator(icon_selector).count()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("is_apply_control_glyph_probe_failed", error=str(exc))
+        return False
+    return isinstance(glyph_count, int) and glyph_count > 0
+
+
 def _score(
     bbox: dict[str, Any] | None,
     visible: bool,
@@ -655,6 +774,35 @@ def _safe_call(fn: Any, *, default: Any) -> Any:
         return fn()
     except Exception:
         return default
+
+
+def _resolve_field_key(loc: Locator) -> str:
+    """Return a machine-readable field key for an input element.
+
+    Resolution order:
+      1. ``name`` attribute — preferred; it is always a direct DOM identifier.
+      2. Tail of ``ng-model`` attribute (the part after the last ``.``), e.g.
+         ``dhcpScope.networkIp`` → ``"networkIp"``.
+      3. Empty string when neither is present.
+
+    Best-effort: never raises.  Uses the existing ``_safe_attr`` helper so
+    transient Playwright timeouts are swallowed silently.
+
+    This key is exposed in the element dict so ``_eid_for_intent`` can bridge
+    an intent name like ``"Network"`` to a field whose ``name`` attribute is
+    ``"networkIp"`` when no exact display-name match exists.
+    """
+    name_attr = _safe_attr(loc, "name")
+    if name_attr and name_attr.strip():
+        return name_attr.strip()
+
+    ng_model = _safe_attr(loc, "ng-model")
+    if ng_model and ng_model.strip():
+        tail = ng_model.strip().rsplit(".", 1)[-1]
+        if tail:
+            return tail
+
+    return ""
 
 
 def _resolve_kendo_select_name(listbox_loc: Locator) -> str | None:

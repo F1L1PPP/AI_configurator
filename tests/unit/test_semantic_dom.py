@@ -1075,6 +1075,43 @@ def test_kendo_combobox_falls_back_to_select_name_when_no_spatial():
     assert el["role"] == "combobox"
 
 
+# ---------------------------------------------------------------------------
+# field_key — bounded resolver bridge (Change 1)
+# ---------------------------------------------------------------------------
+
+
+def test_describe_page_exposes_field_key_from_name_attr():
+    """Input with name='networkIp' (no aria/label) → element dict has field_key='networkIp'."""
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "name": "networkIp"},
+        text="",
+    )
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el.get("field_key") == "networkIp"
+
+
+def test_field_key_falls_back_to_ng_model_tail():
+    """Input with only ng-model='dhcpScope.startingIp' → field_key='startingIp'."""
+    inp = _make_locator(
+        tag="INPUT",
+        attrs={"type": "text", "ng-model": "dhcpScope.startingIp"},
+        text="",
+    )
+    # No spatial label (evaluate returns None so the name falls through to "").
+    inp.page.evaluate.return_value = None
+    page = _make_page(locators=[inp])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el.get("field_key") == "startingIp"
+
+
 def test_kendo_and_plain_select_coexist():
     """A Kendo listbox and a plain <select> can appear on the same page without
     interference — both are surfaced as combobox with correct data."""
@@ -1110,3 +1147,154 @@ def test_kendo_and_plain_select_coexist():
     plain_el = next(el for el in view["elements"] if el["name"] == "VLAN List")
     assert kendo_el.get("kendo_select_name") == "subnetmaskOptions"
     assert "kendo_select_name" not in plain_el
+
+
+# ---------------------------------------------------------------------------
+# "Apply to Device" surfacing (plan #1 — DHCP Create Pool submit control)
+# ---------------------------------------------------------------------------
+
+
+def _make_apply_glyph_locator(
+    *,
+    tag: str = "BUTTON",
+    cls: str = "",
+    glyph_count: int = 0,
+    text: str = "Apply to Device",
+    bbox: dict[str, float] | None = None,
+) -> MagicMock:
+    """Locator that emulates an "Apply to Device" save control.
+
+    `cls` is returned by get_attribute("class") — set it to include
+    "primaryActionButton" (or a save-icon class) to fire the class-based
+    detection. `glyph_count` is what ``loc.locator(<icon-selector>).count()``
+    returns — set >0 to fire the descendant-glyph detection. Defaults
+    (cls="", glyph_count=0) make _is_apply_control return False.
+    """
+    loc = _make_locator(tag=tag, attrs={"class": cls} if cls else {}, text=text, bbox=bbox)
+    glyph_sub = MagicMock()
+    glyph_sub.count.return_value = glyph_count
+    loc.locator.return_value = glyph_sub
+    return loc
+
+
+def test_apply_control_surfaced_by_primary_action_class():
+    """A <button> carrying the primaryActionButton class is surfaced as a
+    clickable element named "Apply to Device" (role button)."""
+    btn = _make_apply_glyph_locator(
+        tag="BUTTON",
+        cls="btn btn-primary k-button primaryActionButton ng-binding",
+        text="Apply to Device",
+    )
+    page = _make_page(locators=[btn])
+
+    view, _ = describe_page(page)
+
+    assert len(view["elements"]) == 1
+    el = view["elements"][0]
+    assert el["name"] == "Apply to Device"
+    assert el["role"] == "button"
+
+
+def test_apply_control_surfaced_by_descendant_save_glyph():
+    """A <button> whose save glyph (pl-save / icon-save-device) lives on a child
+    icon is still detected as an apply control (descendant-count path)."""
+    btn = _make_apply_glyph_locator(
+        tag="BUTTON",
+        cls="btn btn-primary k-button k-state-disabled",  # no apply marker on the button itself
+        glyph_count=1,  # <span class="fa pl-save"> child present
+        text="Apply to Device",
+    )
+    page = _make_page(locators=[btn])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["name"] == "Apply to Device"
+    assert el["role"] == "button"
+
+
+def test_apply_control_non_button_wrapper_reclassified_to_button():
+    """A non-<button> clickable wrapper (DIV) carrying the save glyph is
+    re-classified from 'unknown' to 'button' so it stays addressable."""
+    div = _make_apply_glyph_locator(
+        tag="DIV",  # _classify_role would yield "unknown" for a bare DIV
+        cls="",
+        glyph_count=1,  # descendant <i class="icon-save-device">
+        text="Apply to Device",
+    )
+    # A bare DIV has no role attribute → _classify_role returns "unknown" → it
+    # would normally be dropped. The apply-control path must rescue + reclassify.
+    page = _make_page(locators=[div])
+
+    view, _ = describe_page(page)
+
+    assert len(view["elements"]) == 1, "non-button apply wrapper must not be dropped"
+    el = view["elements"][0]
+    assert el["role"] == "button"
+    assert el["name"] == "Apply to Device"
+
+
+def test_apply_control_score_boosted_past_element_cap():
+    """The Apply control sits at the bottom of a tall modal (low centrality) and
+    would be cut by the element cap; the apply-affinity boost must rescue it.
+
+    20 high-centrality buttons (viewport-center y) + 1 low-centrality Apply
+    button (far below center). With max_elements=5 the Apply button would score
+    ~0 and be dropped without the boost; with the boost it sorts to the front.
+    """
+    centered = [
+        _make_locator(
+            tag="BUTTON",
+            text=f"Mid{i}",
+            bbox={"x": 600.0, "y": 450.0, "width": 90.0, "height": 28.0},
+        )
+        for i in range(20)
+    ]
+    apply_btn = _make_apply_glyph_locator(
+        tag="BUTTON",
+        cls="btn btn-primary primaryActionButton",
+        text="Apply to Device",
+        # y far below the 900px viewport center → centrality ~0 → base score 0.
+        bbox={"x": 700.0, "y": 1500.0, "width": 110.0, "height": 21.0},
+    )
+    page = _make_page(locators=[*centered, apply_btn])
+
+    view, _ = describe_page(page, max_elements=5)
+
+    names = [el["name"] for el in view["elements"]]
+    assert "Apply to Device" in names, (
+        f"Apply control was capped out despite the boost; surfaced: {names}"
+    )
+    # Boost sorts it to the very front (base 0 + bonus beats centered base<=1).
+    assert names[0] == "Apply to Device"
+
+
+def test_ordinary_button_not_treated_as_apply_control():
+    """Regression guard against flooding: a plain button with no save glyph and
+    no apply class must NOT receive the apply boost or any reclassification."""
+    btn = _make_apply_glyph_locator(
+        tag="BUTTON",
+        cls="btn btn-secondary",
+        glyph_count=0,  # no save glyph descendant
+        text="Add",
+    )
+    page = _make_page(locators=[btn])
+
+    view, _ = describe_page(page)
+
+    el = view["elements"][0]
+    assert el["name"] == "Add"
+    assert el["role"] == "button"
+    # Score must be the ordinary composite (<= 1.0), i.e. NOT boosted past the cap.
+    # We assert indirectly: a single ordinary button is fine, but its presence
+    # alongside an apply control must rank below it.
+    apply_btn = _make_apply_glyph_locator(
+        tag="BUTTON",
+        cls="primaryActionButton",
+        text="Apply to Device",
+        bbox={"x": 100.0, "y": 100.0, "width": 100.0, "height": 30.0},
+    )
+    page2 = _make_page(locators=[btn, apply_btn])
+    view2, _ = describe_page(page2)
+    names2 = [e["name"] for e in view2["elements"]]
+    assert names2[0] == "Apply to Device", "apply control must outrank the plain button"
