@@ -1,71 +1,98 @@
-# Plan — DHCP WebUI Form Interaction (post-Kendo)
+# Plan — DHCP WebUI Form Interaction (v2, post 15-agent burst)
 
-> **Status:** drafted 2026-05-31. The Kendo-dropdown blocker is **FIXED** (commits
-> `24071b2`, `ea8eda5`, `95a66f1` + cap revert) and unit-green (783 tests, ruff clean).
-> The live DHCP smoke still fails because the form-filling loop **cycles** instead of
-> converging. This doc scopes the real fixes. **Push stays gated on a green smoke** (Filip's rule).
+> **Status:** revised 2026-05-31 after a 15× Opus parallel investigation. The Kendo-dropdown
+> blocker is FIXED. A first pass of form-interaction fixes is committed (WIP, pre-smoke). This
+> doc now reflects the **corrected root cause** (duplicate Add/Edit windows) and the real path
+> to a green smoke, plus high-value safety/bug findings from the audit swarm.
+> Push stays gated on a green smoke (Director's rule). Unit state: 800 pass, ruff + mypy clean.
 
-## What already works
-- Kendo dropdowns (Subnet Mask, IP Type) select cleanly via the hidden-`<select>` path
-  (`kendo_select_success` in the live log). Case-insensitive match handles intent `"IPv4"`
-  vs option text `"IPV4"` / value `"ipv4"`.
-- The planner produces a **correct** plan (Pool Name → Network → Starting ip → Ending ip → Apply).
+## Corrected root cause — DUPLICATE form windows (the real blocker)
+The IOS-XE DHCP page renders **both the "Add" and "Edit" Kendo windows in the DOM at once**, so
+the form fields are **duplicated**: 4× `<select name="ipTypeList">`, 2× each of
+`networkIp` / `startingIp` / `endingIp` / `subnetmaskOptions` / `scopeName`. Consequences:
+- IP Type "select" resolved to the **wrong** combobox (`e_013` "Reserved Only") → `unknown_error`.
+- `field_key` / `name` resolution can't disambiguate duplicates; `select[name='ipTypeList']` hits
+  Playwright strict-mode (multi-match).
+This — not "Apply not surfaced" — is why the run churns. Three agents converged on it independently.
 
-## Why the smoke still fails — evidence: run `act_20260531_43fbca` / `sess_03dd9c4c`
-The execute loop ran **10 iterations / 26 steps / ~18 min** and never reached a verified Apply.
-It **cycles**: fill fields → click **"Cancel"** → form resets → re-fill → repeat. Four compounding causes:
+Two earlier premises were wrong:
+- **"Apply to Device" is a real `<button>`**, not a styled span. It's dropped by the **30-element
+  cap** (bottom of a tall modal, low centrality score). Fix = protect form-action buttons from the cap.
+- **`default gateway` has NO field in the Basic form** — `routers`/`routerIp` is `ng-show="mode=='advance'"`
+  (Advanced only). The planner literally cannot place 20.20.20.1 in Basic mode.
 
-### 1. "Apply to Device" is never surfaced — THE loop driver
-- DOM (`…/99-act-error-e_013.html:17167`): the control is `<span class="fa pl-save"></span> Apply to Device`
-  inside a non-`<button>` wrapper.
-- `describe_page` (`semantic_dom._UNION_SELECTOR` / `_classify_role`) never surfaces it as clickable, so
-  it's absent from the view's elements. The described buttons stop at `e_027 "Add"` / `e_030 "Cancel"`.
-- → the executor can't resolve "click Apply to Device" → heuristic/vision mis-resolves to the nearest
-  button **`e_030 "Cancel"`** → **clicks Cancel → form resets** → re-fills → loop.
-- **Fix:** make `describe_page` surface the Apply control (broaden `_UNION_SELECTOR` to catch
-  `span.pl-save` / its clickable parent, or add a role classification). File: `backend/webui_agent/semantic_dom.py`.
+## Already implemented (committed `5f19144`, WIP — needs window-scoping + deep audit)
+- `semantic_dom`: `field_key` (name/ng-model tail) on every element; `_is_apply_control` + score
+  boost so Apply-to-Device survives the cap.
+- `_playwright_subprocess`: `_eid_for_intent` bridges intent→`field_key` on exact-match miss;
+  submit/apply intents refuse to resolve onto Cancel/Close.
+- These help but are **insufficient alone** — duplicates defeat field_key too.
 
-### 2. Destructive "Cancel" gets clicked
-- Downstream of #1, but dangerous on its own — the resolver should never satisfy an Apply/Save/Submit
-  intent with a Cancel/Close control.
-- **Fix:** in the resolve/deny path, refuse to resolve a submit-intent onto a cancel/close element
-  (treat "Cancel" as a non-target unless the intent *is* cancel). File: `backend/webui_agent/_playwright_subprocess.py`
-  (`_do_act_by_intent` / `_SENSITIVE_DENY_LIST` neighbourhood).
+## Ordered fix sequence to a GREEN smoke
+1. **Scope `describe_page` to the VISIBLE Kendo window** (`semantic_dom.py:describe_page`,
+   `_resolve_kendo_select_name`, the `select[name=...]` reads in `_serialise`). De-duplicate the
+   view so only the on-screen Add window's ~10 fields are surfaced. **Highest leverage; everything
+   else depends on it.** GUARDRAIL: gate on "a visible Kendo window exists, else describe whole
+   page" so VLAN/hostname (non-Kendo) forms don't regress to an empty view.
+2. **Disambiguate backing-select lookups** — scope `select[name=...]` to the widget's own ancestor
+   (`xpath=ancestor::*[contains(@class,'k-widget')]//select`) or `.first`, never page-global.
+   (`_serialise`, `_kendo_select` strategy 2/3.)
+3. **Skip already-correct fields** — IP Type already = IPV4, Subnet Mask already = 255.255.255.0.
+   Have `_kendo_select` early-return on an already-selected value, OR tell the inner planner not to
+   re-select a combobox whose `value` already matches. Removes the two steps that kill the run.
+4. **Stop the 90s session-op timeout from killing the session** (`_subprocess.py:_SESSION_OP_TIMEOUT_S`).
+   A single slow field (vision churn) currently overruns 90s → child killed → `no live session`.
+   Add a per-field wall-clock guard (~35-45s) inside `_do_act_by_intent` that returns a *recoverable*
+   soft-failure instead of a hard session kill; keep 90s as a backstop. (Also: cut reactive vision
+   cost — `_VISION_TIMEOUT_S` 20→8, `_MAX_RETRIES` 2→1.)
+5. **Cancel/close deny** — committed; keep as defense-in-depth.
 
-### 3. Network / Starting-IP / Ending-IP textboxes mislabeled
-- DOM: `<input name="networkIp" ng-model="dhcpScope.networkIp" placeholder="xxx.xxx.xxx.xxx">`
-  (likewise `startingIp`, `endingIp`). **No `id`, no `aria-label`, no adjacent `<label>`** → `_resolve_name`'s
-  `_spatial_label` grabs nearby value-text (`"10"`, `"255.255.255.0"`).
-- → planner's "Network"/"Starting ip" don't match the described names → vision fallback → churn + wrong resolutions.
-- **Fix:** prefer the input's `name` / `ng-model` tail as a label source when spatial-label yields a
-  value-like / low-quality result (map camelCase → words: `networkIp` → "Network IP"), or add a resolution-time
-  match against `name`/`ng-model`. File: `semantic_dom.py:_resolve_name` (± `login.first_match`).
-  **Scope carefully** — shared by all forms.
+Each chunk: mock unit tests → **deep audit (Opus, shared-by-all-forms)** → re-run VLAN/hostname unit
+tests → live re-smoke.
 
-### 4. Pool-name validation quirk
-- Two pool-name controls: a disabled `<textarea name="scopeName" ng-disabled="true">` shadowing the editable
-  input (`e_025`). The form reported `"Please provide a valid DHCP pool name"` mid-loop.
-- Likely a side effect of the Cancel-reset (#1), or the editable field needs a blur/change to register.
-- **Fix:** revisit after #1–#3; if it persists, fire a blur/change after filling Pool Name. File: TBD.
+## Smoke intent change
+For a **first** green: drop the gateway clause (a pool + network/mask + range is a valid, verifiable
+pool). Intent: `Configure DHCP pool MYPOOL with network 20.20.20.0/24` (range optional).
+Add Advanced-mode + `default-router` as a follow-up. CLI verify (the real gate):
+`show running-config | section ip dhcp pool MYPOOL` → must contain `network 20.20.20.0 255.255.255.0`.
+Teardown: `no ip dhcp pool MYPOOL`. (No `test_07` scenario exists yet — ad-hoc chat run for now.)
 
-## Sequence (fix the loop driver first)
-1. **#1 Apply surfacing + #2 Cancel deny** — stops the cycle. Re-smoke: expect it to reach Apply.
-2. **#3 textbox labeling** — removes the vision churn → fast + fewer iterations.
-3. **#4 validation** — only if it persists after 1–2.
+## High-value findings from the audit swarm (act before push)
+**SECURITY (CLAUDE.md §4 — flag to Director):**
+- The generic `webui_configure` write path takes **NO pre-write device snapshot** — the hand-coded
+  VLAN/hostname flows do, but the AI-driven path does not. §4 requires it. Add `take_snapshot(action_id,"pre")`
+  in `_webui_configure` before the first act.
+- **Executed steps are not bounded by the approved plan** — `_webui_configure` re-drafts each iteration
+  from (attacker-influenceable) page content and only *logs* when it exceeds the approved step count.
+  The deny-list is the sole content guard, and it is **blind to icon-only controls** (Cisco's save/delete
+  glyphs have no accessible name) and omits erase/shutdown/remove/default. Bound execution to the approved
+  plan and/or allow-list the approved submit control.
 
-Each chunk: mock unit tests (describe/resolve) → **deep audit** (smoke-touching) → live re-smoke.
+**Correctness / robustness bugs:**
+- Vision pre-trust probe accepts a **unique-but-WRONG** selector (`count()>0`, not name/role-verified) —
+  this is exactly the hallucinated `aria-label='Network'` failure. Add a name/role cross-check; require
+  `count()==1 :visible`; probe fresh selectors too (currently only cache hits are probed).
+- `check_plan_via_vision` crashes the planner on **non-dict JSON / non-numeric confidence** (no isinstance
+  guard) — same class as the cache fix we already shipped. 1-line guards.
+- `_kendo_select` strategy-2 `has_text` is a **substring** match (can pick the wrong option) and the
+  `aria-expanded` guard reads the wrong node (can toggle the popup shut on retry).
+- The `no_progress` guard can't see a **cycle** (varied failures) — add a post-iteration **view-fingerprint
+  oscillation** detector + session-resurrection-on-death.
 
-## Cap
-`_WEBUI_CONFIGURE_MAX_ITER` reverted to **4** (the 10 bump didn't help — it cycled). Re-tune once the form
-converges (a cleanly-progressing run needs ~5–6 iterations).
+**Test gap:** every JS `evaluate` site is mock-stubbed, so the destructuring bug (and these) can only
+surface live. Add a hermetic **headless-Chromium fixture** tier (`file://` static DHCP form, no router)
+— one fixture + test file covers 5 blind JS sites in ~1-2s. Replace the `inspect.getsource` regression
+lock with a real-binding test.
 
-## Risk
-- #1 and #3 touch `describe_page` / resolution — shared by **all** WebUI forms → regression risk → deep
-  audit + run the existing VLAN/hostname WebUI tests before re-smoke.
-- The "fast like Claude in Chrome" gap is real: a general computer-use agent sees the rendered button and
-  reads labels visually; our DOM-first path needs these specific surfacing/labeling fixes to match on this
-  idiosyncratic Cisco form.
+## Research (closing the "fast like Chrome" gap)
+Production agents (browser-use, Stagehand, Prune4Web, WebVoyager) confirm our DOM-first choice: the W3C
+accessible-name algorithm **ignores `name`/`ng-model`**, so an a11y-tree agent is blind to exactly these
+forms. Adopt: (1) a name/ng-model-aware scoring cascade (keywords, not selectors → no hallucination),
+(2) observe-then-act (model picks from an enumerated candidate set, never authors a selector),
+(3) cache resolved actions gated on confirmed submit-success, (4) active loop-breaker (dedup, not just a
+step cap), (5) MutationObserver for submit-success / form-reset / blur-validation. Kendo: drive via
+`$(el).data("kendoDropDownList").value(x).trigger("change")`.
 
-## Committed so far (unpushed, green-smoke-gated)
-`24071b2` chunk-1 Kendo · `ea8eda5` chunk-2 quick · `95a66f1` Kendo evaluate-sig fix · cap revert.
-783 unit tests green, ruff clean. Pre-existing mypy drift in `configure_planner.py:369,392` tracked separately.
+## Committed so far (unpushed, green-smoke-gated) — 14 ahead of origin
+Kendo chunk 1 · cache/vision chunk 2 · evaluate-sig fix · cap revert · scope doc · **mypy fix** ·
+**cap-test speed** · **form-interaction WIP**. 800 unit tests green, ruff + mypy clean.
