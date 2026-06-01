@@ -1,5 +1,13 @@
 # Plan — DHCP WebUI Form Interaction (v2, post 15-agent burst)
 
+> # ⚠️ WebUI vision-driven configure is **NOT FUNCTIONAL** (backup checkpoint, 2026-05-31)
+> The live **DHCP smoke is RED** — the generic vision-driven configure loop does **not** drive
+> the form to a verified end-to-end router write. This is a **BACKUP / WIP** state on
+> `feature/bootstrap`, **not** a working feature — **do not merge to `develop`/`main`**.
+> What *does* work in isolation: Kendo dropdown select, field resolution (`field_key`),
+> Apply-button surfacing, and the open-form-on-slow-Add fix. What's left to reach green is in
+> this doc (window-scoping / skip-already-correct / 90s session-guard) plus the safety gaps.
+
 > **Status:** revised 2026-05-31 after a 15× Opus parallel investigation. The Kendo-dropdown
 > blocker is FIXED. A first pass of form-interaction fixes is committed (WIP, pre-smoke). This
 > doc now reflects the **corrected root cause** (duplicate Add/Edit windows) and the real path
