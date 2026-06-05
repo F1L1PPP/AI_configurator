@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from backend.orchestration import tool_registry as tr
 from backend.orchestration.confirmations import approve_action, propose_action
 
@@ -59,6 +61,14 @@ def _make_action(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: multi-iteration loop removed. This test verifies the Fix 3 "
+        "convergence guard in the legacy _webui_configure (webui_act_by_intent path). "
+        "Atlas path has its own convergence guard tested in test_webui_configure_atlas.py. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_same_failure_twice_aborts_with_no_progress(monkeypatch):
     """If the same step (same role+name) fails with the same error twice across
     iterations, the loop aborts with error='no_progress' BEFORE hitting the cap.
@@ -179,6 +189,13 @@ def test_different_failure_reasons_dont_trigger_no_progress(monkeypatch):
     )
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: multi-iteration loop removed. This test verifies Fix 3 "
+        "single-failure tolerance in the legacy _webui_configure (webui_act_by_intent). "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_no_progress_does_not_fire_on_first_failure(monkeypatch):
     """Fix 3 requires TWO failures of the same (selector, reason). The first
     failure must NOT trigger no_progress — only the second should.
@@ -417,6 +434,13 @@ def test_vision_check_fires_on_iter2_but_not_iter3(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: Fix 5b (empty intent.role/name guard) applies to legacy "
+        "intent-dict plan format. Atlas path uses {field_key, value} steps validated "
+        "by validate_atlas_plan. Keep for git-revert fallback reference."
+    )
+)
 def test_propose_rejects_plan_with_empty_role(monkeypatch):
     """A plan with a step that has intent.role='' must be rejected at propose-time."""
     bad_plan = [
@@ -457,6 +481,12 @@ def test_propose_rejects_plan_with_empty_role(monkeypatch):
     assert result["step_index"] == 0
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: Fix 5b guard applies to legacy intent-dict plan format only. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_propose_rejects_plan_with_empty_name(monkeypatch):
     """A plan with a step that has intent.name='' must be rejected at propose-time."""
     bad_plan = [
@@ -496,6 +526,12 @@ def test_propose_rejects_plan_with_empty_name(monkeypatch):
     assert result["step_index"] == 0
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: Fix 5b guard applies to legacy intent-dict plan format only. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_propose_rejects_plan_with_none_intent_fields(monkeypatch):
     """None values for intent.role and intent.name are treated as empty."""
     bad_plan = [
@@ -534,6 +570,13 @@ def test_propose_rejects_plan_with_none_intent_fields(monkeypatch):
     assert result["error"] == "invalid_plan"
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: This test verifies the legacy Fix 5b path (intent-dict plan). "
+        "In the atlas path, valid plans use {field_key, value} steps. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_propose_accepts_valid_plan(monkeypatch):
     """A plan where all steps have non-empty role and name is accepted normally."""
     good_plan = [
@@ -579,6 +622,12 @@ def test_propose_accepts_valid_plan(monkeypatch):
     assert result.get("status") == "awaiting_approval"
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: Fix 5b guard applies to legacy intent-dict plan format only. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_propose_rejects_second_step_with_empty_name(monkeypatch):
     """If only the second step has an empty name, step_index should be 1."""
     bad_plan = [
@@ -628,6 +677,13 @@ def test_propose_rejects_second_step_with_empty_name(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO re-plan at execute time → replan_beyond_approved event "
+        "cannot occur. This test exercises Fix 7 in the legacy _webui_configure loop. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_replan_beyond_approved_event_fires(monkeypatch):
     """When the re-drafted plan has MORE steps than the approved plan,
     a webui_configure_replan_beyond_approved warning must be emitted.
@@ -790,6 +846,12 @@ def test_replan_same_or_fewer_steps_no_event(monkeypatch):
     )
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO re-plan at execute time → replan_beyond_approved event "
+        "cannot occur. Keep for git-revert fallback reference."
+    )
+)
 def test_replan_beyond_approved_event_includes_counts(monkeypatch):
     """The replan_beyond_approved event must carry approved_step_count,
     replanned_step_count, and delta kwargs for operator visibility."""

@@ -39,7 +39,7 @@ from backend.cli_agent.write_tools import (
 )
 from backend.core.logging import get_logger
 from backend.orchestration.cli_configure_planner import draft_cli_plan
-from backend.orchestration.configure_planner import draft_plan
+from backend.orchestration.configure_planner import draft_atlas_plan, draft_plan
 from backend.orchestration.confirmations import (
     NotApproved,
     is_approved,
@@ -51,10 +51,14 @@ from backend.webui_agent.flows.change_hostname import change_hostname_via_webui
 from backend.webui_agent.generic_driver import (
     close_all_sessions,
     webui_act_by_intent,
+    webui_act_field,
+    webui_apply_control,
     webui_describe_page,
     webui_open,
     webui_open_form_for_planning,
+    webui_perceive,
     webui_verify,
+    webui_verify_a11y,
 )
 
 # Maximum length of a search_docs query. Caps the embedding cost — a 10 MB
@@ -2053,6 +2057,630 @@ def _webui_configure(**kwargs: Any) -> dict:
         plan = next_plan
 
 
+# ---------------------------------------------------------------------------
+# Chunk C4 — Atlas-path propose/execute (NO re-plan at execute)
+#
+# These are the ACTIVE functions wired into _TOOL_FUNCS (see dispatch switch
+# below).  The legacy _propose_webui_configure / _webui_configure remain
+# defined above as a `git revert`-able fallback — NOT called by the dispatcher.
+# ---------------------------------------------------------------------------
+
+
+def _device_fingerprint_for_session() -> str:
+    """Build a device fingerprint from show_version (best-effort).
+
+    Returns ``"unknown__unknown"`` on any error so the atlas path degrades
+    gracefully when SSH is down or the fingerprint module is unavailable.
+    """
+    try:
+        from backend.cli_agent import read_tools as _rt  # noqa: PLC0415
+        from backend.webui_agent.atlas.fingerprint import device_fingerprint  # noqa: PLC0415
+
+        return device_fingerprint(_rt.show_version())
+    except Exception:  # noqa: BLE001
+        return "unknown__unknown"
+
+
+def _atlas_from_view(view: dict[str, Any]) -> Any:  # returns RouteAtlas
+    """Build a minimal RouteAtlas from a webui_perceive view dict.
+
+    The perceive view's ``fields`` list already carries the key/label/role/
+    widget/options/required that the atlas validator needs.  This helper
+    converts those dicts to ``FieldSpec`` / ``ControlSpec`` objects so that
+    ``validate_atlas_plan`` (which expects a ``RouteAtlas``) can run against
+    a live-perceived page without requiring a pre-stored atlas file.
+    """
+    from backend.webui_agent.atlas.schema import (  # noqa: PLC0415
+        ControlSpec,
+        FieldSpec,
+        RouteAtlas,
+    )
+
+    route = view.get("route", "")
+    fp = view.get("device_fingerprint", "unknown__unknown")
+
+    fields: list[FieldSpec] = []
+    for f in view.get("fields", []):
+        if not isinstance(f, dict):
+            continue
+        fkey = str(f.get("key") or "").strip()
+        flabel = str(f.get("label") or f.get("name") or fkey).strip()
+        frole = str(f.get("role") or "textbox").strip()
+        fwidget = str(f.get("widget") or "input").strip()
+        foptions = f.get("options")
+        frequired = bool(f.get("required", False))
+        if not fkey:
+            continue
+        fields.append(
+            FieldSpec(
+                key=fkey,
+                label=flabel,
+                role=frole,
+                widget=fwidget,
+                options=list(foptions) if foptions else None,
+                required=frequired,
+            )
+        )
+
+    apply_controls: list[ControlSpec] = []
+    for c in view.get("apply_controls", []):
+        if not isinstance(c, dict):
+            continue
+        ckey = str(c.get("key") or "").strip()
+        clabel = str(c.get("label") or c.get("name") or ckey).strip()
+        crole = str(c.get("role") or "button").strip()
+        if not ckey:
+            continue
+        apply_controls.append(ControlSpec(key=ckey, label=clabel, role=crole))
+
+    return RouteAtlas(
+        route=route,
+        device_fingerprint=fp,
+        fields=fields,
+        apply_controls=apply_controls,
+    )
+
+
+def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
+    """Atlas-path propose: perceive (one a11y snapshot) → draft_atlas_plan
+    (typed, validated) → propose_action.  Returns the same awaiting_approval
+    shape as the legacy function so the frontend + outer planner are unchanged.
+
+    Key properties vs. the legacy path:
+    - One webui_perceive call (no webui_describe_page, no networkidle).
+    - draft_atlas_plan produces ``{field_key, value}`` steps, not intent-dicts.
+    - At execute time EXACTLY these validated steps run — no re-plan.
+    """
+    intent = kwargs.get("intent")
+    webui_path = kwargs.get("webui_path")
+    if not isinstance(intent, str) or not intent.strip():
+        return {"error": "bad_parameters", "message": "intent must be a non-empty string"}
+    if not isinstance(webui_path, str) or not webui_path.strip():
+        return {"error": "bad_parameters", "message": "webui_path must be a non-empty string"}
+
+    # 1. RAG grounding
+    rag_result = _search_docs(query=intent, top_k=3)
+    if "error" in rag_result:
+        return rag_result
+    rag_chunks = rag_result.get("results", [])
+
+    # 2. Best-effort device fingerprint (SSH may be down — keep going)
+    fp = _device_fingerprint_for_session()
+
+    # 3. Open the WebUI page — no action_id yet (propose_action runs after)
+    open_result = webui_open(path=webui_path)
+    if "error" in open_result:
+        return open_result
+    session_id = open_result["session_id"]
+
+    # 4. Perceive: single a11y snapshot — this replaces both describe_page and
+    #    the networkidle wait that made the legacy path so slow.
+    perceive_result = webui_perceive(
+        session_id=session_id,
+        route=webui_path,
+        device_fingerprint=fp,
+    )
+    if "error" in perceive_result:
+        close_all_sessions()
+        return perceive_result
+    view = perceive_result["view"]
+
+    # 5. Open-form probe: if the perceived view has no fields but an open-form
+    #    control is visible, click it and re-perceive — same heuristic as the
+    #    legacy path, adapted for the atlas view shape.
+    #
+    #    The atlas view uses ``apply_controls`` (submit buttons) and ``fields``
+    #    (fillable elements).  A list-page has apply_controls=[] and fields=[]
+    #    but may have an "Add" button in the unmapped list.  We also check
+    #    the open_form_control the perceive engine may surface directly.
+    #
+    #    Condition: no fields AND no apply_controls present (form not open)
+    #               AND a trigger-name button found in apply_controls or
+    #               unmapped elements.
+    _view_fields: list[dict] = view.get("fields") or []
+    _view_apply: list[dict] = view.get("apply_controls") or []
+    _view_unmapped: list[dict] = view.get("unmapped") or []
+    _open_form_ctrl = view.get("open_form_control")
+
+    _has_submit = any(
+        str(_c.get("label") or _c.get("name") or "").strip().lower()
+        in _FORM_SUBMIT_NAMES_LOWER
+        for _c in _view_apply
+    )
+    _trigger_key: str | None = None
+    _trigger_label: str | None = None
+    _trigger_role: str | None = None
+
+    if not _view_fields and not _has_submit:
+        # Primary: the atlas-surfaced open_form_control (the "Add"/"Create"
+        # button on a list page). reconcile now puts this in the view; without
+        # it the form never opens and the plan comes back empty on OSPF/DHCP.
+        if isinstance(_open_form_ctrl, dict) and (
+            _open_form_ctrl.get("label") or _open_form_ctrl.get("name")
+        ):
+            _trigger_key = str(_open_form_ctrl.get("key") or "").strip() or None
+            _trigger_label = str(
+                _open_form_ctrl.get("label") or _open_form_ctrl.get("name") or ""
+            ).strip()
+            _trigger_role = str(_open_form_ctrl.get("role") or "button").strip()
+        else:
+            # Fallback: scan apply_controls + unmapped for a trigger-name button.
+            _candidates = list(_view_apply) + list(_view_unmapped)
+            for _cand in _candidates:
+                _cname = str(_cand.get("label") or _cand.get("name") or "").strip().lower()
+                _crole = str(_cand.get("role") or "").lower()
+                if _cname in _FORM_TRIGGER_NAMES_LOWER and _crole in ("button", "link", ""):
+                    _trigger_key = str(_cand.get("key") or "").strip() or None
+                    _trigger_label = str(
+                        _cand.get("label") or _cand.get("name") or ""
+                    ).strip()
+                    _trigger_role = str(_cand.get("role") or "button").strip()
+                    break
+
+    if _trigger_label is not None:
+        _open_intent: dict = {
+            "role": _trigger_role or "button",
+            "name": _trigger_label,
+            "action": "click",
+        }
+        try:
+            _form_result = webui_open_form_for_planning(session_id, _open_intent)
+            if _form_result.get("ok"):
+                _form_perceive = webui_perceive(
+                    session_id=session_id,
+                    route=webui_path,
+                    device_fingerprint=fp,
+                )
+                if "error" not in _form_perceive:
+                    view = _form_perceive["view"]
+                    log.info(
+                        "propose_webui_configure_atlas_opened_form",
+                        intent=intent,
+                        trigger_label=_trigger_label,
+                    )
+                else:
+                    log.warning(
+                        "propose_webui_configure_atlas_reperceive_after_form_open_failed",
+                        intent=intent,
+                        error=_form_perceive.get("message"),
+                    )
+            else:
+                log.warning(
+                    "propose_webui_configure_atlas_form_open_click_failed",
+                    intent=intent,
+                    failure_reason=_form_result.get("failure_reason"),
+                )
+        except Exception as _open_exc:  # noqa: BLE001
+            log.warning(
+                "propose_webui_configure_atlas_form_open_exception",
+                intent=intent,
+                error=str(_open_exc),
+            )
+
+    # 6. Running-config for conflict detection (soft-fail)
+    running_config = ""
+    try:
+        running_config = read_tools.show_running_config()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("propose_webui_configure_atlas_running_config_failed", error=str(exc))
+
+    # 7. Build a minimal RouteAtlas from the perceive view so validate_atlas_plan
+    #    can type-check the LLM's output against the live-perceived fields.
+    atlas = _atlas_from_view(view)
+
+    # 8. Atlas-typed plan draft (raises RuntimeError on LLM/parse failure)
+    try:
+        drafted = draft_atlas_plan(
+            intent,
+            rag_chunks,
+            view,
+            atlas,
+            running_config=running_config,
+        )
+    except AnthropicOverloadedError as exc:
+        request_id = getattr(exc, "request_id", None)
+        log.warning(
+            "propose_webui_configure_atlas_llm_overloaded",
+            intent=intent,
+            request_id=request_id,
+        )
+        close_all_sessions()
+        return {
+            "error": "llm_overloaded",
+            "message": "The drafting LLM (Haiku) is temporarily overloaded. Please retry in a minute.",
+            "request_id": request_id,
+        }
+    except RuntimeError as exc:
+        log.error("propose_webui_configure_atlas_draft_failed", intent=intent, error=str(exc))
+        close_all_sessions()
+        return {"error": "draft_failed", "message": str(exc)}
+
+    typed_plan: list[dict[str, Any]] = drafted["plan"]  # [{field_key, value}, ...]
+    verify_text = drafted["verify_text"]
+    risk = drafted["risk"]
+    equivalent_cli = drafted.get("equivalent_cli_commands") or []
+    validation_errors = drafted.get("validation_errors") or []
+
+    if not typed_plan:
+        close_all_sessions()
+        return {
+            "error": "intent_not_mappable",
+            "message": risk,
+            "evidence": [
+                {"source": c.get("source"), "section": c.get("section")} for c in rag_chunks
+            ],
+            "validation_errors": validation_errors,
+        }
+
+    # 9. Build display-compatible steps for the frontend (action/intent/value shape)
+    #    PLUS carry field_key for the executor.  The executor reads field_key; the
+    #    frontend renders action + intent + value (unchanged contract).
+    display_steps: list[dict[str, Any]] = []
+    for step in typed_plan:
+        fk = step["field_key"]
+        val = step["value"]
+        field = atlas.field_by_key(fk)
+        if field is None:
+            # Should not happen after validate_atlas_plan, but be defensive.
+            action_name = "fill"
+            frole = "textbox"
+            flabel = fk
+        else:
+            frole = field.role
+            flabel = field.label
+            widget = field.widget
+            # Map widget/role to a human-readable action name for the frontend.
+            if widget in ("kendo_combobox",) or frole in ("combobox", "listbox"):
+                action_name = "select"
+            elif widget in ("checkbox", "radio") or frole in ("checkbox", "radio"):
+                action_name = "check"
+            else:
+                action_name = "fill"
+        display_steps.append(
+            {
+                "action": action_name,
+                "intent": {"role": frole, "name": flabel},
+                "value": val,
+                "field_key": fk,
+            }
+        )
+
+    # Append the apply-control step (executor uses apply_key; frontend renders it)
+    apply_key: str | None = None
+    apply_label = "Apply"
+    apply_role = "button"
+    if atlas.apply_controls:
+        apply_ctrl = atlas.apply_controls[0]
+        apply_key = apply_ctrl.key
+        apply_label = apply_ctrl.label
+        apply_role = apply_ctrl.role
+    display_steps.append(
+        {
+            "action": "click",
+            "intent": {"role": apply_role, "name": apply_label},
+            "value": None,
+            "apply_key": apply_key,
+        }
+    )
+
+    # 10. Conflict detection (same as legacy path — soft-fail)
+    existing = None
+    if equivalent_cli and running_config:
+        existing = find_existing_block(equivalent_cli, running_config)
+
+    evidence = [{"source": c.get("source"), "section": c.get("section")} for c in rag_chunks]
+
+    # 11. Register the action.  params carries ONLY what the executor needs.
+    #     display_steps (with field_key + apply_key) IS the plan the executor runs.
+    webui_params: dict[str, Any] = {
+        "intent": intent,
+        "webui_path": webui_path,
+        "plan": display_steps,
+        "verify_text": verify_text,
+        "risk": risk,
+        "evidence": evidence,
+        "session_id": session_id,
+        "device_fingerprint": fp,
+        "equivalent_cli_commands": equivalent_cli,
+        "apply_key": apply_key,
+    }
+    preview_meta: dict[str, Any] | None = None
+    if existing:
+        preview_meta = {
+            "existing_entity": existing["anchor"],
+            "existing_block": existing["block"],
+            "is_exact_match": existing["is_exact_match"],
+        }
+
+    action_id = propose_action(
+        tool="webui_configure", params=webui_params, preview_meta=preview_meta
+    )
+
+    webui_preview: dict[str, Any] = {
+        "intent": intent,
+        "plan": display_steps,
+        "verify_text": verify_text,
+        "risk": risk,
+        "evidence": evidence,
+        "step_count": len(display_steps),
+        "validation_errors": validation_errors,
+    }
+
+    return {
+        "status": "awaiting_approval",
+        "action_id": action_id,
+        "execute_tool": "webui_configure",
+        "preview": webui_preview,
+        "next_step": _NEXT_STEP_WEBUI,
+        "preview_meta": preview_meta,
+    }
+
+
+def _webui_configure_atlas(**kwargs: Any) -> dict:
+    """Execute the stored atlas-typed plan.  NO re-plan at execute time.
+
+    The operator approved an exact set of field fills + one apply click.
+    This function runs EXACTLY those steps via webui_act_field +
+    webui_apply_control + webui_verify_a11y.  No draft_atlas_plan /
+    draft_plan invocation here — that's the inner_plan_empty regression lock.
+
+    Convergence guard: if the SAME (field_key, failure_reason) pair fails
+    twice, we abort with ``no_progress`` (same rule as the legacy path).
+    """
+    from backend.cli_agent.snapshots import take_snapshot  # noqa: PLC0415
+    from backend.orchestration.confirmations import (  # noqa: PLC0415
+        get_action,
+        mark_executed,
+        mark_failed,
+    )
+
+    action_id = kwargs.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        return {"error": "bad_parameters", "message": "action_id must be a non-empty string"}
+
+    # HITL layer 2
+    if not is_approved(action_id):
+        return {"error": "not_approved", "message": f"action_id {action_id!r} is not APPROVED"}
+
+    try:
+        action = get_action(action_id)
+    except KeyError:
+        return {"error": "unknown_action", "message": f"no action with id {action_id!r}"}
+
+    params = action.get("params", {})
+    plan: list[dict[str, Any]] = params.get("plan") or []
+    verify_text: str | None = params.get("verify_text")
+    session_id: str | None = params.get("session_id")
+    fp: str = params.get("device_fingerprint") or "unknown__unknown"
+    webui_path: str = params.get("webui_path") or ""
+    apply_key: str | None = params.get("apply_key")
+
+    if not plan or not session_id:
+        mark_failed(action_id)
+        return {"error": "bad_action_params", "message": "action missing plan or session_id"}
+
+    # Separate field-fill steps from the trailing apply step
+    field_steps = [s for s in plan if s.get("field_key")]
+    # apply_key in params is the canonical apply key; the apply step in plan is
+    # just for display.  Use the params value (already validated at propose time).
+
+    executed_steps: list[dict[str, Any]] = []
+
+    # Re-perceive to refresh the child's current_atlas (so act_field locates
+    # fields correctly) — one cheap a11y read, no networkidle.
+    reperceive = webui_perceive(
+        session_id=session_id,
+        route=webui_path or None,
+        device_fingerprint=fp,
+    )
+    if "error" in reperceive:
+        mark_failed(action_id, reperceive)
+        close_all_sessions()
+        log.error(
+            "webui_configure_atlas_reperceive_failed",
+            action_id=action_id,
+            error=reperceive,
+        )
+        return {
+            "error": "reperceive_failed",
+            "message": reperceive.get("message", "perceive failed at execute time"),
+            "session_id": session_id,
+        }
+
+    # Convergence guard: same (field_key, failure_reason) fails twice in the
+    # plan → no_progress (the plan is circular or the field is unmappable).
+    # Unlike the legacy multi-iteration path, we process ALL field steps in a
+    # single pass and collect failures before deciding.  This lets the guard
+    # see both occurrences of the same key in one batch without needing a
+    # second execution attempt.
+    _step_failure_counts: dict[tuple[str, str], int] = {}
+    first_failure: dict[str, Any] | None = None
+
+    for step in field_steps:
+        fk = step["field_key"]
+        val = step.get("value")
+
+        step_result = webui_act_field(
+            session_id=session_id,
+            field_key=fk,
+            value=val,
+            action_id=action_id,
+        )
+        ok = step_result.get("ok") is True and "error" not in step_result
+        executed_steps.append(
+            {
+                "field_key": fk,
+                "value": val,
+                "result": step_result,
+                "status": "ok" if ok else "failed",
+            }
+        )
+
+        if not ok:
+            failure_reason = step_result.get("failure_reason") or step_result.get("error", "")
+            _failure_key: tuple[str, str] = (fk, str(failure_reason))
+            _step_failure_counts[_failure_key] = _step_failure_counts.get(_failure_key, 0) + 1
+
+            log.warning(
+                "webui_configure_atlas_step_failed",
+                action_id=action_id,
+                field_key=fk,
+                failure_reason=failure_reason,
+                failure_count=_step_failure_counts[_failure_key],
+            )
+
+            if _step_failure_counts[_failure_key] >= 2:
+                mark_failed(action_id)
+                close_all_sessions()
+                log.error(
+                    "webui_configure_atlas_no_progress",
+                    action_id=action_id,
+                    field_key=fk,
+                    failure_reason=failure_reason,
+                    failure_count=_step_failure_counts[_failure_key],
+                )
+                return {
+                    "error": "no_progress",
+                    "message": (
+                        f"Field '{fk}' failed with '{failure_reason}' "
+                        f"{_step_failure_counts[_failure_key]} times in this plan — "
+                        "aborting to avoid spinning."
+                    ),
+                    "field_key": fk,
+                    "failure_reason": failure_reason,
+                    "failure_count": _step_failure_counts[_failure_key],
+                    "completed_steps": executed_steps,
+                }
+
+            # Record the first failure encountered (for the step_failed path).
+            if first_failure is None:
+                first_failure = {
+                    "field_key": fk,
+                    "failure_reason": failure_reason,
+                    "result": step_result,
+                }
+
+    if first_failure is not None:
+        # At least one field step failed (but not no_progress).  No apply.
+        mark_failed(action_id, first_failure)
+        close_all_sessions()
+        return {
+            "error": "step_failed",
+            "message": (
+                f"Field '{first_failure['field_key']}' failed: "
+                f"{first_failure['failure_reason']}"
+            ),
+            "failed_step": first_failure,
+            "completed_steps": executed_steps,
+        }
+
+    # All field steps succeeded — click Apply.
+    apply_result = webui_apply_control(
+        session_id=session_id,
+        action_id=action_id,
+        key=apply_key,
+    )
+    apply_ok = apply_result.get("ok") is True and "error" not in apply_result
+    if not apply_ok:
+        failure_reason = apply_result.get("failure_reason") or apply_result.get("error", "")
+        # NEVER retry apply (CLAUDE.md §4: click_timeout_unsafe_retry is terminal).
+        mark_failed(action_id, apply_result)
+        close_all_sessions()
+        log.error(
+            "webui_configure_atlas_apply_failed",
+            action_id=action_id,
+            apply_key=apply_key,
+            failure_reason=failure_reason,
+        )
+        return {
+            "error": "apply_failed",
+            "message": f"Apply control failed: {failure_reason}",
+            "failure_reason": failure_reason,
+            "apply_result": apply_result,
+            "completed_steps": executed_steps,
+        }
+
+    # Verify (a11y-based — no webui_describe_page / networkidle).
+    verify_result: dict[str, Any] | None = None
+    if verify_text:
+        import time as _time  # noqa: PLC0415
+
+        # Poll briefly: after Apply the Cisco list page needs a moment to
+        # re-render (close the modal, repaint the grid), so a single immediate
+        # check can false-negative on a write that actually landed. ~3s total.
+        _verify_present = False
+        for _attempt in range(4):
+            verify_result = webui_verify_a11y(session_id=session_id, contains=verify_text)
+            if verify_result.get("present"):
+                _verify_present = True
+                break
+            if _attempt < 3:
+                _time.sleep(0.75)
+        if not _verify_present:
+            # Verify failed — do NOT mark_executed; surface as verify_failed.
+            mark_failed(action_id, verify_result)
+            close_all_sessions()
+            log.error(
+                "webui_configure_atlas_verify_failed",
+                action_id=action_id,
+                verify_text=verify_text,
+                verify_result=verify_result,
+            )
+            return {
+                "error": "verify_failed",
+                "message": f"verify_a11y did not find {verify_text!r} after apply",
+                "verify_text": verify_text,
+                "verify_result": verify_result,
+                "completed_steps": executed_steps,
+            }
+
+    # Success — mark executed, take POST-snapshot, clean up.
+    mark_executed(action_id)
+    try:
+        take_snapshot(action_id, "post")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "webui_configure_atlas_post_snapshot_failed",
+            action_id=action_id,
+            error=str(exc),
+        )
+    close_all_sessions()
+
+    log.info(
+        "webui_configure_atlas_complete",
+        action_id=action_id,
+        steps_run=len(executed_steps),
+        verify_text=verify_text,
+    )
+    return {
+        "ok": True,
+        "action_id": action_id,
+        "completed_steps": executed_steps,
+        "verify_result": verify_result,
+        "snapshot_post": None,  # take_snapshot writes files; path is artifacts-side
+    }
+
+
 def _propose_debug_sweep(**kwargs: Any) -> dict:
     """Propose a diagnostic show plan. Reactive (failure context found) or
     on-demand (no recent failure). Returns awaiting_approval shape.
@@ -2217,11 +2845,13 @@ _TOOL_FUNCS: dict[str, Callable[..., Any]] = {
     "webui_set_hostname": change_hostname_via_webui,
     "propose_webui_add_access_vlan": _propose_webui_add_access_vlan,
     "webui_add_access_vlan": add_access_vlan_via_webui,
-    # Phase 5 — generic AI-driven WebUI configure (two-step HITL).
-    # webui_open / webui_describe_page / webui_verify / webui_act /
-    # webui_act_by_intent are internal helpers only (not in TOOL_SCHEMAS).
-    "propose_webui_configure": _propose_webui_configure,
-    "webui_configure": _webui_configure,
+    # Phase 5 / Chunk C4 — generic AI-driven WebUI configure (two-step HITL).
+    # Switched to atlas variants: perceive → draft_atlas_plan → execute with
+    # NO re-plan (kills inner_plan_empty + >5-min latency).
+    # Legacy _propose_webui_configure / _webui_configure remain defined above
+    # as a `git revert`-able fallback — they are NOT called by this dispatcher.
+    "propose_webui_configure": _propose_webui_configure_atlas,
+    "webui_configure": _webui_configure_atlas,
     # CLI AI configure — same propose/execute split. Inner Haiku drafts
     # IOS XE commands grounded in RAG + running-config; denylist filters
     # at propose AND execute time.

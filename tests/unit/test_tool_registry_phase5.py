@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from anthropic._exceptions import OverloadedError as AnthropicOverloadedError
 
 from backend.orchestration import tool_registry as tr
@@ -54,41 +55,41 @@ def test_old_generic_write_tools_not_in_write_tools():
 
 
 def test_propose_webui_configure_happy_path(monkeypatch):
-    """Mock search_docs, webui_open, webui_describe_page, draft_plan;
-    assert action_id returned and plan stored in params."""
+    """Mock search_docs, webui_open, webui_perceive, draft_atlas_plan;
+    assert action_id returned and plan stored in params.
+    Updated for Chunk C4 (atlas path): perceive + draft_atlas_plan replace
+    describe_page + draft_plan."""
     rag_result = {
         "results": [
             {"text": "OSPF config info", "source": "ospf.pdf", "section": "OSPF Basics"},
         ]
     }
-    open_result = {"session_id": "sess_abc123", "view": {"elements": []}}
-    desc_result = {
-        "session_id": "sess_abc123",
-        "view": {"elements": [{"role": "button", "name": "Add Process"}]},
+    open_result = {"session_id": "sess_abc123"}
+    # Atlas perceive view: has a field so the form is "open"
+    perceive_view = {
+        "route": "/webui/#/routing/ospf",
+        "page_title": "OSPF",
+        "fields": [
+            {"key": "ospf.process_id", "label": "Process ID", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
+        ],
+        "apply_controls": [{"key": "apply", "label": "Add Process", "role": "button"}],
+        "unmapped": [],
     }
     drafted = {
-        "plan": [
-            {
-                "action": "click",
-                "intent": {"role": "button", "name": "Add Process"},
-                "value": None,
-            }
-        ],
+        "plan": [{"field_key": "ospf.process_id", "value": "100"}],
         "verify_text": "OSPF process 100",
         "risk": "Enabling OSPF may affect routing.",
+        "equivalent_cli_commands": ["router ospf 100"],
+        "validation_errors": [],
     }
 
     monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
     monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
-    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
-    monkeypatch.setattr(tr, "draft_plan", lambda *a, **kw: drafted)
-    # desc_result has "Add Process" button (no textboxes) → heuristic fires; stub
-    # the form-open so no real session is touched.  Returning not-ok means the
-    # heuristic falls back to the list view and the single authoritative draft_plan
-    # call still produces the expected plan.
-    monkeypatch.setattr(
-        tr, "webui_open_form_for_planning", lambda sid, intent: {"ok": False, "failure_reason": "no_session"}
-    )
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": perceive_view})
+    monkeypatch.setattr(tr, "draft_atlas_plan", lambda *a, **kw: drafted)
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -99,8 +100,8 @@ def test_propose_webui_configure_happy_path(monkeypatch):
     assert result["status"] == "awaiting_approval"
     assert result["action_id"].startswith("act_")
     assert result["execute_tool"] == "webui_configure"
-    assert result["preview"]["step_count"] == 1
-    assert result["preview"]["plan"][0]["action"] == "click"
+    # 1 field step + 1 apply step = 2
+    assert result["preview"]["step_count"] == 2
     assert result["preview"]["verify_text"] == "OSPF process 100"
 
 
@@ -110,25 +111,33 @@ def test_propose_webui_configure_happy_path(monkeypatch):
 
 
 def test_propose_webui_configure_empty_plan_returns_error(monkeypatch):
-    """Inner LLM returns empty plan → error: intent_not_mappable."""
+    """Inner atlas LLM returns empty plan → error: intent_not_mappable.
+    Updated for Chunk C4 (atlas path)."""
     monkeypatch.setattr(
         tr,
         "_search_docs",
         lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
     )
-    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_x", "view": {}})
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_x"})
     monkeypatch.setattr(
-        tr, "webui_describe_page", lambda **kw: {"session_id": "sess_x", "view": {}}
+        tr,
+        "webui_perceive",
+        lambda **kw: {"view": {"fields": [], "apply_controls": [], "unmapped": []}},
     )
     monkeypatch.setattr(
         tr,
-        "draft_plan",
+        "draft_atlas_plan",
         lambda *a, **kw: {
             "plan": [],
             "verify_text": None,
             "risk": "Cannot map intent to current view: OSPF panel not visible",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
         },
     )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
         "propose_webui_configure",
@@ -176,6 +185,13 @@ def test_webui_configure_requires_approval():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: _webui_configure_atlas uses webui_act_field (not webui_act_by_intent). "
+        "Equivalent coverage is in test_webui_configure_atlas.py::test_webui_configure_atlas_happy_path. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_webui_configure_iterates_plan_steps(monkeypatch):
     """Approve first, mock webui_act_by_intent to succeed; assert mark_executed
     called once when verify_text becomes present."""
@@ -232,6 +248,13 @@ def test_webui_configure_iterates_plan_steps(monkeypatch):
     assert executed_ids[0] == action_id
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO re-plan at execute time (inner_plan_empty regression fix). "
+        "The atlas executor runs the stored plan exactly once. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_webui_configure_null_verify_continues_re_planning(monkeypatch):
     """When propose-time plan is incomplete (e.g. only [click Add] for a
     static-route form) and verify_text is None, the loop must NOT bail
@@ -309,6 +332,12 @@ def test_webui_configure_null_verify_continues_re_planning(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO recovery via re-plan. Step failure → step_failed error. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_webui_configure_step_fail_recovers_via_re_plan(monkeypatch):
     """Step fails in iter 1; draft_plan is invoked with previous_steps
     containing the failure; iter 2 succeeds; verify present → mark_executed."""
@@ -388,6 +417,12 @@ def test_webui_configure_step_fail_recovers_via_re_plan(monkeypatch):
     assert len(executed_ids) == 1
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO iteration cap (_WEBUI_CONFIGURE_MAX_ITER not used). "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_webui_configure_iteration_cap_hit(monkeypatch):
     """draft_plan always returns a non-empty NEW plan; verify always False.
     Loop must bail with iteration_cap_hit after _WEBUI_CONFIGURE_MAX_ITER
@@ -481,6 +516,13 @@ def test_webui_configure_iteration_cap_hit(monkeypatch):
     assert len(failed_ids) == 1
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO re-plan → inner_plan_empty cannot occur. "
+        "This is the regression the atlas path was built to fix. "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_webui_configure_inner_plan_empty_mid_loop(monkeypatch):
     """First batch acts ok, verify miss, inner LLM returns empty plan with
     risk note → mark_failed with inner_plan_empty."""
@@ -525,6 +567,12 @@ def test_webui_configure_inner_plan_empty_mid_loop(monkeypatch):
     assert len(failed_ids) == 1
 
 
+@pytest.mark.skip(
+    reason=(
+        "C4 atlas path: NO re-plan → inner_plan_stuck cannot occur (no hash comparison). "
+        "Keep for git-revert fallback reference."
+    )
+)
 def test_webui_configure_inner_plan_stuck(monkeypatch):
     """Inner LLM returns identical plan twice (same hash) → mark_failed
     with inner_plan_stuck."""
@@ -580,25 +628,28 @@ def test_webui_configure_inner_plan_stuck(monkeypatch):
 
 
 def test_propose_webui_configure_closes_session_on_draft_failed(monkeypatch):
-    """draft_plan raises → close_all_sessions called before handler returns."""
+    """draft_atlas_plan raises → close_all_sessions called before handler returns.
+    Updated for Chunk C4 (atlas path)."""
     monkeypatch.setattr(
         tr,
         "_search_docs",
         lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
     )
     monkeypatch.setattr(
-        tr, "webui_open", lambda **kw: {"session_id": "sess_draft_fail", "view": {}}
+        tr, "webui_open", lambda **kw: {"session_id": "sess_draft_fail"}
     )
     monkeypatch.setattr(
         tr,
-        "webui_describe_page",
-        lambda **kw: {"session_id": "sess_draft_fail", "view": {"elements": []}},
+        "webui_perceive",
+        lambda **kw: {"view": {"fields": [], "apply_controls": [], "unmapped": []}},
     )
     monkeypatch.setattr(
         tr,
-        "draft_plan",
-        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("inner LLM returned non-JSON: ...")),
+        "draft_atlas_plan",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("atlas planner LLM returned non-JSON: ...")),
     )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
 
     close_calls: list[int] = []
     monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
@@ -798,27 +849,32 @@ def test_cli_configure_dispatcher_requires_approval():
 
 
 def test_propose_webui_configure_closes_session_on_intent_not_mappable(monkeypatch):
-    """Empty plan (intent_not_mappable) → close_all_sessions called before handler returns."""
+    """Empty plan (intent_not_mappable) → close_all_sessions called before handler returns.
+    Updated for Chunk C4 (atlas path)."""
     monkeypatch.setattr(
         tr,
         "_search_docs",
         lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
     )
-    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_no_map", "view": {}})
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_no_map"})
     monkeypatch.setattr(
         tr,
-        "webui_describe_page",
-        lambda **kw: {"session_id": "sess_no_map", "view": {"elements": []}},
+        "webui_perceive",
+        lambda **kw: {"view": {"fields": [], "apply_controls": [], "unmapped": []}},
     )
     monkeypatch.setattr(
         tr,
-        "draft_plan",
+        "draft_atlas_plan",
         lambda *a, **kw: {
             "plan": [],
             "verify_text": None,
             "risk": "Page mismatch — target not visible",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
         },
     )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
 
     close_calls: list[int] = []
     monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
@@ -883,35 +939,46 @@ def test_propose_cli_configure_attaches_conflict_fields_on_match(monkeypatch):
 
 
 def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(monkeypatch):
-    """draft_plan returns equivalent_cli_commands matching running-config stanza;
-    conflict fields appear in preview sub-dict and stored params.
-    Also asserts draft_plan was called with running_config kwarg populated."""
+    """draft_atlas_plan returns equivalent_cli_commands matching running-config stanza;
+    conflict fields appear in preview_meta and stored params (NOT in preview sub-dict).
+    Updated for Chunk C4 (atlas path)."""
 
     from backend.orchestration.confirmations import get_action
 
     rag_result = {"results": [{"text": "VLAN ref", "source": "vlan.pdf", "section": "VLAN"}]}
-    open_result = {"session_id": "sess_v30", "view": {}}
-    desc_result = {"session_id": "sess_v30", "view": {"elements": []}}
+    open_result = {"session_id": "sess_v30"}
+    perceive_view = {
+        "route": "/webui/#/vlan",
+        "page_title": "VLAN",
+        "fields": [
+            {"key": "vlan.id", "label": "VLAN ID", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
+        ],
+        "apply_controls": [{"key": "apply", "label": "Save", "role": "button"}],
+        "unmapped": [],
+    }
     running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
 
     drafted = {
-        "plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None}],
+        "plan": [{"field_key": "vlan.id", "value": "30"}],
         "verify_text": "30",
         "risk": "Creates VLAN 30.",
         "equivalent_cli_commands": ["vlan 30", " name OFFICE"],
+        "validation_errors": [],
     }
 
-    draft_plan_calls: list[dict] = []
+    draft_atlas_calls: list[dict] = []
 
-    def _draft_plan(*args, **kwargs):
-        draft_plan_calls.append(kwargs)
+    def _draft_atlas(*args, **kwargs):
+        draft_atlas_calls.append(kwargs)
         return drafted
 
     monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
     monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
-    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": perceive_view})
     monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
-    monkeypatch.setattr(tr, "draft_plan", _draft_plan)
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
+    monkeypatch.setattr(tr, "draft_atlas_plan", _draft_atlas)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -931,42 +998,51 @@ def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(m
     assert "existing_entity" not in action["params"]
     assert "is_exact_match" not in action["params"]
 
-    # The structural heuristic replaced the old detector draft_plan call.
-    # desc_result has empty elements → no trigger button found → form-open skipped.
-    # draft_plan is called ONCE (the authoritative call only).
-    assert len(draft_plan_calls) == 1
+    # draft_atlas_plan is called ONCE (the authoritative call only).
+    assert len(draft_atlas_calls) == 1
     # Authoritative draft must have received running_config=
-    assert draft_plan_calls[-1].get("running_config") == running_cfg
+    assert draft_atlas_calls[-1].get("running_config") == running_cfg
 
 
 def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkeypatch):
-    """When draft_plan returns equivalent_cli_commands=[], the conflict
-    detector is skipped — preview_meta is None in the returned result,
-    and no exception is raised."""
+    """When draft_atlas_plan returns equivalent_cli_commands=[], the conflict
+    detector is skipped — preview_meta is None in the returned result.
+    Updated for Chunk C4 (atlas path)."""
 
     rag_result = {"results": [{"text": "x", "source": "s", "section": "S"}]}
-    open_result = {"session_id": "sess_empty_cli", "view": {}}
-    desc_result = {"session_id": "sess_empty_cli", "view": {"elements": []}}
+    open_result = {"session_id": "sess_empty_cli"}
+    perceive_view = {
+        "route": "/webui/#/vlan",
+        "page_title": "VLAN",
+        "fields": [
+            {"key": "vlan.id", "label": "VLAN ID", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
+        ],
+        "apply_controls": [{"key": "apply", "label": "Save", "role": "button"}],
+        "unmapped": [],
+    }
     running_cfg = "!\nvlan 30\n name OFFICE\n!\n"
 
     drafted = {
-        "plan": [{"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None}],
+        "plan": [{"field_key": "vlan.id", "value": "30"}],
         "verify_text": "30",
         "risk": "Adds VLAN.",
         "equivalent_cli_commands": [],
+        "validation_errors": [],
     }
 
-    draft_plan_calls: list[dict] = []
+    draft_atlas_calls: list[dict] = []
 
-    def _draft_plan(*args, **kwargs):
-        draft_plan_calls.append(kwargs)
+    def _draft_atlas(*args, **kwargs):
+        draft_atlas_calls.append(kwargs)
         return drafted
 
     monkeypatch.setattr(tr, "_search_docs", lambda **kw: rag_result)
     monkeypatch.setattr(tr, "webui_open", lambda **kw: open_result)
-    monkeypatch.setattr(tr, "webui_describe_page", lambda **kw: desc_result)
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": perceive_view})
     monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: running_cfg)
-    monkeypatch.setattr(tr, "draft_plan", _draft_plan)
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
+    monkeypatch.setattr(tr, "draft_atlas_plan", _draft_atlas)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -977,11 +1053,9 @@ def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkey
     assert result["status"] == "awaiting_approval"
     assert result["preview_meta"] is None
 
-    # The structural heuristic replaced the old detector draft_plan call.
-    # desc_result has empty elements → no trigger button found → form-open skipped.
-    # draft_plan is called ONCE (the authoritative call only).
-    assert len(draft_plan_calls) == 1
-    assert draft_plan_calls[-1].get("running_config") == running_cfg
+    # draft_atlas_plan is called ONCE (the authoritative call only).
+    assert len(draft_atlas_calls) == 1
+    assert draft_atlas_calls[-1].get("running_config") == running_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -1058,22 +1132,25 @@ def test_propose_cli_configure_wraps_overloaded_error(monkeypatch):
 
 
 def test_propose_webui_configure_wraps_overloaded_error(monkeypatch):
-    """When draft_plan raises OverloadedError, _propose_webui_configure must
-    return the structured llm_overloaded dict and close the orphaned session."""
+    """When draft_atlas_plan raises OverloadedError, _propose_webui_configure_atlas
+    must return the structured llm_overloaded dict and close the orphaned session.
+    Updated for Chunk C4 (atlas path)."""
     monkeypatch.setattr(
         tr,
         "_search_docs",
         lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
     )
-    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_overload", "view": {}})
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_overload"})
     monkeypatch.setattr(
         tr,
-        "webui_describe_page",
-        lambda **kw: {"session_id": "sess_overload", "view": {"elements": []}},
+        "webui_perceive",
+        lambda **kw: {"view": {"fields": [], "apply_controls": [], "unmapped": []}},
     )
+    monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
+    monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
 
     err = _make_overloaded_error("req_webui_529")
-    monkeypatch.setattr(tr, "draft_plan", lambda *a, **kw: (_ for _ in ()).throw(err))
+    monkeypatch.setattr(tr, "draft_atlas_plan", lambda *a, **kw: (_ for _ in ()).throw(err))
 
     close_calls: list[int] = []
     monkeypatch.setattr(tr, "close_all_sessions", lambda: close_calls.append(1))
@@ -1106,7 +1183,8 @@ def test_propose_webui_configure_wraps_overloaded_error(monkeypatch):
 
 
 def _stub_basics(monkeypatch, *, rag_text: str = "DHCP help") -> None:
-    """Monkeypatch _search_docs, webui_open, show_running_config to standard stubs."""
+    """Monkeypatch _search_docs, webui_open, show_running_config, show_version to standard stubs.
+    Updated for Chunk C4: adds show_version stub (needed by _device_fingerprint_for_session)."""
     monkeypatch.setattr(
         tr,
         "_search_docs",
@@ -1115,88 +1193,88 @@ def _stub_basics(monkeypatch, *, rag_text: str = "DHCP help") -> None:
     monkeypatch.setattr(
         tr,
         "webui_open",
-        lambda **kw: {
-            "session_id": "sess_dhcp",
-            "view": {"elements": [{"role": "button", "name": "Add", "eid": "e_001"}]},
-        },
+        lambda **kw: {"session_id": "sess_dhcp"},
     )
     # SSH not available in unit tests — stub the running-config read.
     import backend.cli_agent.read_tools as rt
 
     monkeypatch.setattr(rt, "show_running_config", lambda: "")
+    monkeypatch.setattr(rt, "show_version", lambda: {})
 
 
 def test_propose_opens_form_and_drafts_against_real_fields(monkeypatch):
-    """Primary happy path: single-click Add plan triggers form-open + re-draft."""
-    # List-view describe (initial)
-    list_view = {"view_id": "list_v", "elements": [{"role": "button", "name": "Add", "eid": "e_1"}]}
-    # Open-form view (after clicking Add)
+    """Primary happy path: atlas-list-view (no fields) triggers form-open + re-perceive.
+    Updated for Chunk C4 (atlas path): webui_perceive + draft_atlas_plan replace
+    webui_describe_page + draft_plan. Atlas view uses fields/apply_controls/unmapped."""
+    # List-view (no fields, Add button in unmapped)
+    list_view = {
+        "view_id": "list_v",
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [{"key": "add_btn", "label": "Add", "role": "button"}],
+    }
+    # Open-form view (after clicking Add) — has fields
     form_view = {
         "view_id": "form_v",
-        "elements": [
-            {"role": "textbox", "name": "Pool Name", "eid": "e_10"},
-            {"role": "textbox", "name": "Network", "eid": "e_11"},
-            {"role": "combobox", "name": "Subnet Mask", "eid": "e_12", "options": ["/24", "/25"]},
-            {"role": "textbox", "name": "Starting ip", "eid": "e_13"},
-            {"role": "textbox", "name": "Ending ip", "eid": "e_14"},
-            {"role": "button", "name": "Apply to Device", "eid": "e_15"},
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP Add",
+        "fields": [
+            {"key": "dhcp.pool_name", "label": "Pool Name", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
+            {"key": "dhcp.network", "label": "Network", "role": "textbox", "widget": "input",
+             "required": False, "value": "", "options": None},
+            {"key": "dhcp.subnet", "label": "Subnet Mask", "role": "combobox",
+             "widget": "kendo_combobox", "required": False, "value": "",
+             "options": ["/24", "/25"]},
+            {"key": "dhcp.start", "label": "Starting ip", "role": "textbox", "widget": "input",
+             "required": False, "value": "", "options": None},
+            {"key": "dhcp.end", "label": "Ending ip", "role": "textbox", "widget": "input",
+             "required": False, "value": "", "options": None},
         ],
+        "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
+        "unmapped": [],
     }
 
     fill_plan = [
-        {"action": "fill", "intent": {"role": "textbox", "name": "Pool Name"}, "value": "CORP"},
-        {"action": "fill", "intent": {"role": "textbox", "name": "Network"}, "value": "10.0.0.0"},
-        {
-            "action": "select",
-            "intent": {"role": "combobox", "name": "Subnet Mask"},
-            "value": "/24",
-        },
-        {
-            "action": "fill",
-            "intent": {"role": "textbox", "name": "Starting ip"},
-            "value": "10.0.0.100",
-        },
-        {
-            "action": "fill",
-            "intent": {"role": "textbox", "name": "Ending ip"},
-            "value": "10.0.0.200",
-        },
-        {
-            "action": "click",
-            "intent": {"role": "button", "name": "Apply to Device"},
-            "value": None,
-        },
+        {"field_key": "dhcp.pool_name", "value": "CORP"},
+        {"field_key": "dhcp.network", "value": "10.0.0.0"},
+        {"field_key": "dhcp.subnet", "value": "/24"},
+        {"field_key": "dhcp.start", "value": "10.0.0.100"},
+        {"field_key": "dhcp.end", "value": "10.0.0.200"},
     ]
 
-    describe_calls: list[str] = []
+    perceive_calls: list[str] = []
 
-    def _fake_describe(**kw):
-        describe_calls.append(kw.get("session_id", "?"))
-        # First call (initial describe after webui_open) returns list view.
-        # Second call (after form-open click) returns form view.
-        if len(describe_calls) == 1:
-            return {"session_id": "sess_dhcp", "view": list_view}
-        return {"session_id": "sess_dhcp", "view": form_view}
+    def _fake_perceive(**kw):
+        perceive_calls.append(kw.get("session_id", "?"))
+        # First call returns list view; second (after form-open) returns form view.
+        if len(perceive_calls) == 1:
+            return {"view": list_view}
+        return {"view": form_view}
 
     draft_calls: list[dict] = []
 
-    def _fake_draft(intent_arg, rag, view, **kw):
+    def _fake_draft(intent_arg, rag, view, atlas, **kw):
         draft_calls.append({"view": view})
-        # With the structural heuristic there is only ONE draft_plan call
-        # (the authoritative one).  The heuristic fires on the list view's
-        # "Add" button, opens the form, re-describes → authoritative draft
-        # sees form_view and returns the fill plan.
-        return {"plan": fill_plan, "verify_text": "Pool CORP created", "risk": "low"}
+        return {
+            "plan": fill_plan,
+            "verify_text": "Pool CORP created",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     form_open_calls: list[dict] = []
 
     def _fake_open_form(session_id, intent):
         form_open_calls.append({"session_id": session_id, "intent": intent})
-        return {"ok": True, "view": form_view, "session_id": session_id}
+        return {"ok": True, "session_id": session_id}
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(tr, "webui_describe_page", _fake_describe)
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "webui_perceive", _fake_perceive)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(tr, "webui_open_form_for_planning", _fake_open_form)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
@@ -1206,58 +1284,59 @@ def test_propose_opens_form_and_drafts_against_real_fields(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval", result
-    # The proposed plan must be the FILL plan, not the single [click Add] step.
+    # The proposed plan must include fill steps (from the form view).
     plan = result["preview"]["plan"]
     actions_in_plan = [s["action"] for s in plan]
     assert "fill" in actions_in_plan, f"Expected fill steps in plan; got {actions_in_plan}"
-    assert "click" in actions_in_plan  # Apply to Device click is fine
-    # No "Add" click must appear in the final plan (it was done at propose time).
-    add_clicks = [
-        s for s in plan if s["action"] == "click" and s["intent"].get("name") == "Add"
-    ]
-    assert add_clicks == [], f"Add click must not appear in proposed plan; got {add_clicks}"
 
     # webui_open_form_for_planning was called exactly once with action="click".
     assert len(form_open_calls) == 1
     assert form_open_calls[0]["intent"]["action"] == "click"
+    assert form_open_calls[0]["intent"]["name"] == "Add"
 
-    # Heuristic replaces the old detector draft_plan call.
-    # draft_plan is now called ONCE only (the authoritative call).
+    # draft_atlas_plan is called ONCE only (the authoritative call).
     assert len(draft_calls) == 1
-    # That single call must use the form view (not the list view).
+    # That single call must use the form view.
     assert draft_calls[0]["view"]["view_id"] == "form_v"
 
 
 def test_propose_skips_form_open_when_plan_already_has_fills(monkeypatch):
-    """Backward compat: if describe already shows a form, no form-open should happen."""
-    # A view that already has fill-able fields (form is open).
+    """Backward compat: if perceive already shows fields (form is open), no form-open should happen.
+    Updated for Chunk C4 (atlas path): form-open skipped when view.fields is non-empty."""
+    # Atlas view that already has fields — form is open.
     form_view = {
         "view_id": "already_open",
-        "elements": [
-            {"role": "textbox", "name": "Hostname", "eid": "e_1"},
-            {"role": "button", "name": "Apply", "eid": "e_2"},
+        "route": "/webui/#/general",
+        "page_title": "General",
+        "fields": [
+            {"key": "general.hostname", "label": "Hostname", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
         ],
+        "apply_controls": [{"key": "apply", "label": "Apply", "role": "button"}],
+        "unmapped": [],
     }
-    fill_plan = [
-        {"action": "fill", "intent": {"role": "textbox", "name": "Hostname"}, "value": "router1"},
-        {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None},
-    ]
+    fill_plan_atlas = [{"field_key": "general.hostname", "value": "router1"}]
 
     form_open_calls: list = []
     draft_calls: list = []
 
     def _fake_draft(*a, **kw):
         draft_calls.append(1)
-        # Every draft call returns the fill plan directly — form is visible.
-        return {"plan": fill_plan, "verify_text": "Hostname changed", "risk": "low"}
+        return {
+            "plan": fill_plan_atlas,
+            "verify_text": "Hostname changed",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     _stub_basics(monkeypatch)
     monkeypatch.setattr(
         tr,
-        "webui_describe_page",
-        lambda **kw: {"session_id": "sess_hn", "view": form_view},
+        "webui_perceive",
+        lambda **kw: {"view": form_view},
     )
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(
         tr,
         "webui_open_form_for_planning",
@@ -1271,43 +1350,48 @@ def test_propose_skips_form_open_when_plan_already_has_fills(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval"
-    # Form-open helper must NOT be called when a submit button ("Apply") is present
-    # (heuristic condition (b) not satisfied → form already open → skip block entirely).
+    # Form-open helper must NOT be called when the view already has fields.
     assert form_open_calls == [], "webui_open_form_for_planning must not be called when form is already open"
-    # Heuristic replaced the old detector draft_plan call.
-    # draft_plan is called ONCE only (the authoritative call).
+    # draft_atlas_plan is called ONCE only.
     assert len(draft_calls) == 1
 
 
 def test_propose_form_open_failure_falls_back_gracefully(monkeypatch):
-    """If webui_open_form_for_planning fails, propose continues with the list view."""
+    """If webui_open_form_for_planning fails, propose continues with the list view.
+    Updated for Chunk C4 (atlas path)."""
     list_view = {
         "view_id": "list_v2",
-        "elements": [{"role": "button", "name": "Add", "eid": "e_1"}],
+        "route": "/webui/#/x",
+        "page_title": "X",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [{"key": "add_btn", "label": "Add", "role": "button"}],
     }
-    # Even from the list view the planner produces a usable (if suboptimal) plan.
-    fallback_plan = [
-        {"action": "click", "intent": {"role": "button", "name": "Add"}, "value": None},
-        {"action": "fill", "intent": {"role": "textbox", "name": "Name"}, "value": "X"},
-    ]
+    # Even from the list view (no fields), the planner returns a minimal plan.
+    fallback_plan = [{"field_key": "x.name", "value": "X"}]
+
+    # After form-open failure, perceive returns the same list view.
+    perceive_calls: list = []
+
+    def _fake_perceive(**kw):
+        perceive_calls.append(1)
+        return {"view": list_view}
 
     draft_count_fb = [0]
 
     def _fake_draft(*a, **kw):
         draft_count_fb[0] += 1
-        # With the structural heuristic there is no preliminary draft_plan call.
-        # The heuristic fires on the list view's "Add" button but the form-open
-        # helper returns an error, so the authoritative draft (the only call)
-        # receives the original list view and returns a usable fallback plan.
-        return {"plan": fallback_plan, "verify_text": "Saved", "risk": "low"}
+        return {
+            "plan": fallback_plan,
+            "verify_text": "Saved",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(
-        tr,
-        "webui_describe_page",
-        lambda **kw: {"session_id": "sess_fb", "view": list_view},
-    )
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "webui_perceive", _fake_perceive)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     # Form-open helper fails.
     monkeypatch.setattr(
         tr,
@@ -1326,45 +1410,55 @@ def test_propose_form_open_failure_falls_back_gracefully(monkeypatch):
 
 
 def test_propose_form_open_helper_receives_click_action(monkeypatch):
-    """webui_open_form_for_planning is only ever called with action='click', even
-    if the preliminary plan's intent dict didn't originally include 'action'."""
+    """webui_open_form_for_planning is always called with action='click'.
+    Updated for Chunk C4 (atlas path): atlas view shape + webui_perceive."""
     list_view = {
         "view_id": "lv",
-        "elements": [{"role": "button", "name": "Add", "eid": "e_1"}],
+        "route": "/webui/#/x",
+        "page_title": "X",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [{"key": "add_btn", "label": "Add", "role": "button"}],
     }
     form_view = {
         "view_id": "fv",
-        "elements": [{"role": "textbox", "name": "Name", "eid": "e_2"}],
+        "route": "/webui/#/x",
+        "page_title": "X",
+        "fields": [
+            {"key": "x.name", "label": "Name", "role": "textbox", "widget": "input",
+             "required": False, "value": "", "options": None},
+        ],
+        "apply_controls": [{"key": "apply", "label": "Save", "role": "button"}],
+        "unmapped": [],
     }
 
     received_intents: list[dict] = []
 
     def _fake_open_form(session_id, intent):
         received_intents.append(dict(intent))
-        return {"ok": True, "view": form_view, "session_id": session_id}
+        return {"ok": True, "session_id": session_id}
 
-    describe_call = [0]
+    perceive_call = [0]
 
-    def _fake_describe(**kw):
-        describe_call[0] += 1
-        return {"session_id": "s", "view": form_view if describe_call[0] > 1 else list_view}
+    def _fake_perceive(**kw):
+        perceive_call[0] += 1
+        return {"view": form_view if perceive_call[0] > 1 else list_view}
 
     draft_call = [0]
 
     def _fake_draft(*a, **kw):
         draft_call[0] += 1
-        # With the structural heuristic there is only ONE draft_plan call
-        # (the authoritative call).  Heuristic opens the form; re-describe
-        # returns form_view; authoritative draft sees the textbox and fills it.
         return {
-            "plan": [{"action": "fill", "intent": {"role": "textbox", "name": "Name"}, "value": "X"}],
+            "plan": [{"field_key": "x.name", "value": "X"}],
             "verify_text": "Saved",
             "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
         }
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(tr, "webui_describe_page", _fake_describe)
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "webui_perceive", _fake_perceive)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(tr, "webui_open_form_for_planning", _fake_open_form)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
@@ -1384,50 +1478,60 @@ def test_propose_form_open_helper_receives_click_action(monkeypatch):
 
 
 def test_heuristic_fires_for_list_page_with_add_button(monkeypatch):
-    """Heuristic detects 'Add' button + no textboxes → opens form WITHOUT
-    calling draft_plan first (eliminates the old detector draft call)."""
+    """Heuristic detects 'Add' button in unmapped + no fields → opens form.
+    Updated for Chunk C4 (atlas path): atlas view shape + webui_perceive."""
     list_view = {
         "view_id": "lv_heuristic",
-        "elements": [{"role": "button", "name": "Add", "eid": "e_add"}],
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [{"key": "add_btn", "label": "Add", "role": "button"}],
     }
     form_view = {
         "view_id": "fv_heuristic",
-        "elements": [
-            {"role": "textbox", "name": "Pool Name", "eid": "e_pool"},
-            {"role": "button", "name": "Apply to Device", "eid": "e_apply"},
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP Add",
+        "fields": [
+            {"key": "dhcp.pool_name", "label": "Pool Name", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
         ],
+        "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
+        "unmapped": [],
     }
 
-    fill_plan = [
-        {"action": "fill", "intent": {"role": "textbox", "name": "Pool Name"}, "value": "MGMT"},
-        {"action": "click", "intent": {"role": "button", "name": "Apply to Device"}, "value": None},
-    ]
+    fill_plan = [{"field_key": "dhcp.pool_name", "value": "MGMT"}]
 
-    describe_calls: list[str] = []
+    perceive_calls: list = []
 
-    def _fake_describe(**kw):
-        describe_calls.append(kw.get("session_id", "?"))
-        # First call returns list view; second (after form-open) returns form view.
-        if len(describe_calls) == 1:
-            return {"session_id": "sess_h", "view": list_view}
-        return {"session_id": "sess_h", "view": form_view}
+    def _fake_perceive(**kw):
+        perceive_calls.append(1)
+        if len(perceive_calls) == 1:
+            return {"view": list_view}
+        return {"view": form_view}
 
     form_open_calls: list[dict] = []
 
     def _fake_open_form(session_id, intent):
         form_open_calls.append({"session_id": session_id, "intent": intent})
-        return {"ok": True, "view": form_view, "session_id": session_id}
+        return {"ok": True, "session_id": session_id}
 
     draft_calls: list[dict] = []
 
-    def _fake_draft(intent_arg, rag, view, **kw):
+    def _fake_draft(intent_arg, rag, view, atlas, **kw):
         draft_calls.append({"view": view})
-        return {"plan": fill_plan, "verify_text": "Pool MGMT created", "risk": "low"}
+        return {
+            "plan": fill_plan,
+            "verify_text": "Pool MGMT created",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(tr, "webui_describe_page", _fake_describe)
+    monkeypatch.setattr(tr, "webui_perceive", _fake_perceive)
     monkeypatch.setattr(tr, "webui_open_form_for_planning", _fake_open_form)
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -1436,77 +1540,87 @@ def test_heuristic_fires_for_list_page_with_add_button(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval", result
-    # Heuristic opened the form — final plan must be the fill plan.
+    # Heuristic opened the form — final plan must include field steps.
     plan = result["preview"]["plan"]
-    assert any(s["action"] == "fill" for s in plan), f"Expected fill steps; got {plan}"
+    assert any("field_key" in s for s in plan), f"Expected field_key steps; got {plan}"
 
     # Form-open was called exactly once by the heuristic.
     assert len(form_open_calls) == 1
     assert form_open_calls[0]["intent"]["action"] == "click"
     assert form_open_calls[0]["intent"]["name"] == "Add"
 
-    # Key assertion: draft_plan called ONCE only (no preliminary/detector call).
+    # draft_atlas_plan called ONCE only.
     assert len(draft_calls) == 1, (
-        f"Expected exactly 1 draft_plan call (heuristic replaces detector); got {len(draft_calls)}"
+        f"Expected exactly 1 draft_atlas_plan call; got {len(draft_calls)}"
     )
-    # That single call saw the form view, not the list view.
+    # That single call saw the form view.
     assert draft_calls[0]["view"]["view_id"] == "fv_heuristic"
 
 
 def test_heuristic_fires_for_list_page_with_search_textbox(monkeypatch):
-    """Real-world DHCP list page: has a 'Search Menu Items' textbox AND an 'Add'
-    button but NO submit button.  The old 'no textboxes' condition (b) was FALSE
-    here and caused the heuristic to never fire, leading to hallucinated field
-    names.  The new 'no submit button' condition (b) must correctly identify this
-    as a list page and fire the form-open."""
-    # The Cisco DHCP list page: grid filter + Add button, no submit.
+    """Atlas list page: has no fields (search bars go to unmapped, not fields) + Add button.
+    Updated for Chunk C4: the atlas perceive puts search-bar elements in unmapped,
+    so fields=[] correctly identifies it as a list page regardless of search bars."""
+    # The atlas list page: no fields, Add in unmapped, no apply_controls (no submit).
     list_view_with_search = {
         "view_id": "dhcp_list_real",
-        "elements": [
-            # Search/filter textbox present (was breaking old heuristic)
-            {"role": "textbox", "name": "Search Menu Items", "eid": "e_search"},
-            {"role": "button", "name": "Add", "eid": "e_add"},
-            # NO submit button — this is the list page, not an open form.
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP",
+        "fields": [],  # no form fields — this is the list page
+        "apply_controls": [],  # no submit button — heuristic triggers
+        "unmapped": [
+            {"key": "search_bar", "label": "Search Menu Items", "role": "textbox"},
+            {"key": "add_btn", "label": "Add", "role": "button"},
         ],
     }
     form_view = {
         "view_id": "dhcp_form_real",
-        "elements": [
-            {"role": "textbox", "name": "Pool Name", "eid": "e_pool"},
-            {"role": "textbox", "name": "Network", "eid": "e_net"},
-            {"role": "button", "name": "Apply to Device", "eid": "e_apply"},
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP Add",
+        "fields": [
+            {"key": "dhcp.pool_name", "label": "Pool Name", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
+            {"key": "dhcp.network", "label": "Network", "role": "textbox", "widget": "input",
+             "required": False, "value": "", "options": None},
         ],
+        "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
+        "unmapped": [],
     }
     fill_plan = [
-        {"action": "fill", "intent": {"role": "textbox", "name": "Pool Name"}, "value": "CORP"},
-        {"action": "fill", "intent": {"role": "textbox", "name": "Network"}, "value": "10.0.0.0"},
-        {"action": "click", "intent": {"role": "button", "name": "Apply to Device"}, "value": None},
+        {"field_key": "dhcp.pool_name", "value": "CORP"},
+        {"field_key": "dhcp.network", "value": "10.0.0.0"},
     ]
 
-    describe_calls: list[int] = []
+    perceive_calls: list[int] = []
 
-    def _fake_describe(**kw):
-        describe_calls.append(1)
-        if len(describe_calls) == 1:
-            return {"session_id": "sess_dhcp_real", "view": list_view_with_search}
-        return {"session_id": "sess_dhcp_real", "view": form_view}
+    def _fake_perceive(**kw):
+        perceive_calls.append(1)
+        if len(perceive_calls) == 1:
+            return {"view": list_view_with_search}
+        return {"view": form_view}
 
     form_open_calls: list[dict] = []
 
     def _fake_open_form(session_id, intent):
         form_open_calls.append({"intent": intent})
-        return {"ok": True, "view": form_view, "session_id": session_id}
+        return {"ok": True, "session_id": session_id}
 
     draft_calls: list[dict] = []
 
-    def _fake_draft(intent_arg, rag, view, **kw):
+    def _fake_draft(intent_arg, rag, view, atlas, **kw):
         draft_calls.append({"view": view})
-        return {"plan": fill_plan, "verify_text": "Pool CORP created", "risk": "low"}
+        return {
+            "plan": fill_plan,
+            "verify_text": "Pool CORP created",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(tr, "webui_describe_page", _fake_describe)
+    monkeypatch.setattr(tr, "webui_perceive", _fake_perceive)
     monkeypatch.setattr(tr, "webui_open_form_for_planning", _fake_open_form)
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -1515,51 +1629,56 @@ def test_heuristic_fires_for_list_page_with_search_textbox(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval", result
-    # KEY: search textbox present but no submit → heuristic MUST fire.
+    # KEY: no form fields + Add in unmapped → heuristic MUST fire.
     assert len(form_open_calls) == 1, (
-        "Heuristic must fire for list page that has a search textbox but no submit button"
+        "Heuristic must fire for atlas list page with no fields and Add in unmapped"
     )
     assert form_open_calls[0]["intent"]["action"] == "click"
     assert form_open_calls[0]["intent"]["name"] == "Add"
-    # draft_plan called once, against the opened form view.
+    # draft_atlas_plan called once, against the form view.
     assert len(draft_calls) == 1
     assert draft_calls[0]["view"]["view_id"] == "dhcp_form_real"
 
 
 def test_heuristic_skips_when_submit_button_present(monkeypatch):
-    """When the view has a submit/apply button (form is already open), the
-    heuristic must NOT fire — no form-open call, draft_plan called once."""
+    """When the view has fields + apply_control (form is open), heuristic must NOT fire.
+    Updated for Chunk C4: atlas view — non-empty fields disarms the heuristic."""
     form_view_open = {
         "view_id": "fv_open",
-        "elements": [
-            {"role": "textbox", "name": "IP Address", "eid": "e_ip"},
-            # Add button present too — but submit button (b) disarms the heuristic.
-            {"role": "button", "name": "Add", "eid": "e_add"},
-            {"role": "button", "name": "Apply to Device", "eid": "e_apply"},
+        "route": "/webui/#/interface",
+        "page_title": "Interface",
+        "fields": [
+            {"key": "iface.ip", "label": "IP Address", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
         ],
+        "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
+        "unmapped": [{"key": "add_btn", "label": "Add", "role": "button"}],
     }
-    fill_plan = [
-        {"action": "fill", "intent": {"role": "textbox", "name": "IP Address"}, "value": "10.0.0.1"},
-        {"action": "click", "intent": {"role": "button", "name": "Apply to Device"}, "value": None},
-    ]
+    fill_plan = [{"field_key": "iface.ip", "value": "10.0.0.1"}]
 
     form_open_calls: list = []
     draft_calls: list[dict] = []
 
-    def _fake_draft(intent_arg, rag, view, **kw):
+    def _fake_draft(intent_arg, rag, view, atlas, **kw):
         draft_calls.append({"view": view})
-        return {"plan": fill_plan, "verify_text": "IP set", "risk": "low"}
+        return {
+            "plan": fill_plan,
+            "verify_text": "IP set",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     _stub_basics(monkeypatch)
     monkeypatch.setattr(
-        tr, "webui_describe_page", lambda **kw: {"session_id": "sess_fvo", "view": form_view_open}
+        tr, "webui_perceive", lambda **kw: {"view": form_view_open}
     )
     monkeypatch.setattr(
         tr,
         "webui_open_form_for_planning",
         lambda sid, intent: form_open_calls.append(1) or {"ok": True},
     )
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -1568,35 +1687,38 @@ def test_heuristic_skips_when_submit_button_present(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval"
-    # Heuristic condition (b): submit button present → form already open → skip.
+    # View has fields → form already open → heuristic must NOT fire.
     assert form_open_calls == [], (
-        "webui_open_form_for_planning must NOT be called when a submit button exists"
+        "webui_open_form_for_planning must NOT be called when view already has fields"
     )
-    # Exactly one draft_plan call.
+    # Exactly one draft_atlas_plan call.
     assert len(draft_calls) == 1
     assert draft_calls[0]["view"]["view_id"] == "fv_open"
 
 
 def test_heuristic_skips_when_no_trigger_button(monkeypatch):
-    """When the initial view has no button in _FORM_TRIGGER_NAMES_LOWER, heuristic
-    must not fire — form-open skipped, draft_plan called once."""
+    """When the view has no trigger button in _FORM_TRIGGER_NAMES_LOWER (only apply buttons),
+    heuristic must not fire.
+    Updated for Chunk C4: atlas view — apply_controls with 'Save' disarms the heuristic."""
     no_trigger_view = {
         "view_id": "ntv",
-        "elements": [
-            {"role": "button", "name": "Save", "eid": "e_save"},
-            {"role": "button", "name": "Cancel", "eid": "e_cancel"},
-        ],
+        "route": "/webui/#/save",
+        "page_title": "Save",
+        "fields": [],
+        "apply_controls": [{"key": "save_btn", "label": "Save", "role": "button"}],
+        "unmapped": [],
     }
-    a_plan = [
-        {"action": "click", "intent": {"role": "button", "name": "Save"}, "value": None}
-    ]
+    # 'Save' is in _FORM_SUBMIT_NAMES_LOWER → heuristic condition (has_submit) True
+    # even without fields.  The trigger check would also fail since 'Save'
+    # is not in _FORM_TRIGGER_NAMES_LOWER.
+    a_plan = [{"field_key": "dummy.key", "value": "x"}]
 
     form_open_calls: list = []
     draft_calls: list = []
 
     _stub_basics(monkeypatch)
     monkeypatch.setattr(
-        tr, "webui_describe_page", lambda **kw: {"session_id": "sess_ntv", "view": no_trigger_view}
+        tr, "webui_perceive", lambda **kw: {"view": no_trigger_view}
     )
     monkeypatch.setattr(
         tr,
@@ -1605,8 +1727,14 @@ def test_heuristic_skips_when_no_trigger_button(monkeypatch):
     )
     monkeypatch.setattr(
         tr,
-        "draft_plan",
-        lambda *a, **kw: draft_calls.append(1) or {"plan": a_plan, "verify_text": "ok", "risk": "low"},
+        "draft_atlas_plan",
+        lambda *a, **kw: draft_calls.append(1) or {
+            "plan": a_plan,
+            "verify_text": "ok",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        },
     )
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
@@ -1616,53 +1744,65 @@ def test_heuristic_skips_when_no_trigger_button(monkeypatch):
     )
 
     assert result["status"] == "awaiting_approval"
-    # No trigger button → heuristic does not fire.
-    assert form_open_calls == [], "webui_open_form_for_planning must NOT be called without a trigger button"
+    # Save button is in apply_controls + is a submit → heuristic does not fire.
+    assert form_open_calls == [], "webui_open_form_for_planning must NOT be called without a trigger"
     assert len(draft_calls) == 1
 
 
 def test_heuristic_add_process_in_trigger_set(monkeypatch):
-    """'Add Process' (OSPF) is in _FORM_TRIGGER_NAMES_LOWER — heuristic must fire."""
+    """'Add Process' (OSPF) is in _FORM_TRIGGER_NAMES_LOWER — heuristic must fire.
+    Updated for Chunk C4: atlas view shape + webui_perceive."""
     ospf_list_view = {
         "view_id": "ospf_lv",
-        "elements": [{"role": "button", "name": "Add Process", "eid": "e_ospf_add"}],
+        "route": "/webui/#/routing/ospf",
+        "page_title": "OSPF",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [{"key": "add_proc_btn", "label": "Add Process", "role": "button"}],
     }
     ospf_form_view = {
         "view_id": "ospf_fv",
-        "elements": [
-            {"role": "textbox", "name": "Process ID", "eid": "e_pid"},
-            {"role": "button", "name": "OK", "eid": "e_ok"},
+        "route": "/webui/#/routing/ospf",
+        "page_title": "OSPF Add",
+        "fields": [
+            {"key": "ospf.process_id", "label": "Process ID", "role": "textbox", "widget": "input",
+             "required": True, "value": "", "options": None},
         ],
+        "apply_controls": [{"key": "apply", "label": "OK", "role": "button"}],
+        "unmapped": [],
     }
-    ospf_plan = [
-        {"action": "fill", "intent": {"role": "textbox", "name": "Process ID"}, "value": "1"},
-        {"action": "click", "intent": {"role": "button", "name": "OK"}, "value": None},
-    ]
+    ospf_plan = [{"field_key": "ospf.process_id", "value": "1"}]
 
-    describe_calls: list[int] = []
+    perceive_calls: list[int] = []
 
-    def _fake_describe(**kw):
-        describe_calls.append(1)
-        if len(describe_calls) == 1:
-            return {"session_id": "sess_ospf", "view": ospf_list_view}
-        return {"session_id": "sess_ospf", "view": ospf_form_view}
+    def _fake_perceive(**kw):
+        perceive_calls.append(1)
+        if len(perceive_calls) == 1:
+            return {"view": ospf_list_view}
+        return {"view": ospf_form_view}
 
     form_open_calls: list[dict] = []
 
     def _fake_open_form(session_id, intent):
         form_open_calls.append({"intent": intent})
-        return {"ok": True, "view": ospf_form_view, "session_id": session_id}
+        return {"ok": True, "session_id": session_id}
 
     draft_calls: list[dict] = []
 
-    def _fake_draft(intent_arg, rag, view, **kw):
+    def _fake_draft(intent_arg, rag, view, atlas, **kw):
         draft_calls.append({"view_id": view.get("view_id")})
-        return {"plan": ospf_plan, "verify_text": "OSPF enabled", "risk": "low"}
+        return {
+            "plan": ospf_plan,
+            "verify_text": "OSPF enabled",
+            "risk": "low",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        }
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(tr, "webui_describe_page", _fake_describe)
+    monkeypatch.setattr(tr, "webui_perceive", _fake_perceive)
     monkeypatch.setattr(tr, "webui_open_form_for_planning", _fake_open_form)
-    monkeypatch.setattr(tr, "draft_plan", _fake_draft)
+    monkeypatch.setattr(tr, "draft_atlas_plan", _fake_draft)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     result = tr.execute_tool(
@@ -1675,6 +1815,6 @@ def test_heuristic_add_process_in_trigger_set(monkeypatch):
     assert len(form_open_calls) == 1, "Heuristic must fire for 'Add Process'"
     assert form_open_calls[0]["intent"]["name"] == "Add Process"
     assert form_open_calls[0]["intent"]["action"] == "click"
-    # Exactly one draft_plan call (no detector call).
+    # Exactly one draft_atlas_plan call.
     assert len(draft_calls) == 1
     assert draft_calls[0]["view_id"] == "ospf_fv"

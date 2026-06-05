@@ -207,12 +207,22 @@ def reconcile(atlas: RouteAtlas, live_nodes: list[dict]) -> ReconcileResult:
     ]
 
     unmapped_keys = [fs.key for fs in unmatched_fields]
+    # Surface the open-form control (e.g. the "Add"/"Create" button on a list
+    # page) so the orchestrator can click it to reveal the form before planning.
+    # capture stores it on the atlas but it is NOT a field, so without this it
+    # would be invisible to the propose flow (form never opens → empty plan).
+    open_form = atlas.open_form_control
     view = {
         "route": atlas.route,
         "page_title": atlas.page_title,
         "fields": view_fields,
         "apply_controls": view_apply,
         "unmapped": unmapped_keys,
+        "open_form_control": (
+            {"key": open_form.key, "label": open_form.label, "role": open_form.role}
+            if open_form is not None
+            else None
+        ),
     }
 
     # --- Drift detection ---
