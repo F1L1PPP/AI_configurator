@@ -8,6 +8,7 @@ logs/
 backups/
 knowledge_base/vectorstore/
 knowledge_base/docs/
+webui_atlas/
 
 # screenshots & traces live only in artifacts/
 screenshots/

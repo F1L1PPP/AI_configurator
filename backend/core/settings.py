@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     rag_chunk_tokens: int = Field(default=250, alias="RAG_CHUNK_TOKENS")
     rag_chunk_overlap: int = Field(default=30, alias="RAG_CHUNK_OVERLAP")
 
+    # WebUI Atlas
+    atlas_dir: Path = Field(default=Path("webui_atlas"), alias="ATLAS_DIR")
+    atlas_self_verify: bool = Field(default=True, alias="ATLAS_SELF_VERIFY")
+    webui_vision_enabled: bool = Field(default=False, alias="WEBUI_VISION_ENABLED")
+
     # WebUI Playwright timeout — promote from hardcoded 20 s so slow routers
     # or flaky networks can be tuned via env without a code change.
     webui_goto_timeout_ms: int = Field(default=20_000, alias="WEBUI_GOTO_TIMEOUT_MS")
