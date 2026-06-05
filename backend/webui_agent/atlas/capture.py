@@ -514,8 +514,12 @@ def resolve_label(desc: dict) -> str:
         "name_attr",
     ):
         val = (desc.get(key) or "").strip()
-        if key == "spatial_label" and val and own_value and val == own_value:
-            # Spatial label equals the field's own value → not a real label.
+        if key in ("spatial_label", "inner_text") and val and own_value and val == own_value:
+            # Label source equals the field's own value → not a real label. For a
+            # Kendo combobox the visible widget's inner_text IS the selected value
+            # (e.g. "255.255.255.0" / "IPV4"), never the field label — reject it so
+            # the real label (form-group span.label) wins and the field isn't
+            # keyed/named by its value.
             continue
         if val:
             return val[:80]

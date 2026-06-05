@@ -288,6 +288,21 @@ class TestResolveLabel:
         d = _desc(spatial_label="OSPF", value="OSPF", name_attr="processField")
         assert resolve_label(d) == "processField"
 
+    def test_inner_text_equal_to_value_is_rejected(self):
+        """A Kendo combobox's inner_text IS its selected value ('255.255.255.0',
+        'IPV4'), never the label. resolve_label must reject inner_text == value
+        so the real form-group label wins — else the field is named/keyed by its
+        value (the DHCP Subnet Mask 'element_intercepted' bug)."""
+        d = _desc(
+            tag="span",
+            role="listbox",
+            inner_text="255.255.255.0",
+            value="255.255.255.0",
+            spatial_label="Subnet Mask",
+            kendo_select_name="subnetmaskOptions",
+        )
+        assert resolve_label(d) == "Subnet Mask"
+
 
 # ---------------------------------------------------------------------------
 # resolve_key

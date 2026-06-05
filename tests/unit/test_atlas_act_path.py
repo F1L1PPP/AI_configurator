@@ -194,6 +194,21 @@ class TestDoActByField:
         )
         assert result["ok"] is True
 
+    def test_idempotent_skip_when_already_set(self):
+        """If read_back already equals the target, act_field is a no-op success —
+        no adapter.apply. The robust path for Kendo dropdowns already at the
+        requested value (Subnet Mask already 255.255.255.0 for a /24), which
+        otherwise triggers a fragile open/click that times out."""
+        adapter = MagicMock()
+        adapter.read_back.return_value = "255.255.255.0"  # already set
+        result = self._call(
+            {"field_key": "hostname", "value": "255.255.255.0"},
+            fake_adapter=adapter,
+        )
+        assert result["ok"] is True
+        assert result.get("skipped") == "already_set"
+        adapter.apply.assert_not_called()  # idempotent — no action taken
+
     def test_bool_verify_mismatch(self):
         """Bool widget: expected True but got False → verify_mismatch."""
         adapter = MagicMock()

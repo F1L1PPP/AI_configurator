@@ -1523,6 +1523,19 @@ def _settle_explicit(page: Any, expect_locator: Any = None, timeout_ms: int = 20
             _time.sleep(0.15)
 
 
+def _value_already_set(current: Any, target: Any) -> bool:
+    """True if a field's current read-back already equals the target value.
+
+    Bool widgets (checkbox/radio) compare as booleans against the usual truthy
+    set; everything else compares as case-insensitive, trimmed strings. Used for
+    the idempotent-skip so acting is a no-op when the field already holds the
+    requested value.
+    """
+    if isinstance(current, bool):
+        return current == (target in (True, "true", "1", "yes", "on"))
+    return str(current).strip().lower() == str(target or "").strip().lower()
+
+
 def _do_act_by_field(
     page: Any,
     atlas: Any,
@@ -1576,6 +1589,24 @@ def _do_act_by_field(
         }
 
     adapter = _get_adapter(field.widget)
+
+    # ---- idempotent skip ----
+    # If the field already holds the target value, do NOT act. This is general to
+    # every widget and is the robust path for Kendo dropdowns: setting a combobox
+    # to the value it already shows (e.g. Subnet Mask already 255.255.255.0 for a
+    # /24) otherwise triggers a fragile open/click that can time out
+    # (element_intercepted). read_back is cheap (one input_value / is_checked).
+    # Best-effort: if the field isn't readable yet, fall through to the normal
+    # apply path.
+    with contextlib.suppress(Exception):
+        _current = adapter.read_back(page, field)
+        if _current is not None and _value_already_set(_current, value):
+            return {
+                "ok": True,
+                "field_key": field_key,
+                "attempts": 0,
+                "skipped": "already_set",
+            }
 
     max_attempts = 2
     for attempt_idx in range(max_attempts):
