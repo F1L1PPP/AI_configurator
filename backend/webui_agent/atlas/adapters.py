@@ -364,11 +364,11 @@ class KendoComboboxAdapter:
 
             if controls_id:
                 list_loc = page.locator(f"#{controls_id}")
-                list_loc.locator("li.k-item", has_text=target_value).click(
+                list_loc.locator("li.k-item", has_text=target_value).first.click(
                     timeout=FORM_TIMEOUT_MS
                 )
             else:
-                page.locator("ul.k-list li.k-item", has_text=target_value).click(
+                page.locator("ul.k-list li.k-item", has_text=target_value).first.click(
                     timeout=FORM_TIMEOUT_MS
                 )
 

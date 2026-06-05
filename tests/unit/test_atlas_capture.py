@@ -13,6 +13,7 @@ import pytest
 from backend.webui_agent.atlas.capture import (
     _CAPTURE_JS,
     build_atlas,
+    build_locator,
     capture_route,
     classify_widget,
     extract_descriptors,
@@ -20,6 +21,7 @@ from backend.webui_agent.atlas.capture import (
     is_open_form_control,
     resolve_key,
     resolve_label,
+    view_from_descriptors,
 )
 from backend.webui_agent.atlas.schema import WIDGET_TYPES
 
@@ -51,6 +53,8 @@ def _desc(
     is_kendo_grid: bool = False,
     required: bool = False,
     checked: bool | None = None,
+    inner_text: str = "",
+    value: str = "",
 ) -> dict:
     """Build a minimal descriptor dict for testing pure functions."""
     return {
@@ -75,6 +79,8 @@ def _desc(
         "checked": checked,
         "bbox": {"x": 100, "y": 100, "w": 150, "h": 30},
         "aria_controls": "",
+        "inner_text": inner_text,
+        "value": value,
     }
 
 
@@ -201,34 +207,46 @@ class TestResolveLabel:
             aria_label="Subnet Mask",
             spatial_label="Other",
             placeholder="fallback",
+            inner_text="Button Text",
         )
         assert resolve_label(d) == "Subnet Mask"
 
     def test_labelledby_text_second(self):
-        d = _desc(labelledby_text="Process ID", placeholder="fallback")
+        d = _desc(labelledby_text="Process ID", placeholder="fallback", inner_text="Something")
         assert resolve_label(d) == "Process ID"
 
-    def test_label_for_text_third(self):
+    def test_inner_text_third(self):
+        """inner_text resolves BEFORE label_for_text and spatial_label."""
+        d = _desc(inner_text="Add", label_for_text="Other Label", spatial_label="Spatial")
+        assert resolve_label(d) == "Add"
+
+    def test_inner_text_beats_label_for_text(self):
+        """inner_text is checked before label_for_text."""
+        d = _desc(inner_text="Create", label_for_text="Label For Text", spatial_label="Spatial")
+        assert resolve_label(d) == "Create"
+
+    def test_label_for_text_fourth(self):
+        """label_for_text wins when no aria_label / labelledby_text / inner_text."""
         d = _desc(label_for_text="Host Name", placeholder="fallback")
         assert resolve_label(d) == "Host Name"
 
-    def test_spatial_label_fourth(self):
+    def test_spatial_label_fifth(self):
         d = _desc(spatial_label="Prefix Mask", placeholder="fallback")
         assert resolve_label(d) == "Prefix Mask"
 
-    def test_placeholder_fifth(self):
+    def test_placeholder_sixth(self):
         d = _desc(placeholder="xxx.xxx.xxx.xxx")
         assert resolve_label(d) == "xxx.xxx.xxx.xxx"
 
-    def test_title_sixth(self):
+    def test_title_seventh(self):
         d = _desc(title="Tooltip Help")
         assert resolve_label(d) == "Tooltip Help"
 
-    def test_name_attr_seventh(self):
+    def test_name_attr_eighth(self):
         d = _desc(name_attr="networkIp")
         assert resolve_label(d) == "networkIp"
 
-    def test_id_eighth_non_ng(self):
+    def test_id_ninth_non_ng(self):
         d = _desc(id="hostname_field")
         assert resolve_label(d) == "hostname_field"
 
@@ -239,6 +257,11 @@ class TestResolveLabel:
     def test_truncated_to_80(self):
         d = _desc(aria_label="x" * 200)
         assert len(resolve_label(d)) == 80
+
+    def test_inner_text_empty_falls_through(self):
+        """Empty inner_text does not win — resolution continues to next source."""
+        d = _desc(inner_text="", spatial_label="Spatial Label")
+        assert resolve_label(d) == "Spatial Label"
 
 
 # ---------------------------------------------------------------------------
@@ -321,32 +344,37 @@ class TestControlDetection:
 
 # Canned descriptors modelling an OSPF config form.
 _OSPF_DESCRIPTORS = [
-    # Subnet Mask — Kendo combobox dropdown
+    # Subnet Mask — Kendo combobox dropdown (stable identity: kendo_select_name)
     _desc(
         tag="span",
         role="listbox",
         kendo_select_name="subnetmaskOptions",
         options=["255.255.255.0", "255.255.255.128", "255.255.254.0"],
         spatial_label="Subnet Mask",
+        inner_text="",
+        value="255.255.255.0",
     ),
-    # Process ID — plain text input, required
+    # Process ID — plain text input, required (stable identity: name_attr)
     _desc(
         tag="input",
         itype="text",
         aria_label="Process ID",
         name_attr="processId",
         required=True,
+        inner_text="",
+        value="",
     ),
     # Apply to Device button (apply glyph)
     _desc(
         tag="button",
         classes="btn btn-primary primaryActionButton",
         aria_label="Apply to Device",
+        inner_text="Apply to Device",
     ),
-    # Add button (open-form control)
+    # Add button (open-form control) — labeled by inner_text (no aria_label)
     _desc(
         tag="button",
-        aria_label="Add",
+        inner_text="Add",
     ),
     # Duplicate Process ID — should be de-duped (first wins)
     _desc(
@@ -355,6 +383,8 @@ _OSPF_DESCRIPTORS = [
         aria_label="Process ID Duplicate",
         name_attr="processId",
         required=False,
+        inner_text="",
+        value="",
     ),
 ]
 
@@ -584,3 +614,138 @@ def test_capture_route_no_per_element_bounding_box():
     # The page mock itself has no bounding_box attribute — any call would raise.
     # We just verify evaluate count = 1 (already covered above, belt-and-suspenders).
     assert page.evaluate.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# C5 NEW TESTS — inner_text, stable locator, identity gate, view_from_descriptors
+# ---------------------------------------------------------------------------
+
+
+def test_button_labeled_by_inner_text():
+    """A button with inner_text='Add' and no aria/name resolves label='Add'
+    and is detected as the open_form_control by build_atlas."""
+    # Button: no aria_label, no name_attr, only inner_text="Add"
+    add_btn = _desc(tag="button", inner_text="Add")
+    # A real field so atlas has something else too
+    field = _desc(tag="input", itype="text", name_attr="processId", aria_label="Process ID")
+
+    atlas = build_atlas(
+        [add_btn, field],
+        route="#/ospf",
+        device_fingerprint="fp",
+        page_title="OSPF",
+    )
+
+    # open_form_control must be set and labeled "Add"
+    assert atlas.open_form_control is not None, "open_form_control must not be None"
+    assert atlas.open_form_control.label == "Add"
+    assert atlas.open_form_control.reveals == "form"
+
+
+def test_build_atlas_drops_fields_without_stable_identity():
+    """A textbox with junk inner_text and NO name/ng-model/kendo_select_name
+    must NOT become a FieldSpec (identity gate)."""
+    # Junk element: version string "17.6.3a" visible, no stable identity
+    junk = _desc(
+        tag="input",
+        itype="text",
+        inner_text="17.6.3a",
+        spatial_label="Version",
+        # no name_attr, no ng_model, no kendo_select_name
+    )
+    atlas = build_atlas(
+        [junk],
+        route="#/test",
+        device_fingerprint="fp",
+        page_title="Test",
+    )
+    assert atlas.fields == [], (
+        f"Junk element without stable identity must be excluded; got {atlas.fields}"
+    )
+
+
+def test_build_locator_primary_is_css_name():
+    """When name_attr is set, primary strategy must be css [name='...']."""
+    d = _desc(tag="input", itype="text", name_attr="ospfProcessId", aria_label="Process ID")
+    locator = build_locator(d, "textbox", "Process ID")
+
+    assert locator.strategy == "css", (
+        f"Expected primary strategy 'css', got {locator.strategy!r}"
+    )
+    assert locator.value == "[name='ospfProcessId']"
+    # get_by_role must appear as a fallback
+    fb_strategies = [fb.strategy for fb in locator.fallbacks]
+    assert "get_by_role" in fb_strategies, f"get_by_role not in fallbacks: {fb_strategies}"
+
+
+def test_build_locator_primary_is_css_ng_model_when_no_name():
+    """When ng_model is set and name_attr absent, primary must be css [ng-model='...']."""
+    d = _desc(tag="input", itype="text", ng_model="ctrl.dhcpScopeName")
+    locator = build_locator(d, "textbox", "DHCP Scope Name")
+
+    assert locator.strategy == "css"
+    assert locator.value == "[ng-model='ctrl.dhcpScopeName']"
+    fb_strategies = [fb.strategy for fb in locator.fallbacks]
+    assert "get_by_role" in fb_strategies
+
+
+def test_build_locator_primary_get_by_role_when_no_stable_id():
+    """When neither name_attr nor ng_model is set, primary is get_by_role."""
+    d = _desc(tag="span", role="listbox", kendo_select_name="subnetmaskOptions",
+              spatial_label="Subnet Mask")
+    locator = build_locator(d, "listbox", "Subnet Mask")
+
+    # No name_attr or ng_model → primary falls back to get_by_role
+    assert locator.strategy == "get_by_role"
+    # kendo CSS locator must appear in fallbacks
+    fb_values = [fb.value for fb in locator.fallbacks]
+    assert any("subnetmaskOptions" in (v or "") for v in fb_values), (
+        f"kendo select fallback not found in {fb_values}"
+    )
+
+
+def test_view_from_descriptors_carries_values_and_keys():
+    """view_from_descriptors returns correct keys, labels, and live values."""
+    descriptors = [
+        _desc(
+            tag="span",
+            role="listbox",
+            kendo_select_name="subnetmaskOptions",
+            options=["255.255.255.0", "255.255.255.128"],
+            spatial_label="Subnet Mask",
+            value="255.255.255.128",
+        ),
+        _desc(
+            tag="input",
+            itype="text",
+            aria_label="Process ID",
+            name_attr="processId",
+            required=True,
+            value="10",
+        ),
+    ]
+
+    view = view_from_descriptors(
+        descriptors,
+        route="#/ospf",
+        device_fingerprint="fp",
+        page_title="OSPF",
+    )
+
+    assert view["route"] == "#/ospf"
+    assert view["page_title"] == "OSPF"
+    fields = view["fields"]
+    keys = [f["key"] for f in fields]
+
+    # Process ID must be keyed by name_attr (processid)
+    assert "processid" in keys, f"processid not in {keys}"
+    process_field = next(f for f in fields if f["key"] == "processid")
+    assert process_field["value"] == "10"
+    assert process_field["label"] == "Process ID"
+    assert process_field["required"] is True
+
+    # Subnet Mask must be present with correct value
+    subnet_field = next((f for f in fields if "subnet" in f["key"] or "mask" in f["key"]), None)
+    assert subnet_field is not None, f"no subnet field in {keys}"
+    assert subnet_field["value"] == "255.255.255.128"
+    assert subnet_field["options"] == ["255.255.255.0", "255.255.255.128"]

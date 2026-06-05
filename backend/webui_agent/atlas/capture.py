@@ -14,6 +14,8 @@ Design goals
   they can be imported and tested independently.
 - ``build_atlas`` assembles a :class:`RouteAtlas` from a list of descriptors;
   ``capture_route`` glues it to the page.
+- ``view_from_descriptors`` builds the perceive VIEW directly from descriptors,
+  keyed by field_key (DOM-keyed), without any accessibility-tree reconcile.
 """
 
 from __future__ import annotations
@@ -324,6 +326,24 @@ _CAPTURE_JS = """
       }
     }
 
+    // Visible text content (used for button labels like "Add", "Apply to Device")
+    const inner_text = (el.innerText || el.textContent || '').trim().slice(0, 80);
+
+    // Current value — for inputs/textareas use .value; for kendo, read backing select
+    let value = '';
+    if (tag === 'input' || tag === 'textarea') {
+      value = el.value || '';
+    } else if (kendo_select_name) {
+      const hiddenSel2 = document.querySelector('select[name="' + kendo_select_name + '"]');
+      if (hiddenSel2) {
+        // Get the displayed text for the selected option
+        const selIdx = hiddenSel2.selectedIndex;
+        if (selIdx >= 0 && hiddenSel2.options[selIdx]) {
+          value = hiddenSel2.options[selIdx].text || hiddenSel2.value || '';
+        }
+      }
+    }
+
     descriptors.push({
       tag,
       type,
@@ -345,7 +365,9 @@ _CAPTURE_JS = """
       checked,
       is_kendo_numeric,
       is_kendo_grid,
-      bbox
+      bbox,
+      inner_text,
+      value
     });
   }
   return descriptors;
@@ -436,21 +458,23 @@ def classify_widget(desc: dict) -> str:
 def resolve_label(desc: dict) -> str:
     """Resolve the human-readable label for an element descriptor.
 
-    Resolution order:
+    Resolution order (mirrors semantic_dom.describe_page):
       1. aria_label
       2. labelledby_text
-      3. label_for_text
-      4. spatial_label
-      5. placeholder
-      6. title
-      7. name_attr
-      8. id (skip ng-* auto-generated Angular ids)
+      3. inner_text  — visible text content; catches button labels like "Add"
+      4. label_for_text
+      5. spatial_label
+      6. placeholder
+      7. title
+      8. name_attr
+      9. id (skip ng-* auto-generated Angular ids)
 
     Truncated to 80 characters.
     """
     for key in (
         "aria_label",
         "labelledby_text",
+        "inner_text",
         "label_for_text",
         "spatial_label",
         "placeholder",
@@ -500,34 +524,62 @@ def resolve_key(desc: dict, label: str) -> str:
 def build_locator(desc: dict, role: str, label: str) -> LocatorSpec:
     """Build a LocatorSpec for the element.
 
-    Primary: ``get_by_role`` with role + label.
-    Fallbacks (only included when data exists):
-      - css ``[name='<name_attr>']``
-      - ng_model
+    Primary strategy is the STABLE CSS selector (dom name/ng-model attribute),
+    with get_by_role as fallback.  This order is critical: live Cisco DOM has
+    stable name/ng-model attributes but get_by_role(label) fails on garbage
+    labels resolved from junk text in the a11y tree.
+
+    Priority:
+      1. If ``name_attr`` → primary ``css [name='<name_attr>']``
+      2. elif ``ng_model``  → primary ``css [ng-model='<ng_model>']``
+      3. else               → primary ``get_by_role(role, name=label)``
+
+    Fallbacks (appended in order, only when data exists):
+      - get_by_role(role, name=label)  (when not already primary)
+      - css [name='<name_attr>']       (when not already primary)
+      - ng_model '<ng_model>'          (when not already primary)
       - for kendo: css ``select[name='<kendo_select_name>']``
     """
-    fallbacks: list[LocatorSpec] = []
-
     name_attr = (desc.get("name_attr") or "").strip()
-    if name_attr:
-        fallbacks.append(LocatorSpec(strategy="css", value=f"[name='{name_attr}']"))
-
     ng_model = (desc.get("ng_model") or "").strip()
-    if ng_model:
-        fallbacks.append(LocatorSpec(strategy="ng_model", value=ng_model))
-
     kendo_select_name = desc.get("kendo_select_name")
-    if kendo_select_name:
-        fallbacks.append(
-            LocatorSpec(strategy="css", value=f"select[name='{kendo_select_name}']")
-        )
 
-    return LocatorSpec(
-        strategy="get_by_role",
-        role=role,
-        name=label,
-        fallbacks=fallbacks,
+    get_by_role_spec = LocatorSpec(strategy="get_by_role", role=role, name=label)
+    css_name_spec = LocatorSpec(strategy="css", value=f"[name='{name_attr}']") if name_attr else None
+    ng_model_spec = LocatorSpec(strategy="ng_model", value=ng_model) if ng_model else None
+    kendo_spec = (
+        LocatorSpec(strategy="css", value=f"select[name='{kendo_select_name}']")
+        if kendo_select_name
+        else None
     )
+
+    if name_attr:
+        # Primary: CSS by name attribute
+        primary = css_name_spec
+        fallbacks: list[LocatorSpec] = [get_by_role_spec]
+        if ng_model_spec:
+            fallbacks.append(ng_model_spec)
+    elif ng_model:
+        # Primary: CSS by ng-model attribute
+        primary = LocatorSpec(strategy="css", value=f"[ng-model='{ng_model}']")
+        fallbacks = [get_by_role_spec]
+        if css_name_spec:
+            fallbacks.append(css_name_spec)
+    else:
+        # Primary: get_by_role (no stable DOM identity available)
+        primary = get_by_role_spec
+        fallbacks = []
+        if css_name_spec:
+            fallbacks.append(css_name_spec)
+        if ng_model_spec:
+            fallbacks.append(ng_model_spec)
+
+    if kendo_spec:
+        fallbacks.append(kendo_spec)
+
+    assert primary is not None
+    primary.fallbacks = fallbacks
+    return primary
 
 
 def is_apply_control(desc: dict) -> bool:
@@ -570,6 +622,41 @@ def _classify_role(desc: dict) -> str:
     return _TAG_ROLE_MAP.get(tag, "unknown")
 
 
+def _has_stable_identity(desc: dict) -> bool:
+    """Return True if the descriptor has a stable DOM identity (name/ng-model/kendo_select_name).
+
+    Only descriptors with a stable identity become FieldSpec entries.  This gates
+    out junk text cells, grid cells, version strings, and other elements that pass
+    the form-control check but lack a reliable locator handle.
+    """
+    return bool(
+        (desc.get("name_attr") or "").strip()
+        or (desc.get("ng_model") or "").strip()
+        or desc.get("kendo_select_name")
+    )
+
+
+def _build_field_spec(desc: dict, widget: str, role: str, label: str, key: str) -> FieldSpec:
+    """Build a FieldSpec from a descriptor.  Shared by build_atlas and view_from_descriptors."""
+    locator = build_locator(desc, role, label)
+    kendo_select_name: str | None = desc.get("kendo_select_name")
+    options: list[str] | None = None
+    if widget == "kendo_combobox":
+        raw_opts = desc.get("options")
+        if raw_opts:
+            options = [str(o) for o in raw_opts if str(o).strip()]
+    return FieldSpec(
+        key=key,
+        label=label,
+        role=role,
+        widget=widget,
+        required=bool(desc.get("required")),
+        locator=locator,
+        options=options,
+        kendo_select_name=kendo_select_name if widget == "kendo_combobox" else None,
+    )
+
+
 def build_atlas(
     descriptors: list[dict],
     *,
@@ -580,7 +667,11 @@ def build_atlas(
 ) -> RouteAtlas:
     """Build a RouteAtlas from a list of element descriptors.
 
-    - FORM_FIELD widgets → FieldSpec entries (de-duped by key; first wins).
+    - FORM_FIELD widgets → FieldSpec entries ONLY when the descriptor has a
+      stable DOM identity (name_attr, ng_model, or kendo_select_name).  Junk
+      text cells, version strings, and grid cells without kendo backing are
+      excluded.
+    - kendo_grid elements without kendo_select_name are NOT form fields.
     - Apply controls (is_apply_control) → apply_controls ControlSpec.
     - Open-form controls (is_open_form_control) → open_form_control ControlSpec
       (last open-form button wins; typically there is at most one).
@@ -620,34 +711,20 @@ def build_atlas(
                 open_form_control = ctrl
             # Other buttons are not captured in the atlas (not form fields).
         elif widget in _FORM_FIELD_WIDGETS and _is_form_control(desc, role):
+            # Identity gate: only real Cisco fields with a stable locator handle.
+            # kendo_grid without kendo_select_name is not a fillable field.
+            if widget == "kendo_grid" and not desc.get("kendo_select_name"):
+                continue
+            if not _has_stable_identity(desc):
+                continue
+
             # De-dupe by key; first descriptor wins.
             if key and key in field_keys_seen:
                 continue
             if key:
                 field_keys_seen.add(key)
 
-            locator = build_locator(desc, role, label)
-
-            # For kendo combobox, also record kendo_select_name and options.
-            kendo_select_name: str | None = desc.get("kendo_select_name")
-            options: list[str] | None = None
-            if widget == "kendo_combobox":
-                raw_opts = desc.get("options")
-                if raw_opts:
-                    options = [str(o) for o in raw_opts if str(o).strip()]
-
-            fields.append(
-                FieldSpec(
-                    key=key,
-                    label=label,
-                    role=role,
-                    widget=widget,
-                    required=bool(desc.get("required")),
-                    locator=locator,
-                    options=options,
-                    kendo_select_name=kendo_select_name if widget == "kendo_combobox" else None,
-                )
-            )
+            fields.append(_build_field_spec(desc, widget, role, label, key))
 
     return RouteAtlas(
         route=route,
@@ -660,6 +737,89 @@ def build_atlas(
         captured_at=datetime.now(UTC).isoformat(),
         captured_by=captured_by,
     )
+
+
+def view_from_descriptors(
+    descriptors: list[dict],
+    *,
+    route: str,
+    device_fingerprint: str,
+    page_title: str = "",
+) -> dict:
+    """Build the perceive VIEW directly from descriptors (DOM-keyed, no a11y reconcile).
+
+    Returns a dict with the same structure as the reconcile view:
+      {
+        route, page_title, device_fingerprint,
+        fields: [{key, label, role, widget, value, required, options}],
+        apply_controls: [{key, label, role}],
+        open_form_control: {key, label, role} | None,
+        unmapped: [],
+      }
+
+    Field classification and identity gate are IDENTICAL to build_atlas so the
+    two cannot drift.  ``value`` comes from each descriptor's ``value`` field
+    (populated by _CAPTURE_JS from the live DOM).  Dedup by key (first wins).
+    """
+    fields: list[dict] = []
+    field_keys_seen: set[str] = set()
+    apply_controls: list[dict] = []
+    open_form_control: dict | None = None
+
+    for desc in descriptors:
+        widget = classify_widget(desc)
+        role = _classify_role(desc)
+        label = resolve_label(desc)
+        key = resolve_key(desc, label)
+
+        if not key and not label:
+            continue
+
+        if widget == "button":
+            ctrl_key = key or slugify(label) or "btn"
+            ctrl = {"key": ctrl_key, "label": label, "role": role}
+            if is_apply_control(desc):
+                apply_controls.append(ctrl)
+            elif is_open_form_control(desc):
+                open_form_control = ctrl
+        elif widget in _FORM_FIELD_WIDGETS and _is_form_control(desc, role):
+            # Same identity gate as build_atlas
+            if widget == "kendo_grid" and not desc.get("kendo_select_name"):
+                continue
+            if not _has_stable_identity(desc):
+                continue
+
+            if key and key in field_keys_seen:
+                continue
+            if key:
+                field_keys_seen.add(key)
+
+            raw_opts = desc.get("options")
+            options: list[str] | None = None
+            if widget == "kendo_combobox" and raw_opts:
+                options = [str(o) for o in raw_opts if str(o).strip()]
+
+            fields.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "role": role,
+                    "widget": widget,
+                    "value": (desc.get("value") or ""),
+                    "required": bool(desc.get("required")),
+                    "options": options,
+                }
+            )
+
+    return {
+        "route": route,
+        "page_title": page_title,
+        "device_fingerprint": device_fingerprint,
+        "fields": fields,
+        "apply_controls": apply_controls,
+        "open_form_control": open_form_control,
+        "unmapped": [],
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,12 +1,17 @@
-"""Perceive — hot-path page observation via accessibility tree + atlas.
+"""Perceive — hot-path page observation via direct DOM extraction.
 
 ``perceive_page`` does exactly:
-  1. One ``page.accessibility.snapshot()`` call.
-  2. One ``flatten_interactive`` + ``reconcile`` pass against the stored atlas.
-  3. If drift is detected (and self_verify is True, and we didn't just capture),
-     one fresh ``capture_route`` + one more snapshot/flatten/reconcile.
+  1. Derive route from the live URL (JS eval).
+  2. Extract descriptors via one ``page.evaluate(_CAPTURE_JS)`` call.
+     If zero real form-field descriptors are returned, wait 600 ms and
+     re-extract once (Angular may not have finished rendering).
+  3. Build atlas + save to store (best-effort cache).
+  4. Build view directly from those descriptors (DOM-keyed, no a11y reconcile).
+  5. Return PerceiveResult.
 
-No screenshots, no networkidle, no per-element round-trips.
+No accessibility.snapshot calls, no flatten_interactive, no reconcile in the
+hot path.  The a11y helpers still exist and are used by verify_a11y in the
+subprocess; they are just NOT called here.
 """
 
 from __future__ import annotations
@@ -16,9 +21,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from backend.core.logging import get_logger
-from backend.webui_agent.atlas.capture import capture_route
+from backend.webui_agent.atlas.capture import (
+    build_atlas,
+    extract_descriptors,
+    view_from_descriptors,
+)
 from backend.webui_agent.atlas.fingerprint import route_slug
-from backend.webui_agent.atlas.reconcile import flatten_interactive, reconcile
 from backend.webui_agent.atlas.schema import RouteAtlas
 from backend.webui_agent.atlas.store import AtlasStore
 
@@ -85,6 +93,45 @@ class PerceiveResult:
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _has_real_controls(descriptors: list[dict]) -> bool:
+    """Return True if the descriptor list contains at least one real form field
+    or apply/open-form control (i.e. Angular has rendered the form content).
+    """
+    from backend.webui_agent.atlas.capture import (  # noqa: PLC0415
+        _FORM_FIELD_WIDGETS,
+        _classify_role,
+        _has_stable_identity,
+        _is_form_control,
+        classify_widget,
+        is_apply_control,
+        is_open_form_control,
+    )
+
+    for desc in descriptors:
+        widget = classify_widget(desc)
+        role = _classify_role(desc)
+        if widget == "button" and (is_apply_control(desc) or is_open_form_control(desc)):
+            return True
+        if widget in _FORM_FIELD_WIDGETS and _is_form_control(desc, role) and _has_stable_identity(desc):
+            return True
+    return False
+
+
+def _extract_with_retry(page: Page) -> list[dict]:
+    """Extract descriptors; if none are real controls, wait 600 ms and retry once."""
+    descriptors = extract_descriptors(page)
+    if not _has_real_controls(descriptors):
+        with contextlib.suppress(Exception):
+            page.wait_for_timeout(600)
+        descriptors = extract_descriptors(page)
+    return descriptors
+
+
+# ---------------------------------------------------------------------------
 # perceive_page
 # ---------------------------------------------------------------------------
 
@@ -95,22 +142,23 @@ def perceive_page(
     *,
     device_fingerprint: str,
     route: str | None = None,
-    self_verify: bool = True,
+    self_verify: bool = True,  # kept for API compat; no longer triggers a11y reconcile
 ) -> PerceiveResult:
-    """Observe the current page via accessibility tree + atlas reconciliation.
+    """Observe the current page via DOM extraction (no accessibility.snapshot).
 
     Steps
     -----
     1. Derive the route key from the live URL (or use the supplied ``route``).
-    2. Load the atlas from the store; if missing, capture it from the DOM.
-    3. Take one ``page.accessibility.snapshot()`` and flatten + reconcile.
-    4. If drift is detected and ``self_verify`` is True (and we didn't just
-       capture): re-capture once, increment ``drift_count``, save, then
-       re-snapshot + re-reconcile ONCE (no infinite loop).
-    5. On agreement after verify, increment ``verify_count`` and save.
+    2. Extract descriptors with ``_extract_with_retry`` (one evaluate + optional
+       one retry after 600 ms if Angular hasn't rendered yet).
+    3. Fetch page title (best-effort).
+    4. Build ``RouteAtlas`` and save to store (best-effort cache; never raises).
+    5. Build perceive VIEW directly from descriptors (DOM-keyed).
+    6. Compute ``missing_required`` — required fields whose current value is empty.
+    7. Return ``PerceiveResult``.
 
-    Exactly ONE ``page.accessibility.snapshot()`` per pass (two passes only
-    when drift triggers self-verify).
+    No ``page.accessibility.snapshot()`` is called.  The ``self_verify`` parameter
+    is accepted for API compatibility but does not trigger an a11y reconcile pass.
     """
     # --- Step 1: resolve route ---
     if route is None:
@@ -118,60 +166,53 @@ def perceive_page(
     if not route:
         route = "unknown"
 
-    # Derive a clean slug for logging.
     slug = route_slug(route)
 
-    # --- Step 2: load or capture atlas ---
-    captured = False
-    atlas = store.load_route(route)
-    if atlas is None:
-        atlas = capture_route(
-            page,
-            route=route,
-            device_fingerprint=device_fingerprint,
-        )
-        store.save_route(atlas)
-        captured = True
+    # --- Step 2: extract descriptors (with Angular-render retry) ---
+    descriptors = _extract_with_retry(page)
 
-    # --- Step 3: first accessibility snapshot + reconcile ---
-    snap = page.accessibility.snapshot(interesting_only=True)
-    live = flatten_interactive(snap)
-    rec = reconcile(atlas, live)
+    # --- Step 3: page title (best-effort) ---
+    page_title = ""
+    with contextlib.suppress(Exception):
+        page_title = page.title()
 
-    # --- Step 4: self-verify on drift (guard: only once, only if not just captured) ---
-    if rec.drift and self_verify and not captured:
-        atlas = capture_route(
-            page,
-            route=route,
-            device_fingerprint=device_fingerprint,
-        )
-        atlas.drift_count += 1
+    fp = device_fingerprint
+
+    # --- Step 4: build atlas + save to store (best-effort cache) ---
+    atlas = build_atlas(descriptors, route=route, device_fingerprint=fp, page_title=page_title)
+    with contextlib.suppress(Exception):
         store.save_route(atlas)
 
-        # One more snapshot pass.
-        snap2 = page.accessibility.snapshot(interesting_only=True)
-        live2 = flatten_interactive(snap2)
-        rec = reconcile(atlas, live2)
+    # --- Step 5: build view from descriptors (DOM-keyed, no a11y reconcile) ---
+    view = view_from_descriptors(
+        descriptors, route=route, device_fingerprint=fp, page_title=page_title
+    )
 
-        # --- Step 5: on agreement after re-capture, bump verify_count ---
-        if not rec.drift:
-            atlas.verify_count += 1
-            with contextlib.suppress(Exception):
-                store.save_route(atlas)
+    # --- Step 6: missing_required ---
+    view_field_values: dict[str, str] = {
+        f["key"]: (f.get("value") or "") for f in view.get("fields", [])
+    }
+    missing_required = [
+        fs.key
+        for fs in atlas.fields
+        if fs.required and not view_field_values.get(fs.key, "")
+    ]
 
+    field_keys = [f["key"] for f in view.get("fields", [])]
     logger.info(
         "perceive_complete",
         route=slug,
-        field_count=len(rec.view.get("fields", [])),
-        drift=rec.drift,
-        captured=captured,
+        field_count=len(view.get("fields", [])),
+        field_keys=field_keys,
+        drift=False,
+        captured=True,
     )
 
     return PerceiveResult(
-        view=rec.view,
+        view=view,
         atlas=atlas,
-        drift=rec.drift,
-        captured=captured,
-        missing_required=rec.missing_required,
-        unmapped_fields=rec.unmapped_fields,
+        drift=False,
+        captured=True,
+        missing_required=missing_required,
+        unmapped_fields=[],
     )
