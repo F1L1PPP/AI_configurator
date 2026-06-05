@@ -689,19 +689,37 @@ def test_build_locator_primary_is_css_ng_model_when_no_name():
     assert "get_by_role" in fb_strategies
 
 
-def test_build_locator_primary_get_by_role_when_no_stable_id():
-    """When neither name_attr nor ng_model is set, primary is get_by_role."""
+def test_build_locator_primary_role_loose_when_no_stable_id():
+    """When neither name_attr nor ng_model is set, primary is role_loose
+    (lenient substring match — Cisco labels carry icons/whitespace). exact
+    get_by_role is retained as a fallback."""
     d = _desc(tag="span", role="listbox", kendo_select_name="subnetmaskOptions",
               spatial_label="Subnet Mask")
     locator = build_locator(d, "listbox", "Subnet Mask")
 
-    # No name_attr or ng_model → primary falls back to get_by_role
-    assert locator.strategy == "get_by_role"
+    # No name_attr or ng_model → primary is lenient role match.
+    assert locator.strategy == "role_loose"
+    fb_strategies = [fb.strategy for fb in locator.fallbacks]
+    assert "get_by_role" in fb_strategies  # exact match retained as fallback
     # kendo CSS locator must appear in fallbacks
     fb_values = [fb.value for fb in locator.fallbacks]
     assert any("subnetmaskOptions" in (v or "") for v in fb_values), (
         f"kendo select fallback not found in {fb_values}"
     )
+
+
+def test_build_locator_button_role_loose_plus_has_text_fallback():
+    """Apply/open-form buttons (no name/ng-model) get a lenient role_loose
+    primary + a text-based css fallback — Cisco's 'Apply to Device' button's
+    accessible name carries a save icon, so exact get_by_role misses it
+    (the apply_failed: unmapped_field from the live smoke)."""
+    d = _desc(tag="button", classes="primaryActionButton", inner_text="Apply to Device")
+    locator = build_locator(d, "button", "Apply to Device")
+    assert locator.strategy == "role_loose"
+    css_fallbacks = [fb.value for fb in locator.fallbacks if fb.strategy == "css"]
+    assert any(
+        "has-text" in (v or "") and "Apply to Device" in (v or "") for v in css_fallbacks
+    ), f"text-based css fallback not found in {css_fallbacks}"
 
 
 def test_view_from_descriptors_carries_values_and_keys():

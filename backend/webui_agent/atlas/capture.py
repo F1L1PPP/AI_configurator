@@ -566,9 +566,20 @@ def build_locator(desc: dict, role: str, label: str) -> LocatorSpec:
         if css_name_spec:
             fallbacks.append(css_name_spec)
     else:
-        # Primary: get_by_role (no stable DOM identity available)
-        primary = get_by_role_spec
-        fallbacks = []
+        # No stable DOM identity (buttons / links). Cisco's "Apply to Device"
+        # button carries a save icon, so its accessible name is not an EXACT
+        # match for the visible text — use lenient (substring) role matching,
+        # then a text-based css fallback that also catches non-<button> ng-click
+        # apply wrappers.
+        primary = LocatorSpec(strategy="role_loose", role=role, name=label)
+        fallbacks = [get_by_role_spec]
+        if label and '"' not in label:
+            fallbacks.append(
+                LocatorSpec(
+                    strategy="css",
+                    value=f':is(button, a, [role="button"], [ng-click]):has-text("{label}")',
+                )
+            )
         if css_name_spec:
             fallbacks.append(css_name_spec)
         if ng_model_spec:

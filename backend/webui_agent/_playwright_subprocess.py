@@ -1633,6 +1633,7 @@ def _locate_control(page: Any, control: Any) -> Any:
     """
     from backend.webui_agent.atlas.adapters import (  # noqa: PLC0415
         LocatorResolutionError,
+        _first_visible,
         resolve_locator,
     )
 
@@ -1644,7 +1645,9 @@ def _locate_control(page: Any, control: Any) -> Any:
         try:
             loc = resolve_locator(page, locspec)
             if loc.count() > 0:
-                return loc
+                # Narrow to the visible copy — Cisco renders Basic + Advanced
+                # forms, so the apply button can match more than one element.
+                return _first_visible(loc)
         except Exception:  # noqa: BLE001
             continue
 

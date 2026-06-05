@@ -115,6 +115,17 @@ class TestResolveLocator:
         page.get_by_role.assert_called_once_with("textbox", name="IP Address", exact=True)
         assert result is fake_loc
 
+    def test_role_loose_strategy(self) -> None:
+        page = MagicMock()
+        fake_loc = MagicMock()
+        page.get_by_role.return_value = fake_loc
+
+        locspec = _make_locspec(strategy="role_loose", role="button", name="Apply to Device")
+        result = resolve_locator(page, locspec)
+
+        page.get_by_role.assert_called_once_with("button", name="Apply to Device", exact=False)
+        assert result is fake_loc
+
     def test_ng_model_strategy(self) -> None:
         page = MagicMock()
         fake_loc = MagicMock()

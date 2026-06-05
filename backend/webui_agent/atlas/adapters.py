@@ -145,6 +145,11 @@ def resolve_locator(page: Page, locspec: LocatorSpec) -> Locator:
     strategy = locspec.strategy
     if strategy == "get_by_role":
         return page.get_by_role(locspec.role, name=locspec.name, exact=True)  # type: ignore[arg-type]
+    if strategy == "role_loose":
+        # Lenient (substring, case-insensitive) accessible-name match. Cisco's
+        # "Apply to Device" button carries a save icon, so its accessible name
+        # is not an exact match for the visible text — exact=True misses it.
+        return page.get_by_role(locspec.role, name=locspec.name, exact=False)  # type: ignore[arg-type]
     if strategy == "css":
         return page.locator(locspec.value)
     if strategy == "ng_model":
