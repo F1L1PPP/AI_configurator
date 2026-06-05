@@ -551,6 +551,17 @@ dropdown fields) an `options` list.  Your job is to emit a plan as a list of
 9. **`risk`**: One sentence for the human approver describing what this change
    does and how to revert it.
 
+10. **`verify_text`**: A SHORT, stable string the change makes newly visible on
+    the page AFTER Apply (a success banner, or — better — the new list row).
+    - Prefer a user-supplied IDENTIFIER the new entry will show: the DHCP pool
+      name, the VLAN id, the ACL/route-map name, the network/prefix address.
+      e.g. for "add DHCP pool CORP" → `"CORP"`; for "add VLAN 46" → `"46"`;
+      for "static route 10.99.99.0/24" → `"10.99.99.0"`.
+    - Set it to `null` ONLY for pure-settings/toggle pages where no value the
+      user supplied appears in a post-apply list.
+    - NEVER invent text that is not derivable from the intent's own values.
+      A wrong verify_text turns a successful write into a false failure.
+
 Output ONLY via the `submit_atlas_plan` tool — no prose, no Markdown fences.
 """
 
@@ -571,12 +582,20 @@ _SUBMIT_ATLAS_PLAN_TOOL: list[dict[str, Any]] = [
                         "type": "object",
                         "properties": {
                             "field_key": {"type": "string"},
-                            "value": {},
+                            "value": {"type": ["string", "number", "boolean", "null"]},
                         },
                         "required": ["field_key", "value"],
                     },
                 },
-                "verify_text": {},
+                "verify_text": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Short, stable string the change makes newly visible "
+                        "after Apply (prefer a user-supplied identifier: pool "
+                        "name, VLAN id, network/prefix). null for pure-settings "
+                        "pages with no post-apply value to confirm."
+                    ),
+                },
                 "risk": {"type": "string"},
                 "equivalent_cli_commands": {
                     "type": "array",
@@ -631,14 +650,23 @@ def validate_atlas_plan(
             errors.append({"field_key": fk, "reason": "unknown_field_key"})
             continue
 
+        # --- Null value → leave the field unset (distinct from a bad value) ---
+        # str(None) == "none" would otherwise be mis-flagged as
+        # value_not_in_options with a confusing error; treat it as "skip".
+        if raw_value is None:
+            errors.append({"field_key": fk, "reason": "null_value"})
+            continue
+
         # --- Combobox options membership check ---
         is_combobox = (
             field.widget in _COMBOBOX_WIDGETS or field.role in _COMBOBOX_ROLES
         )
         if is_combobox and field.options:
-            # Normalise: str, trimmed, case-insensitive comparison.
+            # Normalise: str, trimmed, case-insensitive comparison.  Options are
+            # str()-coerced defensively — capture may store numeric options for
+            # numeric lease/VLAN dropdowns (e.g. [7, 30]).
             normalised_value = str(raw_value).strip().lower()
-            normalised_options = [opt.strip().lower() for opt in field.options]
+            normalised_options = [str(opt).strip().lower() for opt in field.options]
             if normalised_value not in normalised_options:
                 errors.append(
                     {
@@ -796,16 +824,28 @@ def draft_atlas_plan(
     # Deterministic atlas validation.
     valid_steps, errors = validate_atlas_plan(result["plan"], atlas)
 
-    # Log drops for visibility (live smoke visibility-first rule).
+    # Log drops for visibility (live smoke visibility-first rule).  Carry each
+    # dropped step's field_key + value alongside the reason so the WebUI->CLI
+    # fallback is diagnosable from the log alone (not just aggregate counts).
     dropped = len(result["plan"]) - len(valid_steps)
     if dropped or errors:
         error_reasons = [e.get("reason") for e in errors]
+        dropped_details = [
+            {
+                "field_key": e.get("field_key"),
+                "value": e.get("value"),
+                "reason": e.get("reason"),
+            }
+            for e in errors
+            if e.get("reason") != "missing_required"
+        ]
         log.info(
             "atlas_plan_validation",
             raw_steps=len(result["plan"]),
             valid_steps=len(valid_steps),
             dropped=dropped,
             error_reasons=error_reasons,
+            dropped_details=dropped_details,
         )
 
     raw_equiv = result.get("equivalent_cli_commands")

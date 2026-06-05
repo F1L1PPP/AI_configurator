@@ -286,17 +286,165 @@ def test_propose_atlas_opens_form_via_open_form_control(monkeypatch):
     assert calls["perceive"] == 2
 
 
+def test_propose_atlas_opens_form_despite_stray_list_field(monkeypatch):
+    """P0-open-form-gate: a Cisco list page that leaks a STRAY grid-row field
+    (DHCP's "Monitoring" row-checkbox) plus an open_form_control and NO Apply
+    control must STILL click Add and re-perceive the real form.
+
+    Regression lock: the previous gate (``not _view_fields and not _has_submit``)
+    never fired because the stray checkbox made ``not _view_fields`` False, so
+    the form never opened and the plan came back empty → CLI fallback.  The new
+    gate keys only on ``not _has_submit`` (no Apply control == form not open).
+    """
+    _stub_basics(monkeypatch)
+    # List page: one stray grid-row checkbox, NO apply controls, an Add button.
+    list_view_with_stray = {
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP Pools",
+        "fields": [
+            {
+                "key": "checked",
+                "label": "Monitoring",
+                "role": "checkbox",
+                "widget": "checkbox",
+                "required": False,
+                "value": "",
+                "options": None,
+            }
+        ],
+        "apply_controls": [],
+        "unmapped": [],
+        "open_form_control": {"key": "add", "label": "Add", "role": "button"},
+    }
+    calls = {"perceive": 0}
+
+    def _perceive(**kw):
+        calls["perceive"] += 1
+        view = list_view_with_stray if calls["perceive"] == 1 else _PERCEIVE_VIEW
+        return {"view": view, "session_id": "sess_atlas_001"}
+
+    monkeypatch.setattr(tr, "webui_perceive", _perceive)
+
+    open_form_intents: list = []
+
+    def _open_form(session_id, intent):
+        open_form_intents.append(intent)
+        return {"ok": True, "view": _PERCEIVE_VIEW, "session_id": session_id}
+
+    monkeypatch.setattr(tr, "webui_open_form_for_planning", _open_form)
+    monkeypatch.setattr(
+        tr,
+        "draft_atlas_plan",
+        lambda *a, **kw: {
+            "plan": [{"field_key": "dhcp.pool_name", "value": "MYPOOL"}],
+            "verify_text": "MYPOOL",
+            "risk": "Adds DHCP pool MYPOOL.",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        },
+    )
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add DHCP pool MYPOOL", "webui_path": "/webui/#/dhcp"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    # The Add button was clicked exactly once despite the stray field.
+    assert len(open_form_intents) == 1
+    assert open_form_intents[0]["name"] == "Add"
+    assert open_form_intents[0]["action"] == "click"
+    # Perceived twice: list page (with stray field), then the open form.
+    assert calls["perceive"] == 2
+
+
+def test_propose_atlas_skips_add_when_apply_present(monkeypatch):
+    """P0-open-form-gate OSPF regression guard: when an Apply/submit control is
+    already visible (form already open after a re-perceive), the Add click must
+    NOT fire — otherwise OSPF would double-Add.
+    """
+    _stub_basics(monkeypatch)
+    # Open form: real fields + an Apply control + a (stale) open_form_control.
+    open_form_view = {
+        "route": "/webui/#/OSPF",
+        "page_title": "OSPF",
+        "fields": [
+            {
+                "key": "dhcp.pool_name",
+                "label": "Process ID",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            }
+        ],
+        "apply_controls": [
+            {"key": "apply", "label": "Apply to Device", "role": "button"}
+        ],
+        "unmapped": [],
+        "open_form_control": {"key": "add", "label": "Add", "role": "button"},
+    }
+    monkeypatch.setattr(
+        tr,
+        "webui_perceive",
+        lambda **kw: {"view": open_form_view, "session_id": "sess_atlas_001"},
+    )
+
+    open_form_calls: list = []
+
+    def _open_form(session_id, intent):
+        open_form_calls.append(intent)
+        return {"ok": True, "view": open_form_view, "session_id": session_id}
+
+    monkeypatch.setattr(tr, "webui_open_form_for_planning", _open_form)
+    monkeypatch.setattr(
+        tr,
+        "draft_atlas_plan",
+        lambda *a, **kw: {
+            "plan": [{"field_key": "dhcp.pool_name", "value": "100"}],
+            "verify_text": "100",
+            "risk": "Sets OSPF process id.",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        },
+    )
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "set OSPF process id 100", "webui_path": "/webui/#/OSPF"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    # Apply control already present → form is open → Add must NOT be clicked.
+    assert open_form_calls == [], "Add must not be clicked when an Apply control is already visible"
+
+
 def test_propose_atlas_empty_plan_returns_intent_not_mappable(monkeypatch):
-    """draft_atlas_plan returns empty plan → error: intent_not_mappable."""
+    """draft_atlas_plan returns empty plan → error: intent_not_mappable.
+
+    P2-empty-plan-visibility: a WARNING breadcrumb
+    (propose_webui_configure_atlas_empty_plan) carrying field_keys + form_opened
+    must be emitted so the WebUI->CLI fallback is diagnosable from logs alone.
+    """
     drafted = {
         "plan": [],
         "verify_text": None,
         "risk": "No matching fields found for this intent.",
         "equivalent_cli_commands": [],
-        "validation_errors": [],
+        "validation_errors": [{"field_key": "stray", "reason": "unknown_field_key"}],
     }
     monkeypatch.setattr(tr, "draft_atlas_plan", lambda *a, **kw: drafted)
     _stub_basics(monkeypatch)
+
+    warn_events: list[tuple[str, dict]] = []
+    orig_warning = tr.log.warning
+
+    def _capture_warning(event, *a, **kw):
+        warn_events.append((event, kw))
+        return orig_warning(event, *a, **kw)
+
+    monkeypatch.setattr(tr.log, "warning", _capture_warning)
 
     result = tr.execute_tool(
         "propose_webui_configure",
@@ -304,6 +452,18 @@ def test_propose_atlas_empty_plan_returns_intent_not_mappable(monkeypatch):
     )
 
     assert result["error"] == "intent_not_mappable"
+
+    empty_plan_warnings = [
+        kw for (event, kw) in warn_events
+        if event == "propose_webui_configure_atlas_empty_plan"
+    ]
+    assert len(empty_plan_warnings) == 1, "empty-plan WARNING breadcrumb must be emitted"
+    breadcrumb = empty_plan_warnings[0]
+    assert "field_keys" in breadcrumb
+    assert "form_opened" in breadcrumb
+    # _PERCEIVE_VIEW has dhcp.pool_name + dhcp.network as fields.
+    assert "dhcp.pool_name" in breadcrumb["field_keys"]
+    assert breadcrumb["form_opened"] is False  # an Apply control is present → no Add click
     assert "No matching" in result["message"]
 
 
@@ -594,13 +754,61 @@ def test_webui_configure_atlas_happy_path(monkeypatch):
     assert len(executed_ids) == 1
     assert executed_ids[0] == action_id
 
-    # POST-snapshot taken
+    # PRE-snapshot taken before any field act; POST after a successful apply.
+    pre_snaps = [s for s in snapshot_calls if s[1] == "pre"]
     post_snaps = [s for s in snapshot_calls if s[1] == "post"]
+    assert len(pre_snaps) == 1, f"expected one pre-snapshot, got {snapshot_calls}"
+    assert pre_snaps[0][0] == action_id
     assert len(post_snaps) == 1
+    # Ordering: pre is the FIRST snapshot, post is the LAST.
+    assert snapshot_calls[0][1] == "pre"
+    assert snapshot_calls[-1][1] == "post"
 
     # NO re-plan — the inner_plan_empty regression lock
     assert draft_atlas_plan_calls == [], "draft_atlas_plan must NOT be called at execute time"
     assert draft_plan_calls == [], "draft_plan must NOT be called at execute time"
+
+
+def test_webui_configure_atlas_pre_snapshot_failure_is_best_effort(monkeypatch):
+    """P1-pre-snapshot: a take_snapshot('pre') raising must NOT abort the
+    operator-approved write — apply still runs and the action is executed."""
+    action_id = _make_atlas_action()
+
+    executed_ids: list[str] = []
+    apply_calls: list = []
+    snapshot_phases: list[str] = []
+
+    def _fake_take_snapshot(action_id, phase):
+        snapshot_phases.append(phase)
+        if phase == "pre":
+            raise OSError("ssh transport closed")
+
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": _PERCEIVE_VIEW})
+    monkeypatch.setattr(
+        tr,
+        "webui_act_field",
+        lambda session_id, field_key, value, action_id: {"ok": True, "field_key": field_key},
+    )
+    monkeypatch.setattr(
+        tr,
+        "webui_apply_control",
+        lambda **kw: apply_calls.append(1) or {"ok": True},
+    )
+    monkeypatch.setattr(tr, "webui_verify_a11y", lambda **kw: {"present": True})
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    import backend.cli_agent.snapshots as snaps
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_executed", lambda aid: executed_ids.append(aid) or {})
+    monkeypatch.setattr(snaps, "take_snapshot", _fake_take_snapshot)
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    assert result.get("ok") is True, f"pre-snapshot failure must not abort write; got {result}"
+    assert "pre" in snapshot_phases  # pre was attempted (and raised)
+    assert len(apply_calls) == 1  # apply still ran
+    assert executed_ids == [action_id]
 
 
 # ---------------------------------------------------------------------------
@@ -842,3 +1050,135 @@ def test_webui_configure_atlas_no_verify_text_succeeds(monkeypatch):
     assert len(executed_ids) == 1
     # verify_a11y must NOT be called when there is no verify_text
     assert len(verify_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# _webui_configure_atlas — verify falls back to atlas success_signal
+# ---------------------------------------------------------------------------
+
+
+def _make_atlas_action_with_signal(
+    *, verify_text: str | None, success_signal_contains: str | None
+) -> str:
+    """Register+approve an atlas action carrying an optional success_signal."""
+    plan = [
+        {
+            "action": "fill",
+            "intent": {"role": "textbox", "name": "Pool Name"},
+            "value": "CORP",
+            "field_key": "dhcp.pool_name",
+        },
+        {
+            "action": "click",
+            "intent": {"role": "button", "name": "Apply to Device"},
+            "value": None,
+            "apply_key": "apply",
+        },
+    ]
+    action_id = propose_action(
+        "webui_configure",
+        {
+            "intent": "add DHCP pool CORP",
+            "webui_path": "/webui/#/dhcp",
+            "plan": plan,
+            "verify_text": verify_text,
+            "success_signal_contains": success_signal_contains,
+            "session_id": "sess_signal_001",
+            "device_fingerprint": "c1111-4p__17-6-3a",
+            "equivalent_cli_commands": [],
+            "apply_key": "apply",
+        },
+    )
+    approve_action(action_id)
+    return action_id
+
+
+def test_execute_verify_falls_back_to_success_signal(monkeypatch):
+    """P1-verify-fallback: verify_text=None but success_signal_contains='success'
+    → verify_a11y is called with contains='success' (not skipped)."""
+    action_id = _make_atlas_action_with_signal(
+        verify_text=None, success_signal_contains="success"
+    )
+
+    verify_calls: list[dict] = []
+    executed_ids: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": _PERCEIVE_VIEW})
+    monkeypatch.setattr(
+        tr,
+        "webui_act_field",
+        lambda session_id, field_key, value, action_id: {"ok": True, "field_key": field_key},
+    )
+    monkeypatch.setattr(tr, "webui_apply_control", lambda **kw: {"ok": True})
+
+    def _fake_verify(session_id, contains):
+        verify_calls.append({"contains": contains})
+        return {"present": True}
+
+    monkeypatch.setattr(tr, "webui_verify_a11y", _fake_verify)
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    import backend.cli_agent.snapshots as snaps
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_executed", lambda aid: executed_ids.append(aid) or {})
+    monkeypatch.setattr(snaps, "take_snapshot", lambda *a: None)
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    assert result.get("ok") is True
+    assert result.get("verified") is True
+    assert len(verify_calls) == 1
+    assert verify_calls[0]["contains"] == "success"
+    assert executed_ids == [action_id]
+
+
+def test_execute_unverified_flag_when_no_target(monkeypatch):
+    """P1-verify-fallback: verify_text=None AND no success_signal_contains →
+    mark_executed (apply succeeded) BUT result.verified is False and a
+    webui_configure_atlas_unverified WARNING is emitted."""
+    action_id = _make_atlas_action_with_signal(
+        verify_text=None, success_signal_contains=None
+    )
+
+    executed_ids: list[str] = []
+    verify_calls: list = []
+    warnings: list[str] = []
+
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": _PERCEIVE_VIEW})
+    monkeypatch.setattr(
+        tr,
+        "webui_act_field",
+        lambda session_id, field_key, value, action_id: {"ok": True, "field_key": field_key},
+    )
+    monkeypatch.setattr(tr, "webui_apply_control", lambda **kw: {"ok": True})
+    monkeypatch.setattr(
+        tr,
+        "webui_verify_a11y",
+        lambda **kw: verify_calls.append(1) or {"present": True},
+    )
+    monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
+
+    # Capture WARNING-level log events via the module logger.
+    orig_warning = tr.log.warning
+
+    def _capture_warning(event, *a, **kw):
+        warnings.append(event)
+        return orig_warning(event, *a, **kw)
+
+    monkeypatch.setattr(tr.log, "warning", _capture_warning)
+
+    import backend.cli_agent.snapshots as snaps
+    import backend.orchestration.confirmations as confs
+
+    monkeypatch.setattr(confs, "mark_executed", lambda aid: executed_ids.append(aid) or {})
+    monkeypatch.setattr(snaps, "take_snapshot", lambda *a: None)
+
+    result = tr.execute_tool("webui_configure", {"action_id": action_id})
+
+    assert result.get("ok") is True
+    assert result.get("verified") is False
+    assert executed_ids == [action_id]
+    # verify_a11y must NOT be called when there is no target at all.
+    assert len(verify_calls) == 0
+    assert "webui_configure_atlas_unverified" in warnings

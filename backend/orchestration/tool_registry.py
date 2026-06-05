@@ -2194,9 +2194,17 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
     #    but may have an "Add" button in the unmapped list.  We also check
     #    the open_form_control the perceive engine may surface directly.
     #
-    #    Condition: no fields AND no apply_controls present (form not open)
-    #               AND a trigger-name button found in apply_controls or
-    #               unmapped elements.
+    #    Gate: the form is NOT open yet iff NO Apply/submit control is visible.
+    #    We do NOT gate on field count: a Cisco list page renders a Kendo grid
+    #    that can leak a stray select/filter control (DHCP's "Monitoring"
+    #    row-checkbox), so ``not _view_fields`` is an unreliable "form closed"
+    #    signal.  ``is_apply_control`` is glyph-based (pl-save / icon-save-device
+    #    / primaryActionButton) and only fires on a rendered form's save button,
+    #    so ``not _has_submit`` is the trustworthy "form not open" discriminator:
+    #    a list page surfaces no Apply control; an open form always does.  This
+    #    also protects the OSPF re-perceive path — once the form is open the
+    #    Apply control is present, so the Add click is correctly skipped (no
+    #    double-Add).
     _view_fields: list[dict] = view.get("fields") or []
     _view_apply: list[dict] = view.get("apply_controls") or []
     _view_unmapped: list[dict] = view.get("unmapped") or []
@@ -2211,7 +2219,7 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
     _trigger_label: str | None = None
     _trigger_role: str | None = None
 
-    if not _view_fields and not _has_submit:
+    if not _has_submit:
         # Primary: the atlas-surfaced open_form_control (the "Add"/"Create"
         # button on a list page). reconcile now puts this in the view; without
         # it the form never opens and the plan comes back empty on OSPF/DHCP.
@@ -2237,6 +2245,7 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
                     _trigger_role = str(_cand.get("role") or "button").strip()
                     break
 
+    _form_opened = False
     if _trigger_label is not None:
         _open_intent: dict = {
             "role": _trigger_role or "button",
@@ -2253,6 +2262,7 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
                 )
                 if "error" not in _form_perceive:
                     view = _form_perceive["view"]
+                    _form_opened = True
                     log.info(
                         "propose_webui_configure_atlas_opened_form",
                         intent=intent,
@@ -2320,8 +2330,26 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
     risk = drafted["risk"]
     equivalent_cli = drafted.get("equivalent_cli_commands") or []
     validation_errors = drafted.get("validation_errors") or []
+    # Page-agnostic post-apply success signal captured per-route (a11y_text
+    # "success").  The executor falls back to this when the planner supplies no
+    # verify_text, so an apply is never silently marked clean without any
+    # post-write confirmation.
+    success_signal_contains: str | None = view.get("success_signal_contains")
 
     if not typed_plan:
+        # Visibility breadcrumb for the WebUI->CLI fallback: without this the
+        # propose->intent_not_mappable->CLI causal chain leaves no log trace and
+        # diagnosis required dumping the captured atlas.  Carry the perceived
+        # field_keys, whether the open-form probe fired, and the dropped
+        # field_keys/values from validation (not just counts).
+        log.warning(
+            "propose_webui_configure_atlas_empty_plan",
+            intent=intent,
+            webui_path=webui_path,
+            field_keys=[str(f.get("key")) for f in (view.get("fields") or [])],
+            form_opened=_form_opened,
+            validation_errors=validation_errors,
+        )
         close_all_sessions()
         return {
             "error": "intent_not_mappable",
@@ -2397,6 +2425,7 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
         "webui_path": webui_path,
         "plan": display_steps,
         "verify_text": verify_text,
+        "success_signal_contains": success_signal_contains,
         "risk": risk,
         "evidence": evidence,
         "session_id": session_id,
@@ -2470,6 +2499,7 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
     params = action.get("params", {})
     plan: list[dict[str, Any]] = params.get("plan") or []
     verify_text: str | None = params.get("verify_text")
+    success_signal_contains: str | None = params.get("success_signal_contains")
     session_id: str | None = params.get("session_id")
     fp: str = params.get("device_fingerprint") or "unknown__unknown"
     webui_path: str = params.get("webui_path") or ""
@@ -2506,6 +2536,22 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
             "message": reperceive.get("message", "perceive failed at execute time"),
             "session_id": session_id,
         }
+
+    # Pre-snapshot: capture the BEFORE state right before the first
+    # router-affecting step, so the post-snapshot taken after a successful Apply
+    # has a matching pre to diff against.  The propose-time webui_open is keyed
+    # sess_<uuid> (no real action_id), so _maybe_pre_snapshot is skipped there;
+    # this is the only place the real, approved action_id is in scope before the
+    # write.  Best-effort: an SSH hiccup taking the snapshot must NOT abort the
+    # operator-approved write.
+    try:
+        take_snapshot(action_id, "pre")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "webui_configure_atlas_pre_snapshot_failed",
+            action_id=action_id,
+            error=str(exc),
+        )
 
     # Convergence guard: same (field_key, failure_reason) fails twice in the
     # plan → no_progress (the plan is circular or the field is unmappable).
@@ -2621,8 +2667,15 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
         }
 
     # Verify (a11y-based — no webui_describe_page / networkidle).
+    # Target precedence: the planner-supplied verify_text (specific, e.g. a pool
+    # name / VLAN id), else the atlas success_signal ("success" banner) so a
+    # write is never marked clean without ANY post-write confirmation.  When
+    # BOTH are absent (a pure settings/toggle page), we still mark_executed but
+    # flag verified=False and warn — never report it as a confirmed clean write.
+    _verify_target: str | None = verify_text or success_signal_contains
     verify_result: dict[str, Any] | None = None
-    if verify_text:
+    verified = False
+    if _verify_target:
         import time as _time  # noqa: PLC0415
 
         # Poll briefly: after Apply the Cisco list page needs a moment to
@@ -2630,7 +2683,7 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
         # check can false-negative on a write that actually landed. ~3s total.
         _verify_present = False
         for _attempt in range(4):
-            verify_result = webui_verify_a11y(session_id=session_id, contains=verify_text)
+            verify_result = webui_verify_a11y(session_id=session_id, contains=_verify_target)
             if verify_result.get("present"):
                 _verify_present = True
                 break
@@ -2643,19 +2696,29 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
             log.error(
                 "webui_configure_atlas_verify_failed",
                 action_id=action_id,
-                verify_text=verify_text,
+                verify_text=_verify_target,
                 verify_result=verify_result,
             )
             return {
                 "error": "verify_failed",
-                "message": f"verify_a11y did not find {verify_text!r} after apply",
-                "verify_text": verify_text,
+                "message": f"verify_a11y did not find {_verify_target!r} after apply",
+                "verify_text": _verify_target,
                 "verify_result": verify_result,
                 "completed_steps": executed_steps,
             }
+        verified = True
 
     # Success — mark executed, take POST-snapshot, clean up.
     mark_executed(action_id)
+    if not verified:
+        # Apply succeeded but we had no target to confirm the write landed.
+        # Do NOT report this as a confirmed clean success — flag it for the
+        # operator and the logs (visibility-first).
+        log.warning(
+            "webui_configure_atlas_unverified",
+            action_id=action_id,
+            steps_run=len(executed_steps),
+        )
     try:
         take_snapshot(action_id, "post")
     except Exception as exc:  # noqa: BLE001
@@ -2670,13 +2733,15 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
         "webui_configure_atlas_complete",
         action_id=action_id,
         steps_run=len(executed_steps),
-        verify_text=verify_text,
+        verify_text=_verify_target,
+        verified=verified,
     )
     return {
         "ok": True,
         "action_id": action_id,
         "completed_steps": executed_steps,
         "verify_result": verify_result,
+        "verified": verified,
         "snapshot_post": None,  # take_snapshot writes files; path is artifacts-side
     }
 

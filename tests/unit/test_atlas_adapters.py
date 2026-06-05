@@ -542,9 +542,9 @@ class TestKendoComboboxAdapter:
         page = MagicMock()
         page.get_by_role.return_value = loc
 
-        # page.locator("#subnet_listbox") → listbox_loc
+        # page.locator('[id="subnet_listbox"]') → listbox_loc
         def _page_locator(selector: str, **kw: object) -> MagicMock:
-            if selector == "#subnet_listbox":
+            if selector == '[id="subnet_listbox"]':
                 return listbox_loc
             return MagicMock()
 
@@ -556,11 +556,59 @@ class TestKendoComboboxAdapter:
         # Widget was clicked to open
         loc.click.assert_called_once_with(timeout=FORM_TIMEOUT_MS)
 
-        # Scoped listbox was used
-        page.locator.assert_any_call("#subnet_listbox")
+        # Scoped listbox was used via the escape-free attribute form (a GUID id
+        # starting with a digit would make "#<id>" an invalid CSS selector).
+        page.locator.assert_any_call('[id="subnet_listbox"]')
 
         # li.k-item with has_text was located; .first.click() was called
         listbox_loc.locator.assert_called_once_with("li.k-item", has_text="255.255.255.0")
+        li_first.click.assert_called_once_with(timeout=FORM_TIMEOUT_MS)
+
+    def test_kendo_combobox_guid_controls_id_uses_attribute_selector(self) -> None:
+        """P2-kendo-strategy-fixes: a GUID aria-controls (digit-leading id) must
+        be located via the escape-free [id="..."] attribute form, never the
+        invalid CSS '#<guid>' selector."""
+        adapter = KendoComboboxAdapter()
+
+        loc = _mock_loc(count=1)
+        loc.evaluate.return_value = {"ok": False, "reason": "kendo_unavailable"}
+
+        guid = "334a1b2c-dead-beef-listbox"
+
+        def _get_attr(attr_name: str, **kw: object) -> str | None:
+            if attr_name == "aria-expanded":
+                return "false"
+            if attr_name == "aria-controls":
+                return guid
+            return None
+
+        loc.get_attribute.side_effect = _get_attr
+
+        listbox_loc = MagicMock()
+        li_loc = MagicMock()
+        li_first = MagicMock()
+        li_loc.first = li_first
+        listbox_loc.locator.return_value = li_loc
+
+        page = MagicMock()
+        page.get_by_role.return_value = loc
+
+        selectors_seen: list[str] = []
+
+        def _page_locator(selector: str, **kw: object) -> MagicMock:
+            selectors_seen.append(selector)
+            if selector == f'[id="{guid}"]':
+                return listbox_loc
+            return MagicMock()
+
+        page.locator.side_effect = _page_locator
+
+        field = self._make_kendo_field()
+        adapter.apply(page, field, "255.255.255.0")
+
+        # The attribute form was used; the invalid "#<guid>" form was NOT.
+        assert f'[id="{guid}"]' in selectors_seen
+        assert f"#{guid}" not in selectors_seen
         li_first.click.assert_called_once_with(timeout=FORM_TIMEOUT_MS)
 
     # --- PlaywrightTimeoutError propagates ---

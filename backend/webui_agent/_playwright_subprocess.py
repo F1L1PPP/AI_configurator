@@ -345,6 +345,49 @@ def _is_cancel_control_name(accessible_name: str) -> bool:
     tokens = {t for t in re.split(r"[^a-z0-9]+", accessible_name.lower()) if t}
     return bool(tokens & _CANCEL_NAME_TOKENS)
 
+
+def _a11y_text_present(page: Any, contains: str) -> bool:
+    """Return True if ``contains`` is present in the page (post-apply verify).
+
+    Two complementary scans, OR'd:
+      1. The accessibility snapshot's INTERACTIVE nodes (accessible-name /
+         value match) — catches text that lands on a focusable control.
+      2. ``page.content()`` substring (case-insensitive) — catches Cisco
+         success TOASTS, alert/status banners, and newly-created list rows,
+         which render under NON-interactive roles (alert/status/text/
+         gridcell/row) that ``flatten_interactive`` deliberately excludes.
+
+    The interactive scan alone false-negatived every post-Apply banner; the
+    content() check is the same reliable mechanism the legacy ``verify`` op
+    uses.  Page-agnostic — works for DHCP/VLAN/ACL/NAT success signals alike.
+    """
+    from backend.webui_agent.atlas.reconcile import (  # noqa: PLC0415
+        flatten_interactive,
+    )
+
+    needle = contains.lower()
+
+    interactive_hit = False
+    try:
+        snap = page.accessibility.snapshot(interesting_only=True)
+        nodes = flatten_interactive(snap)
+        interactive_hit = any(
+            needle
+            in (str(n.get("name", "")) + " " + str(n.get("value", ""))).lower()
+            for n in nodes
+        )
+    except Exception:  # noqa: BLE001
+        interactive_hit = False
+
+    if interactive_hit:
+        return True
+
+    try:
+        return needle in page.content().lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Per-action Playwright timeout (ms).
 #
 # Click keeps a 5 s budget: it fires an XHR that may have already landed
@@ -500,15 +543,17 @@ def _kendo_select(locator: Any, value: str) -> None:
         if (typeof kendo === 'undefined') {
             return {ok: false, reason: 'kendo_unavailable'};
         }
-        // Walk up to the Kendo widget wrapper (k-widget or k-dropdown-wrap).
+        // Find the Kendo widget wrapper.  Test the START element FIRST: Cisco's
+        // visible span already carries k-widget/k-dropdown, so a parent-first
+        // walk overshoots and kendo.widgetInstance lands on a non-widget.
         let wrapper = listboxEl;
         for (let i = 0; i < 8; i++) {
-            if (!wrapper || !wrapper.parentElement) break;
-            wrapper = wrapper.parentElement;
-            if (wrapper.classList && (
+            if (wrapper && wrapper.classList && (
                 wrapper.classList.contains('k-widget') ||
                 wrapper.classList.contains('k-dropdown')
             )) break;
+            if (!wrapper || !wrapper.parentElement) break;
+            wrapper = wrapper.parentElement;
         }
         let widget;
         try {
@@ -519,16 +564,22 @@ def _kendo_select(locator: Any, value: str) -> None:
         if (!widget || typeof widget.value !== 'function') {
             return {ok: false, reason: 'no_widget_instance'};
         }
-        // Collect available options for error reporting.
-        const dataSource = widget.dataSource;
-        let available = [];
-        if (dataSource && typeof dataSource.data === 'function') {
-            available = dataSource.data().map(d => d.text || d.value || String(d));
-        }
-        // Try setting the value.
+        // Try setting the value FIRST — a diagnostics-collection error must
+        // never abort the actual selection.
         widget.value(targetValue);
         const actual = widget.value();
         if (actual !== targetValue) {
+            // Collect available options for error reporting (guarded —
+            // dataSource.data() can be non-iterable on some widgets).
+            let available = [];
+            try {
+                const dataSource = widget.dataSource;
+                if (dataSource && typeof dataSource.data === 'function') {
+                    available = Array.from(dataSource.data() || []).map(
+                        d => d.text || d.value || String(d)
+                    );
+                }
+            } catch (e) { available = []; }
             return {ok: false, reason: 'value_not_in_options', available: available};
         }
         widget.trigger('change');
@@ -1901,20 +1952,8 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                         _reply(_do_apply_control(page, current_atlas, msg, ev))
 
                     elif op == "verify_a11y":
-                        from backend.webui_agent.atlas.reconcile import (  # noqa: PLC0415,I001
-                            flatten_interactive,
-                        )
-
                         contains = str(msg.get("contains", ""))
-                        snap = page.accessibility.snapshot(interesting_only=True)
-                        nodes = flatten_interactive(snap)
-                        present = any(
-                            contains.lower()
-                            in (
-                                str(n.get("name", "")) + " " + str(n.get("value", ""))
-                            ).lower()
-                            for n in nodes
-                        )
+                        present = _a11y_text_present(page, contains)
                         _reply({"ok": True, "present": present})
 
                     else:

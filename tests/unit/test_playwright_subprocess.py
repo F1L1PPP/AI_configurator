@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from backend.webui_agent._playwright_subprocess import _do_act
+from backend.webui_agent._playwright_subprocess import _a11y_text_present, _do_act
 
 pytestmark = pytest.mark.webui
 
@@ -2173,3 +2173,73 @@ def test_act_by_intent_vision_apply_intent_denies_cancel():
     assert reply["failure_reason"] == "unknown_eid"
     assert reply["denied_reason"] == "apply_intent_resolved_to_cancel"
     assert reply["resolved_via"] == "vision_denied"
+
+
+# ---------------------------------------------------------------------------
+# _a11y_text_present — verify widened beyond interactive roles (P1)
+# ---------------------------------------------------------------------------
+
+
+def _make_verify_page(*, snapshot: dict | None, content: str) -> MagicMock:
+    """Build a fake page whose accessibility.snapshot + content() are canned."""
+    page = MagicMock()
+    page.accessibility.snapshot.return_value = snapshot
+    page.content.return_value = content
+    return page
+
+
+def test_a11y_text_present_matches_interactive_node():
+    """Target appears as the accessible name of an interactive (button) node →
+    present=True via the accessibility scan."""
+    snap = {
+        "role": "WebArea",
+        "name": "root",
+        "children": [
+            {"role": "button", "name": "Apply success"},
+        ],
+    }
+    page = _make_verify_page(snapshot=snap, content="<html></html>")
+    assert _a11y_text_present(page, "success") is True
+
+
+def test_a11y_text_present_matches_noninteractive_via_content():
+    """Target appears ONLY under a non-interactive role (alert banner) that
+    flatten_interactive excludes — the page.content() substring check must
+    still report present=True."""
+    # Snapshot has the phrase only under an 'alert' role (non-interactive).
+    snap = {
+        "role": "WebArea",
+        "name": "root",
+        "children": [
+            {"role": "alert", "name": "Configuration applied successfully"},
+        ],
+    }
+    # content() carries the success banner text.
+    page = _make_verify_page(
+        snapshot=snap,
+        content="<div class='toast'>Configuration applied successfully</div>",
+    )
+    assert _a11y_text_present(page, "successfully") is True
+
+
+def test_a11y_text_present_false_when_absent_everywhere():
+    """Neither the interactive snapshot nor content() contains the phrase →
+    present=False."""
+    snap = {
+        "role": "WebArea",
+        "name": "root",
+        "children": [
+            {"role": "button", "name": "Cancel"},
+        ],
+    }
+    page = _make_verify_page(snapshot=snap, content="<div>nothing here</div>")
+    assert _a11y_text_present(page, "success") is False
+
+
+def test_a11y_text_present_content_check_is_case_insensitive():
+    """The content() substring check is case-insensitive (Cisco banners vary)."""
+    page = _make_verify_page(
+        snapshot={"role": "WebArea", "children": []},
+        content="<div>VLAN 46 CREATED</div>",
+    )
+    assert _a11y_text_present(page, "vlan 46 created") is True

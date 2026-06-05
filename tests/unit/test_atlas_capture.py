@@ -42,6 +42,7 @@ def _desc(
     placeholder: str = "",
     title: str = "",
     name_attr: str = "",
+    name_count: int = 0,
     id: str = "",
     ng_model: str = "",
     spatial_label: str = "",
@@ -66,6 +67,7 @@ def _desc(
         "placeholder": placeholder,
         "title": title,
         "name_attr": name_attr,
+        "name_count": name_count,
         "id": id,
         "ng_model": ng_model,
         "spatial_label": spatial_label,
@@ -262,6 +264,29 @@ class TestResolveLabel:
         """Empty inner_text does not win — resolution continues to next source."""
         d = _desc(inner_text="", spatial_label="Spatial Label")
         assert resolve_label(d) == "Spatial Label"
+
+    def test_spatial_label_equal_to_value_is_rejected(self):
+        """P1-spatial-label: a spatial_label equal to the field's own value
+        (a Kendo selected-value span leaking) must NOT be returned — resolution
+        falls through to the next source."""
+        d = _desc(
+            spatial_label="255.255.255.0",
+            value="255.255.255.0",
+            placeholder="Starting IP",
+        )
+        # spatial_label == value → skipped → placeholder wins.
+        assert resolve_label(d) == "Starting IP"
+
+    def test_spatial_label_kept_when_differs_from_value(self):
+        """A spatial_label that differs from the value is still used."""
+        d = _desc(spatial_label="Subnet Mask", value="255.255.255.0")
+        assert resolve_label(d) == "Subnet Mask"
+
+    def test_spatial_label_equal_value_falls_to_name_attr(self):
+        """When the value-equal spatial_label is the only soft source, resolution
+        falls all the way to name_attr (never returns the bogus value)."""
+        d = _desc(spatial_label="OSPF", value="OSPF", name_attr="processField")
+        assert resolve_label(d) == "processField"
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +747,111 @@ def test_build_locator_button_role_loose_plus_has_text_fallback():
     ), f"text-based css fallback not found in {css_fallbacks}"
 
 
+# ---------------------------------------------------------------------------
+# P1-duplicate-name-identity — name_count disambiguation
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_key_uses_ng_model_when_name_nonunique():
+    """Two descriptors sharing name_attr='processID' (name_count=3) but distinct
+    ng_model must produce DISTINCT keys (from the ng_model tail), not collide on
+    the shared name."""
+    type_select = _desc(
+        tag="select",
+        name_attr="processID",
+        name_count=3,
+        ng_model="ospfModel.OSPFType",
+        options=["OSPF", "OSPFv3"],
+    )
+    pid_input = _desc(
+        tag="input",
+        itype="text",
+        name_attr="processID",
+        name_count=3,
+        ng_model="ospfModel.OSPFProcessID",
+    )
+    k1 = resolve_key(type_select, "Type")
+    k2 = resolve_key(pid_input, "Process ID")
+    assert k1 == "ospftype"
+    assert k2 == "ospfprocessid"
+    assert k1 != k2, "duplicated name must not collapse two controls into one key"
+
+
+def test_resolve_key_unique_name_unchanged():
+    """Regression lock: a UNIQUE name (name_count<=1) still keys on the name."""
+    d = _desc(name_attr="routerID", name_count=1, ng_model="ospfModel.OSPFRouterID")
+    assert resolve_key(d, "Router ID") == "routerid"
+
+
+def test_resolve_key_nonunique_name_no_ng_model_falls_back_to_name():
+    """A non-unique name with NO ng_model still yields the name (better than a
+    label slug for de-dup); narrowing happens at locate() time."""
+    d = _desc(name_attr="dupName", name_count=2, ng_model="")
+    assert resolve_key(d, "Some Label") == "dupname"
+
+
+def test_build_locator_prefers_ng_model_when_name_nonunique():
+    """When name_count>1 and an ng_model exists, primary strategy must be
+    css [ng-model=...] (unique), with [name=...] demoted to a fallback."""
+    d = _desc(
+        tag="input",
+        itype="text",
+        name_attr="processID",
+        name_count=3,
+        ng_model="ospfModel.OSPFProcessID",
+    )
+    locator = build_locator(d, "textbox", "Process ID")
+    assert locator.strategy == "css"
+    assert locator.value == "[ng-model='ospfModel.OSPFProcessID']"
+    # [name=...] must still be present as a fallback handle.
+    fb_values = [fb.value for fb in locator.fallbacks]
+    assert "[name='processID']" in fb_values
+
+
+def test_build_locator_keeps_name_primary_when_name_unique():
+    """Regression lock (OSPF routerID): a UNIQUE name keeps css [name=...] as
+    primary — the duplicate-name path must not touch unique names."""
+    d = _desc(
+        tag="input",
+        itype="text",
+        name_attr="routerID",
+        name_count=1,
+        ng_model="ospfModel.OSPFRouterID",
+    )
+    locator = build_locator(d, "textbox", "Router ID")
+    assert locator.strategy == "css"
+    assert locator.value == "[name='routerID']"
+
+
+def test_build_atlas_nonunique_name_keeps_both_controls():
+    """Two controls sharing name='processID' but distinct ng_model must BOTH
+    survive build_atlas de-dup (distinct keys), not silently drop one."""
+    descs = [
+        _desc(
+            tag="select",
+            role="listbox",
+            name_attr="processID",
+            name_count=2,
+            ng_model="ospfModel.OSPFType",
+            kendo_select_name="processID",
+            options=["OSPF", "OSPFv3"],
+            spatial_label="Type",
+        ),
+        _desc(
+            tag="input",
+            itype="text",
+            name_attr="processID",
+            name_count=2,
+            ng_model="ospfModel.OSPFProcessID",
+            aria_label="Process ID",
+            required=True,
+        ),
+    ]
+    atlas = build_atlas(descs, route="#/ospf", device_fingerprint="fp", page_title="OSPF")
+    keys = sorted(f.key for f in atlas.fields)
+    assert keys == ["ospfprocessid", "ospftype"], f"both controls must survive; got {keys}"
+
+
 def test_view_from_descriptors_carries_values_and_keys():
     """view_from_descriptors returns correct keys, labels, and live values."""
     descriptors = [
@@ -767,3 +897,77 @@ def test_view_from_descriptors_carries_values_and_keys():
     assert subnet_field is not None, f"no subnet field in {keys}"
     assert subnet_field["value"] == "255.255.255.128"
     assert subnet_field["options"] == ["255.255.255.0", "255.255.255.128"]
+
+
+# ---------------------------------------------------------------------------
+# P0b — grid-row checkbox junk filter (is_kendo_grid, not widget=='kendo_grid')
+# ---------------------------------------------------------------------------
+
+
+def test_build_atlas_drops_grid_row_checkbox():
+    """A row-select checkbox inside a .k-grid (is_kendo_grid=True) with NO
+    kendo backing select must be dropped from BOTH build_atlas and
+    view_from_descriptors.
+
+    classify_widget types it as 'checkbox' (rule 3 beats rule 5 kendo_grid),
+    so the old ``widget == 'kendo_grid'`` filter leaked it (DHCP's
+    "Monitoring" row-checkbox).  The flag-based filter drops it.
+    """
+    grid_checkbox = _desc(
+        tag="input",
+        itype="checkbox",
+        role="checkbox",
+        ng_model="dataItem.checked",
+        is_kendo_grid=True,
+        name_attr="",
+        spatial_label="Monitoring",
+    )
+    real_input = _desc(
+        tag="input",
+        itype="text",
+        name_attr="poolName",
+        aria_label="Pool Name",
+        is_kendo_grid=False,
+    )
+    descs = [grid_checkbox, real_input]
+
+    atlas = build_atlas(descs, route="#/dhcp", device_fingerprint="fp", page_title="DHCP")
+    atlas_keys = [f.key for f in atlas.fields]
+    assert atlas_keys == ["poolname"], f"grid checkbox must be dropped; got {atlas_keys}"
+
+    view = view_from_descriptors(descs, route="#/dhcp", device_fingerprint="fp", page_title="DHCP")
+    view_keys = [f["key"] for f in view["fields"]]
+    assert view_keys == ["poolname"], f"grid checkbox must be dropped from view; got {view_keys}"
+
+
+def test_build_atlas_keeps_grid_combobox_with_select_name():
+    """A Kendo widget that legitimately lives inside a .k-grid but carries a
+    kendo_select_name (its backing <select>) must be KEPT — the filter only
+    drops in-grid descriptors WITHOUT a backing select.
+
+    (classify_widget types any in-grid element as 'kendo_grid' by precedence;
+    the field still survives because it has a backing select, which is the
+    invariant this test locks: in-grid + select_name = keep.)
+    """
+    grid_combobox = _desc(
+        tag="span",
+        role="listbox",
+        kendo_select_name="maskOptions",
+        options=["255.255.255.0", "255.255.255.128"],
+        is_kendo_grid=True,
+        spatial_label="Mask",
+    )
+    descs = [grid_combobox]
+
+    atlas = build_atlas(descs, route="#/dhcp", device_fingerprint="fp", page_title="DHCP")
+    assert len(atlas.fields) == 1, f"grid widget with backing select must be kept; got {atlas.fields}"
+    # Its locator must point at the backing select so the adapter can resolve it.
+    fb_values = [atlas.fields[0].locator.value] + [
+        fb.value for fb in atlas.fields[0].locator.fallbacks
+    ]
+    assert any("maskOptions" in (v or "") for v in fb_values), (
+        f"backing select not reachable via locator: {fb_values}"
+    )
+
+    view = view_from_descriptors(descs, route="#/dhcp", device_fingerprint="fp", page_title="DHCP")
+    assert len(view["fields"]) == 1, f"grid widget with backing select kept in view; got {view['fields']}"

@@ -155,7 +155,22 @@ _CAPTURE_JS = """
   // Searches for a nearby text element above (Layout A) or to the left
   // (Layout B) of the given bounding rect t.
   // -----------------------------------------------------------------------
-  function spatialLabel(t) {
+  function spatialLabel(t, forEl) {
+    // (1) Cisco explicit label markup: prefer a real label in the SAME
+    // form-group/row ancestor over any geometric guess. Cisco renders field
+    // labels as <span class="label">, <label>, or .pl-mandatory inside the
+    // field's .form-group/.row. Use it when present (never blanks a label —
+    // only overrides geometry when a real label exists).
+    if (forEl) {
+      const grp = forEl.closest('.form-group, .row');
+      if (grp) {
+        const lbl = grp.querySelector('span.label, label, .pl-mandatory');
+        if (lbl && !lbl.querySelector('input, textarea, select, button')) {
+          const lt = (lbl.innerText || lbl.textContent || '').trim();
+          if (lt && lt.length <= 60) return lt;
+        }
+      }
+    }
     const sel = 'label,span,div,a,p,td,th,h1,h2,h3,h4,h5,h6,strong,em';
     const cs = document.querySelectorAll(sel);
     let bestText = null;
@@ -165,6 +180,9 @@ _CAPTURE_JS = """
     for (const el of cs) {
       // Skip containers that wrap form elements.
       if (el.querySelector('input, textarea, select, button')) continue;
+      // (2) Skip Kendo value/decoration chrome — the span that renders a
+      // widget's SELECTED VALUE ('OSPF', '255.255.255.0'), never a label.
+      if (el.closest('.k-input, .k-widget, .k-dropdown-wrap, .k-numerictextbox, .k-list, .k-grid')) continue;
       // Skip table headers and their descendants.
       if (el.tagName === 'TH' || el.tagName === 'THEAD') continue;
       if (el.closest('th, thead')) continue;
@@ -278,6 +296,12 @@ _CAPTURE_JS = """
     const cls = el.getAttribute('class') || '';
     const id = el.getAttribute('id') || '';
     const name_attr = el.getAttribute('name') || '';
+    // How many elements on the page share this name? Cisco's Basic/Advanced
+    // forms reuse one name (e.g. "processID") across a <select> + several
+    // inputs, so [name=X] is NOT a unique handle when name_count > 1.
+    const name_count = name_attr
+      ? document.querySelectorAll('[name="' + name_attr + '"]').length
+      : 0;
     const ng_model = el.getAttribute('ng-model') || '';
     const aria_label = el.getAttribute('aria-label') || '';
     const placeholder = el.getAttribute('placeholder') || '';
@@ -294,8 +318,9 @@ _CAPTURE_JS = """
     const r = el.getBoundingClientRect();
     const bbox = { x: r.x, y: r.y, w: r.width, h: r.height };
 
-    // Spatial label (needs bbox)
-    const spatial = (r.width > 0 && r.height > 0) ? spatialLabel(bbox) : '';
+    // Spatial label (needs bbox; el lets it prefer Cisco label markup + skip
+    // Kendo value chrome)
+    const spatial = (r.width > 0 && r.height > 0) ? spatialLabel(bbox, el) : '';
 
     // labelledby text
     const lby_text = labelledbyText(el);
@@ -355,6 +380,7 @@ _CAPTURE_JS = """
       placeholder,
       title,
       name_attr,
+      name_count,
       id,
       ng_model,
       classes: cls,
@@ -470,7 +496,13 @@ def resolve_label(desc: dict) -> str:
       9. id (skip ng-* auto-generated Angular ids)
 
     Truncated to 80 characters.
+
+    Defense-in-depth: a ``spatial_label`` that EXACTLY equals the descriptor's
+    own current ``value`` is rejected — a label can never be the field's own
+    value (a Kendo selected-value span leaking as a label, e.g. startingIp ->
+    '255.255.255.0').  Such a spatial_label is skipped and the next source wins.
     """
+    own_value = (desc.get("value") or "").strip()
     for key in (
         "aria_label",
         "labelledby_text",
@@ -482,6 +514,9 @@ def resolve_label(desc: dict) -> str:
         "name_attr",
     ):
         val = (desc.get(key) or "").strip()
+        if key == "spatial_label" and val and own_value and val == own_value:
+            # Spatial label equals the field's own value → not a real label.
+            continue
         if val:
             return val[:80]
 
@@ -496,7 +531,10 @@ def resolve_key(desc: dict, label: str) -> str:
     """Derive a machine-readable field key from a descriptor + label.
 
     Resolution order:
-      1. name_attr (stripped, lowercased)
+      1. name_attr (stripped, lowercased) — ONLY when it is unique on the page
+         (``name_count <= 1``).  A non-unique name (Cisco reuses "processID"
+         across a <select> + input) is skipped so distinct controls get
+         distinct keys from their unique ng_model tail instead of colliding.
       2. ng_model tail (part after last ".")
       3. slugify(label)
       4. "" (truly anonymous element)
@@ -504,7 +542,8 @@ def resolve_key(desc: dict, label: str) -> str:
     Always returns lowercase/normalized. Never empty if any of 1-3 yields a value.
     """
     name_attr = (desc.get("name_attr") or "").strip()
-    if name_attr:
+    name_count = desc.get("name_count") or 0
+    if name_attr and name_count <= 1:
         return name_attr.lower()
 
     ng_model = (desc.get("ng_model") or "").strip()
@@ -512,6 +551,12 @@ def resolve_key(desc: dict, label: str) -> str:
         tail = ng_model.rsplit(".", 1)[-1]
         if tail:
             return tail.lower()
+
+    # Non-unique name with no ng_model: fall back to the name (better than a
+    # label slug for de-dup), even though it collides — the locator layer will
+    # still narrow via _first_visible.
+    if name_attr:
+        return name_attr.lower()
 
     if label:
         sl = slugify(label)
@@ -541,11 +586,21 @@ def build_locator(desc: dict, role: str, label: str) -> LocatorSpec:
       - for kendo: css ``select[name='<kendo_select_name>']``
     """
     name_attr = (desc.get("name_attr") or "").strip()
+    name_count = desc.get("name_count") or 0
     ng_model = (desc.get("ng_model") or "").strip()
     kendo_select_name = desc.get("kendo_select_name")
 
+    # A name shared by >1 element is not a single-element handle.  When that
+    # happens AND we have a unique ng_model, prefer [ng-model=...] as primary
+    # so locate() resolves exactly one element instead of 3-4 (the live
+    # processid -> unknown_error fill failure).
+    name_is_unique = name_count <= 1
+
     get_by_role_spec = LocatorSpec(strategy="get_by_role", role=role, name=label)
     css_name_spec = LocatorSpec(strategy="css", value=f"[name='{name_attr}']") if name_attr else None
+    ng_model_css_spec = (
+        LocatorSpec(strategy="css", value=f"[ng-model='{ng_model}']") if ng_model else None
+    )
     ng_model_spec = LocatorSpec(strategy="ng_model", value=ng_model) if ng_model else None
     kendo_spec = (
         LocatorSpec(strategy="css", value=f"select[name='{kendo_select_name}']")
@@ -553,10 +608,17 @@ def build_locator(desc: dict, role: str, label: str) -> LocatorSpec:
         else None
     )
 
-    if name_attr:
-        # Primary: CSS by name attribute
-        primary = css_name_spec
+    if name_attr and not name_is_unique and ng_model_css_spec is not None:
+        # Non-unique name + unique ng-model → ng-model CSS is primary, name CSS
+        # demoted to a fallback (still a usable handle after _first_visible).
+        primary = ng_model_css_spec
         fallbacks: list[LocatorSpec] = [get_by_role_spec]
+        if css_name_spec:
+            fallbacks.append(css_name_spec)
+    elif name_attr:
+        # Primary: CSS by name attribute (unique, or non-unique with no ng-model)
+        primary = css_name_spec
+        fallbacks = [get_by_role_spec]
         if ng_model_spec:
             fallbacks.append(ng_model_spec)
     elif ng_model:
@@ -723,8 +785,13 @@ def build_atlas(
             # Other buttons are not captured in the atlas (not form fields).
         elif widget in _FORM_FIELD_WIDGETS and _is_form_control(desc, role):
             # Identity gate: only real Cisco fields with a stable locator handle.
-            # kendo_grid without kendo_select_name is not a fillable field.
-            if widget == "kendo_grid" and not desc.get("kendo_select_name"):
+            # Any descriptor INSIDE a .k-grid that lacks a kendo backing select
+            # is grid chrome (per-row dataItem.* select checkboxes, filter
+            # widgets), not a fillable form field.  We gate on the captured
+            # ``is_kendo_grid`` flag rather than ``widget == 'kendo_grid'``
+            # because classify_widget types a row-select checkbox as "checkbox"
+            # (rule 3 beats rule 5), so the widget check alone leaks it.
+            if desc.get("is_kendo_grid") and not desc.get("kendo_select_name"):
                 continue
             if not _has_stable_identity(desc):
                 continue
@@ -794,8 +861,10 @@ def view_from_descriptors(
             elif is_open_form_control(desc):
                 open_form_control = ctrl
         elif widget in _FORM_FIELD_WIDGETS and _is_form_control(desc, role):
-            # Same identity gate as build_atlas
-            if widget == "kendo_grid" and not desc.get("kendo_select_name"):
+            # Same identity gate as build_atlas (these two paths MUST NOT drift).
+            # Drop any in-grid descriptor without a kendo backing select — this
+            # covers the row-select checkbox classify_widget types as "checkbox".
+            if desc.get("is_kendo_grid") and not desc.get("kendo_select_name"):
                 continue
             if not _has_stable_identity(desc):
                 continue
@@ -829,6 +898,10 @@ def view_from_descriptors(
         "fields": fields,
         "apply_controls": apply_controls,
         "open_form_control": open_form_control,
+        # Mirror the SuccessSignal default build_atlas sets (a11y_text/"success").
+        # The executor uses this as the post-apply verify target when the planner
+        # supplies no verify_text, so a write is never marked clean unverified.
+        "success_signal_contains": "success",
         "unmapped": [],
     }
 

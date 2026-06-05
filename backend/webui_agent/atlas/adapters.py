@@ -57,15 +57,17 @@ _JS_WIDGET_API = """
     if (typeof kendo === 'undefined') {
         return {ok: false, reason: 'kendo_unavailable'};
     }
-    // Walk up to the Kendo widget wrapper (k-widget or k-dropdown-wrap).
+    // Find the Kendo widget wrapper.  Test the START element FIRST: Cisco's
+    // visible span already carries k-widget/k-dropdown, so a parent-first walk
+    // overshoots and kendo.widgetInstance lands on a non-widget ancestor.
     let wrapper = listboxEl;
     for (let i = 0; i < 8; i++) {
-        if (!wrapper || !wrapper.parentElement) break;
-        wrapper = wrapper.parentElement;
-        if (wrapper.classList && (
+        if (wrapper && wrapper.classList && (
             wrapper.classList.contains('k-widget') ||
             wrapper.classList.contains('k-dropdown')
         )) break;
+        if (!wrapper || !wrapper.parentElement) break;
+        wrapper = wrapper.parentElement;
     }
     let widget;
     try {
@@ -76,16 +78,22 @@ _JS_WIDGET_API = """
     if (!widget || typeof widget.value !== 'function') {
         return {ok: false, reason: 'no_widget_instance'};
     }
-    // Collect available options for error reporting.
-    const dataSource = widget.dataSource;
-    let available = [];
-    if (dataSource && typeof dataSource.data === 'function') {
-        available = dataSource.data().map(d => d.text || d.value || String(d));
-    }
-    // Try setting the value.
+    // Try setting the value FIRST — a diagnostics-collection error must never
+    // abort the actual selection.
     widget.value(targetValue);
     const actual = widget.value();
     if (actual !== targetValue) {
+        // Collect available options for error reporting (guarded — dataSource
+        // .data() can be non-iterable on some widgets).
+        let available = [];
+        try {
+            const dataSource = widget.dataSource;
+            if (dataSource && typeof dataSource.data === 'function') {
+                available = Array.from(dataSource.data() || []).map(
+                    d => d.text || d.value || String(d)
+                );
+            }
+        } catch (e) { available = []; }
         return {ok: false, reason: 'value_not_in_options', available: available};
     }
     widget.trigger('change');
@@ -394,12 +402,30 @@ class KendoComboboxAdapter:
             except Exception:  # noqa: BLE001
                 controls_id = None
 
+            _scoped_clicked = False
             if controls_id:
-                list_loc = page.locator(f"#{controls_id}")
-                list_loc.locator("li.k-item", has_text=target_value).first.click(
-                    timeout=FORM_TIMEOUT_MS
-                )
-            else:
+                # Use the attribute form ``[id="..."]`` — a Kendo popup id is
+                # often a GUID starting with a digit, which is an INVALID CSS id
+                # selector (``#334a...``) and throws, abandoning the scoping.
+                list_loc = page.locator(f'[id="{controls_id}"]')
+                try:
+                    list_loc.locator("li.k-item", has_text=target_value).first.click(
+                        timeout=FORM_TIMEOUT_MS
+                    )
+                    _scoped_clicked = True
+                except PlaywrightTimeoutError:
+                    raise  # propagate — bounded retry classification
+                except Exception as exc:  # noqa: BLE001
+                    # Scoped click failed structurally (bad id, detached) — fall
+                    # through to the body-wide path instead of abandoning to s3.
+                    logger.info(
+                        "kendo_select_scoped_click_fell_through",
+                        error=str(exc),
+                        controls_id=controls_id,
+                        requested_value=target_value,
+                    )
+
+            if not _scoped_clicked:
                 page.locator("ul.k-list li.k-item", has_text=target_value).first.click(
                     timeout=FORM_TIMEOUT_MS
                 )

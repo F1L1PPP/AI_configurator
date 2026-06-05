@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.orchestration.configure_planner import (
+    _ATLAS_SYSTEM_PROMPT,
     draft_atlas_plan,
     validate_atlas_plan,
 )
@@ -227,6 +228,38 @@ def test_validate_combobox_no_options_skips_check():
     non_missing_errors = [e for e in errors if e.get("reason") != "missing_required"]
     assert non_missing_errors == []
     assert len(valid) == 1
+
+
+def test_validate_combobox_none_value_skipped():
+    """P2-validate-plan-typesafe: a None value must be dropped with reason
+    'null_value' (NOT coerced to 'none' → value_not_in_options)."""
+    atlas = _make_atlas(_combobox_field("subnet.mask", ["255.255.255.0", "255.255.0.0"]))
+    plan = [{"field_key": "subnet.mask", "value": None}]
+
+    valid, errors = validate_atlas_plan(plan, atlas)
+
+    assert valid == []
+    reasons = [e["reason"] for e in errors if e.get("field_key") == "subnet.mask"]
+    assert reasons == ["null_value"], f"expected null_value, got {errors}"
+
+
+def test_validate_combobox_int_option_no_crash():
+    """P2-validate-plan-typesafe: numeric options (e.g. lease days [7, 30]) must
+    not crash on opt.strip(); a matching int value passes, a non-matching int is
+    dropped cleanly as value_not_in_options."""
+    atlas = _make_atlas(_combobox_field("lease.days", [7, 30]))  # type: ignore[list-item]
+
+    valid_ok, errors_ok = validate_atlas_plan(
+        [{"field_key": "lease.days", "value": 7}], atlas
+    )
+    assert len(valid_ok) == 1
+    assert valid_ok[0]["value"] == 7
+
+    valid_bad, errors_bad = validate_atlas_plan(
+        [{"field_key": "lease.days", "value": 99}], atlas
+    )
+    assert valid_bad == []
+    assert errors_bad[0]["reason"] == "value_not_in_options"
 
 
 def test_validate_preserves_plan_order():
@@ -472,3 +505,49 @@ def test_draft_atlas_plan_validation_errors_key_always_present():
 
     assert "validation_errors" in result
     assert isinstance(result["validation_errors"], list)
+
+
+# ---------------------------------------------------------------------------
+# P1-verify-text-prompt-rule — verify_text passthrough + prompt rule presence
+# ---------------------------------------------------------------------------
+
+
+def test_draft_atlas_plan_passes_string_verify_text_through():
+    """A non-null verify_text from the model must pass through unchanged."""
+    atlas = _make_atlas(_input_field("pool.name"))
+    tool_payload = {
+        "plan": [{"field_key": "pool.name", "value": "CORP"}],
+        "verify_text": "CORP",
+        "risk": "Adds pool CORP.",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_atlas_tool_use_client(tool_payload)
+
+    result = draft_atlas_plan(
+        intent="add DHCP pool CORP", rag_chunks=[], view={}, atlas=atlas, client=client
+    )
+
+    assert result["verify_text"] == "CORP"
+
+
+def test_draft_atlas_plan_passes_null_verify_text_through():
+    """A null verify_text (settings/toggle page) must pass through as None."""
+    atlas = _make_atlas(_input_field("toggle.x"))
+    tool_payload = {
+        "plan": [{"field_key": "toggle.x", "value": "on"}],
+        "verify_text": None,
+        "risk": "Toggles x.",
+        "equivalent_cli_commands": [],
+    }
+    client = _make_atlas_tool_use_client(tool_payload)
+
+    result = draft_atlas_plan(
+        intent="enable x", rag_chunks=[], view={}, atlas=atlas, client=client
+    )
+
+    assert result["verify_text"] is None
+
+
+def test_atlas_system_prompt_documents_verify_text():
+    """Lock the verify_text rule's presence in the planner system prompt."""
+    assert "verify_text" in _ATLAS_SYSTEM_PROMPT
