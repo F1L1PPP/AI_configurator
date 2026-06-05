@@ -535,6 +535,283 @@ def webui_act_by_intent(
     }
 
 
+# ---------------------------------------------------------------------------
+# C3: Atlas act-path wrappers (ADDITIVE — do NOT modify existing functions)
+# ---------------------------------------------------------------------------
+
+
+def webui_perceive(
+    session_id: str,
+    route: str | None = None,
+    device_fingerprint: str = "unknown__unknown",
+) -> dict[str, Any]:
+    """Observe the current page via atlas + accessibility tree.
+
+    Read-only — no HITL gate required.
+
+    Returns:
+        ``{"view": ..., "drift": bool, "captured": bool,
+           "missing_required": [...], "unmapped_fields": [...],
+           "session_id": str}`` on success.
+        ``{"error": ..., "session_id": str}`` on failure.
+    """
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send(
+            {
+                "op": "perceive",
+                "route": route,
+                "device_fingerprint": device_fingerprint,
+            }
+        )
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        log.error(
+            "webui_perceive_subprocess_error",
+            session_id=session_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_perceive_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        return {
+            "error": "webui_perceive_failed",
+            "message": str(reply.get("error", "perceive failed")),
+            "exc_type": str(reply.get("exc_type", "Unknown")),
+            "session_id": session_id,
+        }
+
+    return {
+        "view": reply["view"],
+        "drift": reply.get("drift", False),
+        "captured": reply.get("captured", False),
+        "missing_required": reply.get("missing_required", []),
+        "unmapped_fields": reply.get("unmapped_fields", []),
+        "session_id": session_id,
+    }
+
+
+def webui_act_field(
+    session_id: str,
+    field_key: str,
+    value: Any,
+    action_id: str,
+) -> dict[str, Any]:
+    """Apply a value to a single atlas-mapped field. HITL-gated write tool.
+
+    Returns:
+        Success: ``{"ok": True, "field_key": str, "attempts": int,
+            "session_id": str}``.
+        Soft failure: ``{"ok": False, "failure_reason": str,
+            "field_key": str, "session_id": str}`` — mark_failed NOT called;
+            orchestrator may retry.
+        Hard failure: ``{"error": ..., "session_id": str}`` — mark_failed
+            called for subprocess crashes / missing session.
+    """
+    if not is_approved(action_id):
+        log.info("webui_act_field_not_approved", action_id=action_id)
+        return {
+            "error": "not_approved",
+            "message": f"action_id {action_id!r} is not APPROVED",
+            "session_id": session_id,
+        }
+
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        mark_failed(action_id)
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send(
+            {
+                "op": "act_field",
+                "field_key": field_key,
+                "value": value,
+            }
+        )
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        mark_failed(action_id)
+        log.error(
+            "webui_act_field_subprocess_error",
+            session_id=session_id,
+            action_id=action_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_act_field_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        failure_reason = reply.get("failure_reason")
+        log.info(
+            "webui_act_field_soft_failure",
+            session_id=session_id,
+            action_id=action_id,
+            field_key=field_key,
+            failure_reason=failure_reason,
+        )
+        # Soft failure — do NOT mark_failed; orchestrator may retry.
+        return {
+            "ok": False,
+            "failure_reason": failure_reason,
+            "field_key": reply.get("field_key", field_key),
+            "session_id": session_id,
+        }
+
+    settings = get_settings()
+    pool.invalidate(settings.router_host, settings.router_ssh_user)
+    log.info(
+        "webui_act_field_complete",
+        session_id=session_id,
+        action_id=action_id,
+        field_key=field_key,
+        attempts=reply.get("attempts", 0),
+    )
+    return {
+        "ok": True,
+        "field_key": reply.get("field_key", field_key),
+        "attempts": reply.get("attempts", 0),
+        "session_id": session_id,
+    }
+
+
+def webui_apply_control(
+    session_id: str,
+    action_id: str,
+    key: str | None = None,
+) -> dict[str, Any]:
+    """Click the atlas apply control (router write). HITL-gated.
+
+    CLAUDE.md §4: NEVER retried on TimeoutError.
+
+    Returns:
+        Success: ``{"ok": True, "session_id": str}``.
+        Soft failure: ``{"ok": False, "failure_reason": str,
+            "session_id": str}`` — mark_failed NOT called.
+        Hard failure: ``{"error": ..., "session_id": str}`` — mark_failed
+            called for subprocess crashes / missing session.
+    """
+    if not is_approved(action_id):
+        log.info("webui_apply_control_not_approved", action_id=action_id)
+        return {
+            "error": "not_approved",
+            "message": f"action_id {action_id!r} is not APPROVED",
+            "session_id": session_id,
+        }
+
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        mark_failed(action_id)
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send({"op": "apply_control", "key": key})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        mark_failed(action_id)
+        log.error(
+            "webui_apply_control_subprocess_error",
+            session_id=session_id,
+            action_id=action_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_apply_control_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        failure_reason = reply.get("failure_reason")
+        log.info(
+            "webui_apply_control_soft_failure",
+            session_id=session_id,
+            action_id=action_id,
+            failure_reason=failure_reason,
+        )
+        return {
+            "ok": False,
+            "failure_reason": failure_reason,
+            "session_id": session_id,
+        }
+
+    settings = get_settings()
+    pool.invalidate(settings.router_host, settings.router_ssh_user)
+    log.info(
+        "webui_apply_control_complete",
+        session_id=session_id,
+        action_id=action_id,
+    )
+    return {"ok": True, "session_id": session_id}
+
+
+def webui_verify_a11y(
+    session_id: str,
+    contains: str,
+) -> dict[str, Any]:
+    """Check whether ``contains`` appears in the live accessibility tree.
+
+    Read-only — no HITL gate.
+
+    Returns:
+        ``{"present": bool, "session_id": str}`` on success.
+        ``{"error": ..., "session_id": str}`` on failure.
+    """
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        return _session_not_found(session_id)
+
+    try:
+        reply = sess.send({"op": "verify_a11y", "contains": contains})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        log.error(
+            "webui_verify_a11y_subprocess_error",
+            session_id=session_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "webui_verify_a11y_failed",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        return {
+            "error": "webui_verify_a11y_failed",
+            "message": str(reply.get("error", "verify_a11y failed")),
+            "exc_type": str(reply.get("exc_type", "Unknown")),
+            "session_id": session_id,
+        }
+
+    return {
+        "present": bool(reply.get("present", False)),
+        "session_id": session_id,
+    }
+
+
 def _session_not_found(session_id: str) -> dict[str, Any]:
     return {
         "error": "session_not_found",

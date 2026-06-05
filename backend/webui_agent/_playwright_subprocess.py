@@ -75,6 +75,16 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
+# C3: module-level import so tests can patch
+# ``backend.webui_agent._playwright_subprocess.get_adapter``.
+# The import itself is deferred to avoid paying the Playwright/atlas import
+# cost on one-shot child startup — we shadow it here so the name exists at
+# module scope for monkeypatching.
+try:
+    from backend.webui_agent.atlas.adapters import get_adapter  # noqa: F401
+except Exception:  # noqa: BLE001 — child process may lack settings on import
+    get_adapter = None  # noqa: BLE001 — defensive; the real import succeeded above
+
 
 def _do_add_access_vlan(args: dict[str, Any]) -> dict[str, Any]:
     """Playwright-only steps for the add-access-VLAN flow.
@@ -1430,6 +1440,274 @@ def _do_act_by_intent(
     return reply, new_map, new_vid
 
 
+# ---------------------------------------------------------------------------
+# C3: Atlas act-path helpers (ADDITIVE — do NOT modify existing ops/functions)
+# ---------------------------------------------------------------------------
+
+
+def _settle_explicit(page: Any, expect_locator: Any = None, timeout_ms: int = 2000) -> None:
+    """Settle the page after an atlas-driven act, WITHOUT networkidle.
+
+    Two strategies (best-effort — all exceptions are swallowed):
+    1. If ``expect_locator`` is given, wait for it to be visible within
+       ``timeout_ms``.  Useful after an apply click that triggers a banner.
+    2. Otherwise, wait for ``"domcontentloaded"`` with a small bounded
+       fallback sleep.  This REPLACES the expensive networkidle used by
+       ``_settle_page`` — the atlas path doesn't need to wait for every
+       Angular XHR to drain.
+    """
+    from playwright.sync_api import expect  # noqa: PLC0415
+
+    if expect_locator is not None:
+        with contextlib.suppress(Exception):
+            expect(expect_locator).to_be_visible(timeout=timeout_ms)
+        return
+
+    import time as _time  # noqa: PLC0415
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    except Exception:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            _time.sleep(0.15)
+
+
+def _do_act_by_field(
+    page: Any,
+    atlas: Any,
+    msg: dict[str, Any],
+    ev: Any,
+) -> dict[str, Any]:
+    """Atlas-driven act: locate + apply + read-back-verify a single field.
+
+    Self-heal taxonomy (failure_reason values):
+    - ``"sensitive_denied"``        : field_key / label / value matched deny-list.
+    - ``"unknown_field_key"``       : field_key not found in the atlas.
+    - ``"verify_mismatch"``         : adapter acted but read-back disagrees.
+    - ``"element_intercepted"``     : PlaywrightTimeoutError after 2 attempts.
+    - ``"value_rejected"``          : ValueError from adapter (dead-end, no retry).
+    - ``"unmapped_field"``          : LocatorResolutionError — route to vision rung.
+    - ``"unknown_error"``           : any other exception.
+    """
+    import sys as _sys  # noqa: PLC0415
+
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: PLC0415
+
+    from backend.webui_agent.atlas.adapters import LocatorResolutionError  # noqa: PLC0415
+
+    # Resolve via sys.modules so tests can patch
+    # ``backend.webui_agent._playwright_subprocess.get_adapter``.
+    _this_mod = _sys.modules[__name__]
+    _get_adapter = _this_mod.get_adapter
+
+    field_key = str(msg.get("field_key", ""))
+    value = msg.get("value")
+
+    # ---- deny-list guard ----
+    deny_target = (
+        field_key.lower()
+        + " "
+        + str(value).lower()
+        + " "
+        + (atlas.field_by_key(field_key).label.lower() if atlas and atlas.field_by_key(field_key) else "")
+    )
+    for phrase in _SENSITIVE_DENY_LIST:
+        if phrase in deny_target:
+            return {"ok": False, "failure_reason": "sensitive_denied"}
+
+    # ---- atlas lookup ----
+    field = atlas.field_by_key(field_key) if atlas is not None else None
+    if field is None:
+        return {
+            "ok": False,
+            "failure_reason": "unknown_field_key",
+            "field_key": field_key,
+        }
+
+    adapter = _get_adapter(field.widget)
+
+    max_attempts = 2
+    for attempt_idx in range(max_attempts):
+        try:
+            adapter.apply(page, field, value)
+
+            # Read-back self-verify.
+            rb = adapter.read_back(page, field)
+            if rb is not None:
+                # Bool widgets: compare bool.
+                if isinstance(rb, bool):
+                    intended_bool = value in (True, "true", "1", "yes", "on")
+                    if rb != intended_bool:
+                        return {
+                            "ok": False,
+                            "failure_reason": "verify_mismatch",
+                            "field_key": field_key,
+                            "expected": value,
+                            "got": rb,
+                        }
+                else:
+                    # String compare, case-insensitive + trimmed.
+                    mismatch = str(rb).strip().lower() != str(value).strip().lower()
+                    # Kendo combobox read-back is the backing <select> VALUE
+                    # attribute, which can differ from the chosen display text
+                    # (e.g. value="24" vs text="255.255.255.0"). The atlas only
+                    # stores option texts, so a value/text difference can't be
+                    # disambiguated here — treat combobox read-back as ADVISORY
+                    # (the CLI running-config verify is the real backstop) so a
+                    # correct selection is never reported as verify_mismatch.
+                    # Strict compare stays for text inputs — that is what catches
+                    # the fill-corruption case (e.g. the Starting-ip concat bug).
+                    if mismatch and field.widget == "kendo_combobox":
+                        mismatch = False
+                    if mismatch:
+                        return {
+                            "ok": False,
+                            "failure_reason": "verify_mismatch",
+                            "field_key": field_key,
+                            "expected": value,
+                            "got": rb,
+                        }
+
+            _settle_explicit(page)
+            ev.step(f"actfield-{field_key}", page)
+            return {"ok": True, "field_key": field_key, "attempts": attempt_idx}
+
+        except PlaywrightTimeoutError:
+            if attempt_idx + 1 < max_attempts:
+                continue
+            return {
+                "ok": False,
+                "failure_reason": "element_intercepted",
+                "field_key": field_key,
+                "attempts": attempt_idx,
+            }
+
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "failure_reason": "value_rejected",
+                "field_key": field_key,
+                "error": str(exc),
+            }
+
+        except LocatorResolutionError:
+            return {"ok": False, "failure_reason": "unmapped_field", "field_key": field_key}
+
+        except Exception as exc:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                ev.dump_dom(page, f"99-actfield-error-{field_key}")
+            return {
+                "ok": False,
+                "failure_reason": "unknown_error",
+                "field_key": field_key,
+                "error": str(exc),
+                "exc_type": type(exc).__name__,
+            }
+
+    # Unreachable — every loop branch returns.
+    return {  # pragma: no cover
+        "ok": False,
+        "failure_reason": "element_intercepted",
+        "field_key": field_key,
+        "attempts": max_attempts - 1,
+    }
+
+
+def _locate_control(page: Any, control: Any) -> Any:
+    """Resolve a ControlSpec to a live Playwright Locator.
+
+    Tries the primary locator then each fallback, returning the first with
+    count > 0.  Raises ``LocatorResolutionError`` when nothing resolves.
+    """
+    from backend.webui_agent.atlas.adapters import (  # noqa: PLC0415
+        LocatorResolutionError,
+        resolve_locator,
+    )
+
+    if control.locator is None:
+        raise LocatorResolutionError(control.key)
+
+    candidates = [control.locator, *control.locator.fallbacks]
+    for locspec in candidates:
+        try:
+            loc = resolve_locator(page, locspec)
+            if loc.count() > 0:
+                return loc
+        except Exception:  # noqa: BLE001
+            continue
+
+    raise LocatorResolutionError(control.key)
+
+
+def _do_apply_control(
+    page: Any,
+    atlas: Any,
+    msg: dict[str, Any],
+    ev: Any,
+) -> dict[str, Any]:
+    """Click an atlas apply control (the router-write submit button).
+
+    CLAUDE.md §4: NEVER retried on TimeoutError — the XHR may have
+    already landed at the router before Playwright sees the timeout.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: PLC0415
+
+    from backend.webui_agent.atlas.adapters import (  # noqa: PLC0415
+        CLICK_TIMEOUT_MS,
+        LocatorResolutionError,
+    )
+
+    if atlas is None or not atlas.apply_controls:
+        return {"ok": False, "failure_reason": "no_apply_control"}
+
+    key = msg.get("key")
+
+    # Pick the target control: by key, then first is_router_write, then first.
+    control = None
+    if key is not None:
+        for c in atlas.apply_controls:
+            if c.key == key:
+                control = c
+                break
+    if control is None:
+        for c in atlas.apply_controls:
+            if c.is_router_write:
+                control = c
+                break
+    if control is None:
+        control = atlas.apply_controls[0]
+
+    # Apply→Cancel guard.
+    if _is_cancel_control_name(control.label):
+        return {"ok": False, "failure_reason": "apply_resolved_to_cancel"}
+
+    try:
+        loc = _locate_control(page, control)
+    except LocatorResolutionError:
+        return {"ok": False, "failure_reason": "unmapped_field"}
+
+    try:
+        loc.click(timeout=CLICK_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        # NEVER retry — CLAUDE.md §4.
+        return {"ok": False, "failure_reason": "click_timeout_unsafe_retry"}
+    except LocatorResolutionError:
+        return {"ok": False, "failure_reason": "unmapped_field"}
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            ev.dump_dom(page, "99-apply-control-error")
+        return {
+            "ok": False,
+            "failure_reason": "unknown_error",
+            "error": str(exc),
+            "exc_type": type(exc).__name__,
+        }
+
+    _settle_explicit(page)
+    ev.step("apply-device", page)
+    return {"ok": True}
+
+
 def _run_session_loop(init_payload: dict[str, Any]) -> None:
     """Phase 4 long-lived session: log in once, handle ops until shutdown.
 
@@ -1439,6 +1717,11 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
       - `verify(text)`         — text-presence check, read-only
       - `act` / `act_by_intent` — placeholder in slice 1, returns NotImplemented
       - `shutdown`             — clean exit
+      C3 additions (ADDITIVE):
+      - `perceive`             — atlas-driven page observation
+      - `act_field`            — atlas-driven field act + read-back verify
+      - `apply_control`        — atlas apply-control click (router write)
+      - `verify_a11y`          — accessibility-tree text scan
 
     All replies are `{"ok": bool, ...}` JSON lines. On the FIRST line
     after a successful login the child emits `{"ok": true, "ready": true,
@@ -1459,6 +1742,9 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
     # stale eid references from the planner (eids renumber per describe).
     locator_map: dict[str, Any] = {}
     current_view_id: str | None = None
+    # C3: atlas state — lazily built on first "perceive" op.
+    atlas_store: Any = None
+    current_atlas: Any = None
 
     try:
         with webui_browser(headless=headless) as page:
@@ -1562,6 +1848,59 @@ def _run_session_loop(init_payload: dict[str, Any]) -> None:
                             page, locator_map, current_view_id, msg, ev
                         )
                         _reply(reply)
+
+                    # ----------------------------------------------------------
+                    # C3: Atlas act-path ops (ADDITIVE)
+                    # ----------------------------------------------------------
+
+                    elif op == "perceive":
+                        from backend.core.settings import get_settings  # noqa: PLC0415
+                        from backend.webui_agent.atlas.store import AtlasStore  # noqa: PLC0415
+                        from backend.webui_agent.perceive import perceive_page  # noqa: PLC0415
+
+                        fp = str(msg.get("device_fingerprint") or "unknown__unknown")
+                        if atlas_store is None or atlas_store.fingerprint != fp:
+                            atlas_store = AtlasStore(get_settings().atlas_dir, fp)
+                        result = perceive_page(
+                            page,
+                            atlas_store,
+                            device_fingerprint=fp,
+                            route=msg.get("route"),
+                        )
+                        current_atlas = result.atlas
+                        _reply(
+                            {
+                                "ok": True,
+                                "view": result.view,
+                                "drift": result.drift,
+                                "captured": result.captured,
+                                "missing_required": result.missing_required,
+                                "unmapped_fields": result.unmapped_fields,
+                            }
+                        )
+
+                    elif op == "act_field":
+                        _reply(_do_act_by_field(page, current_atlas, msg, ev))
+
+                    elif op == "apply_control":
+                        _reply(_do_apply_control(page, current_atlas, msg, ev))
+
+                    elif op == "verify_a11y":
+                        from backend.webui_agent.atlas.reconcile import (  # noqa: PLC0415,I001
+                            flatten_interactive,
+                        )
+
+                        contains = str(msg.get("contains", ""))
+                        snap = page.accessibility.snapshot(interesting_only=True)
+                        nodes = flatten_interactive(snap)
+                        present = any(
+                            contains.lower()
+                            in (
+                                str(n.get("name", "")) + " " + str(n.get("value", ""))
+                            ).lower()
+                            for n in nodes
+                        )
+                        _reply({"ok": True, "present": present})
 
                     else:
                         _reply(
