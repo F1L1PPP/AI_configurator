@@ -155,6 +155,41 @@ class TestLocate:
         result = locate(page, field)
         assert result is primary_loc
 
+    def test_multi_match_returns_first_visible(self) -> None:
+        """Cisco duplicates field names across Basic/Advanced sections — a
+        [name='X'] locator can match several elements (live OSPF form: 4x
+        name='processID'). locate must return the first VISIBLE match so fill()
+        doesn't hit a strict-mode violation (the unknown_error from the smoke)."""
+        loc = MagicMock()
+        loc.count.return_value = 3
+        nth0, nth1, nth2 = MagicMock(), MagicMock(), MagicMock()
+        nth0.is_visible.return_value = False  # hidden Advanced copy
+        nth1.is_visible.return_value = True  # the active Basic field
+        nth2.is_visible.return_value = True
+        loc.nth.side_effect = [nth0, nth1, nth2]
+        page = MagicMock()
+        page.locator.return_value = loc
+
+        field = _make_field(
+            locspec=_make_locspec(strategy="css", value="[name='processID']")
+        )
+        result = locate(page, field)
+        assert result is nth1  # first visible match
+
+    def test_multi_match_none_visible_falls_back_to_first(self) -> None:
+        loc = MagicMock()
+        loc.count.return_value = 2
+        n0, n1 = MagicMock(), MagicMock()
+        n0.is_visible.return_value = False
+        n1.is_visible.return_value = False
+        loc.nth.side_effect = [n0, n1]
+        page = MagicMock()
+        page.locator.return_value = loc
+
+        field = _make_field(locspec=_make_locspec(strategy="css", value="[name='x']"))
+        result = locate(page, field)
+        assert result is loc.first
+
     def test_primary_zero_uses_fallback(self) -> None:
         primary_loc = _mock_loc(count=0)
         fallback_loc = _mock_loc(count=1)
@@ -488,6 +523,9 @@ class TestKendoComboboxAdapter:
         # The scoped listbox locator
         listbox_loc = MagicMock()
         li_loc = MagicMock()
+        # Now we call .first on the locator before .click — chain the mock accordingly.
+        li_first = MagicMock()
+        li_loc.first = li_first
         listbox_loc.locator.return_value = li_loc
 
         page = MagicMock()
@@ -510,9 +548,9 @@ class TestKendoComboboxAdapter:
         # Scoped listbox was used
         page.locator.assert_any_call("#subnet_listbox")
 
-        # li.k-item with has_text was clicked
+        # li.k-item with has_text was located; .first.click() was called
         listbox_loc.locator.assert_called_once_with("li.k-item", has_text="255.255.255.0")
-        li_loc.click.assert_called_once_with(timeout=FORM_TIMEOUT_MS)
+        li_first.click.assert_called_once_with(timeout=FORM_TIMEOUT_MS)
 
     # --- PlaywrightTimeoutError propagates ---
 
@@ -524,9 +562,11 @@ class TestKendoComboboxAdapter:
         loc.evaluate.return_value = {"ok": False, "reason": "kendo_unavailable"}
         loc.get_attribute.return_value = None  # aria-expanded/aria-controls absent
 
-        # body-wide li.k-item click raises PlaywrightTimeoutError
+        # body-wide li.k-item click raises PlaywrightTimeoutError via .first.click()
         li_loc = MagicMock()
-        li_loc.click.side_effect = PlaywrightTimeoutError("timed out waiting for li.k-item")
+        li_first = MagicMock()
+        li_first.click.side_effect = PlaywrightTimeoutError("timed out waiting for li.k-item")
+        li_loc.first = li_first
 
         page = MagicMock()
         page.get_by_role.return_value = loc
@@ -561,9 +601,11 @@ class TestKendoComboboxAdapter:
         # falls through to strategy 3.
         loc.get_attribute.return_value = None  # aria-expanded/aria-controls absent
 
-        # The body-wide locator chain for strategy 2 raises a non-timeout error.
+        # The body-wide locator chain for strategy 2 raises a non-timeout error via .first.click().
         li_loc = MagicMock()
-        li_loc.click.side_effect = Exception("element detached from DOM")
+        li_first = MagicMock()
+        li_first.click.side_effect = Exception("element detached from DOM")
+        li_loc.first = li_first
 
         page = MagicMock()
         page.get_by_role.return_value = loc

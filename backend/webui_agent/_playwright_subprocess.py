@@ -1596,6 +1596,18 @@ def _do_act_by_field(
         except Exception as exc:  # noqa: BLE001
             with contextlib.suppress(Exception):
                 ev.dump_dom(page, f"99-actfield-error-{field_key}")
+            # Visibility-first (live-smoke-iteration): surface the real exception
+            # in the log, not just "unknown_error" — strict-mode violations and
+            # other Playwright errors are otherwise only in the DOM dump.
+            with contextlib.suppress(Exception):
+                from backend.core.logging import get_logger  # noqa: PLC0415
+
+                get_logger(__name__).warning(
+                    "act_field_unknown_error",
+                    field_key=field_key,
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                )
             return {
                 "ok": False,
                 "failure_reason": "unknown_error",

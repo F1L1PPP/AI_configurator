@@ -155,12 +155,39 @@ def resolve_locator(page: Page, locspec: LocatorSpec) -> Locator:
     return page.locator(locspec.value or "")
 
 
+def _first_visible(loc: Locator) -> Locator:
+    """Narrow a possibly-multi-match locator to a single element.
+
+    Cisco renders Basic + Advanced (and grid-template) copies of a form, so a
+    ``[name='X']`` selector can match several elements — the live OSPF form has
+    ``name='processID'`` 4 times. ``fill()`` then raises a strict-mode violation
+    ("resolved to N elements"). Return the first VISIBLE match (the active form
+    field); if none report visible, fall back to ``.first`` so acting still has
+    a single handle.
+    """
+    try:
+        cnt = loc.count()
+    except Exception:  # noqa: BLE001
+        return loc
+    if cnt <= 1:
+        return loc
+    for i in range(cnt):
+        nth = loc.nth(i)
+        try:
+            if nth.is_visible():
+                return nth
+        except Exception:  # noqa: BLE001
+            continue
+    return loc.first
+
+
 def locate(page: Page, field: FieldSpec) -> Locator:
     """Resolve a FieldSpec to a live Playwright Locator.
 
-    Tries the primary locator first, then each fallback in order.  Returns
-    the first whose ``.count() > 0``.  A malformed selector (count() raises)
-    falls through to the next fallback rather than crashing.
+    Tries the primary locator first, then each fallback in order.  Returns the
+    first whose ``.count() > 0``, narrowed to a single VISIBLE element (Cisco
+    duplicates field names across Basic/Advanced sections). A malformed selector
+    (count() raises) falls through to the next fallback rather than crashing.
 
     Raises ``LocatorResolutionError(field.key)`` when no locator resolves.
     """
@@ -172,7 +199,7 @@ def locate(page: Page, field: FieldSpec) -> Locator:
         try:
             loc = resolve_locator(page, locspec)
             if loc.count() > 0:
-                return loc
+                return _first_visible(loc)
         except Exception:  # noqa: BLE001
             # Malformed selector or other structural error — try next fallback.
             continue
