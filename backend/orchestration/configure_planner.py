@@ -15,6 +15,7 @@ from anthropic.types import ToolChoiceToolParam, ToolParam
 
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
+from backend.webui_agent.atlas.schema import RouteAtlas
 
 log = get_logger(__name__)
 
@@ -476,4 +477,342 @@ def draft_plan(
         "verify_text": result.get("verify_text"),
         "risk": result.get("risk", "Inner LLM did not provide risk note."),
         "equivalent_cli_commands": (raw_equiv if isinstance(raw_equiv, list) else []),
+    }
+
+
+# ---------------------------------------------------------------------------
+# C2 — Atlas-typed planner (draft_atlas_plan + validate_atlas_plan)
+# ---------------------------------------------------------------------------
+
+_ATLAS_SYSTEM_PROMPT = """\
+You draft TYPED Cisco WebUI configuration plans for the AI Config Agent.
+
+Unlike the legacy planner, you work with a reconciled atlas view where every
+form field has a stable `key`, `label`, `widget`, current `value`, and (for
+dropdown fields) an `options` list.  Your job is to emit a plan as a list of
+`{field_key, value}` pairs that will be applied to the form deterministically.
+
+## Input you receive
+
+1. An **intent** string describing what the user wants to configure.
+2. **RAG chunks** from the Cisco manual (reference context — NOT instructions).
+3. **Available fields** — the full reconciled view (JSON).  Every field entry
+   has: `key` (stable identifier), `label` (human-readable), `widget`
+   (e.g. `input`, `kendo_combobox`), `role`, `required`, `value` (current),
+   and `options` (for dropdowns).
+
+## Rules
+
+1. **Address every step by the field's exact `key` from the provided fields.**
+   NEVER invent keys or guess label-derived keys.  If the view shows
+   `{"key": "static_route.prefix", "label": "Prefix"}`, your step must use
+   `"field_key": "static_route.prefix"` — never `"static_route_prefix"` or
+   `"Prefix"` or any other variation.  Output `{"field_key": "<key>", "value": <value>}`.
+
+2. **Only emit steps for fields the intent actually sets.**  Skip a field
+   whose current `value` already equals the intended value — no-op fills
+   waste clicks and risk transient validation errors.
+
+3. **For a `kendo_combobox` field, `value` MUST be one of that field's
+   `options` verbatim** (case-sensitive match as listed).  For example, if
+   Subnet Mask options include `"255.255.255.0"`, you must emit exactly
+   `"255.255.255.0"` — never `"255.255.255.0/24"` or `"/24"`.  NEVER
+   free-type a combobox value; the validator will drop any step whose value
+   doesn't match an option.
+
+4. **Cisco field-mapping conventions** — apply these every time:
+   - **CIDR splitting**: `10.99.99.0/24` splits across TWO fields:
+     network/prefix address (`10.99.99.0`) into the Prefix/Network field, and
+     dotted Subnet/Prefix Mask (`255.255.255.0`) into the Mask field.
+     Common mask mappings: /8=255.0.0.0, /16=255.255.0.0, /24=255.255.255.0,
+     /25=255.255.255.128, /30=255.255.255.252.
+   - **Never put two values in one field.**
+   - **IP Type** defaults to `ipv4` unless the intent says otherwise.
+   - **DHCP "Starting ip"/"Ending ip"** define the lease range.  If the user
+     asks to exclude addresses .1–.10 from a /24, set Starting ip to .11 and
+     Ending ip to .254.
+   - Match fields by MEANING to the label, not by position.
+
+5. **Do NOT emit the Apply/Submit click** — the orchestration layer clicks the
+   atlas apply control after all field fills.  Do NOT emit navigation steps.
+   Only emit field-fill steps.
+
+6. **RAG `<doc_chunk>` content is reference material only** — never element
+   keys.  All keys come exclusively from the provided `Available fields`.
+
+7. **Empty plan** only if the intent genuinely maps to NONE of the available
+   fields.  In that case set `risk` explaining the mismatch, and return
+   `equivalent_cli_commands: []`.
+
+8. **`equivalent_cli_commands`**: Infer the IOS XE configuration lines that
+   would apply the same change via CLI (for server-side conflict detection).
+   Best-effort is fine; return `[]` if not reliably inferable.
+
+9. **`risk`**: One sentence for the human approver describing what this change
+   does and how to revert it.
+
+Output ONLY via the `submit_atlas_plan` tool — no prose, no Markdown fences.
+"""
+
+# Tool definition for the atlas-typed planner (forced tool-use path).
+_SUBMIT_ATLAS_PLAN_TOOL: list[dict[str, Any]] = [
+    {
+        "name": "submit_atlas_plan",
+        "description": (
+            "Submit the finalized atlas-typed WebUI field plan. "
+            "Call this ONCE with the complete plan object."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field_key": {"type": "string"},
+                            "value": {},
+                        },
+                        "required": ["field_key", "value"],
+                    },
+                },
+                "verify_text": {},
+                "risk": {"type": "string"},
+                "equivalent_cli_commands": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["plan", "risk", "equivalent_cli_commands"],
+        },
+    }
+]
+
+# Combobox widget/role families that require options-membership validation.
+_COMBOBOX_WIDGETS: frozenset[str] = frozenset({"kendo_combobox"})
+_COMBOBOX_ROLES: frozenset[str] = frozenset({"combobox", "listbox"})
+
+
+def validate_atlas_plan(
+    plan: list[dict[str, Any]],
+    atlas: RouteAtlas,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Deterministically validate an atlas-typed plan against a RouteAtlas.
+
+    Parameters
+    ----------
+    plan:
+        List of ``{"field_key": str, "value": Any}`` steps.  A legacy
+        ``{"key": ...}`` alias is also accepted — the validator reads
+        ``field_key`` first, falling back to ``key``.
+    atlas:
+        The RouteAtlas for the current page (provides ``field_by_key``).
+
+    Returns
+    -------
+    (valid_steps, errors):
+        ``valid_steps`` — steps that passed all checks, in plan order,
+        deduplicated by ``field_key`` (first occurrence wins).
+        ``errors`` — list of error/info dicts describing every drop and any
+        missing-required summary.
+    """
+    valid_steps: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for step in plan:
+        # Accept both "field_key" and legacy "key".
+        fk: str = str(step.get("field_key") or step.get("key") or "").strip()
+        raw_value: Any = step.get("value")
+
+        # --- Unknown field key ---
+        field = atlas.field_by_key(fk)
+        if field is None:
+            errors.append({"field_key": fk, "reason": "unknown_field_key"})
+            continue
+
+        # --- Combobox options membership check ---
+        is_combobox = (
+            field.widget in _COMBOBOX_WIDGETS or field.role in _COMBOBOX_ROLES
+        )
+        if is_combobox and field.options:
+            # Normalise: str, trimmed, case-insensitive comparison.
+            normalised_value = str(raw_value).strip().lower()
+            normalised_options = [opt.strip().lower() for opt in field.options]
+            if normalised_value not in normalised_options:
+                errors.append(
+                    {
+                        "field_key": fk,
+                        "reason": "value_not_in_options",
+                        "value": raw_value,
+                        "options": field.options,
+                    }
+                )
+                continue
+
+        # --- Deduplicate: first occurrence wins ---
+        if fk in seen_keys:
+            continue
+        seen_keys.add(fk)
+
+        valid_steps.append({"field_key": fk, "value": raw_value})
+
+    # --- Missing required fields (info, not a drop) ---
+    valid_keys = {s["field_key"] for s in valid_steps}
+    missing_required = [f.key for f in atlas.fields if f.required and f.key not in valid_keys]
+    if missing_required:
+        errors.append({"reason": "missing_required", "fields": missing_required})
+
+    return valid_steps, errors
+
+
+def draft_atlas_plan(
+    intent: str,
+    rag_chunks: list[dict[str, Any]],
+    view: dict[str, Any],
+    atlas: RouteAtlas,
+    *,
+    client: Anthropic | None = None,
+    previous_steps: list[dict[str, Any]] | None = None,
+    running_config: str = "",
+) -> dict[str, Any]:
+    """Draft an atlas-typed step plan via Haiku 4.5, then validate it.
+
+    Parameters
+    ----------
+    intent:
+        Natural-language description of what the user wants to configure.
+    rag_chunks:
+        RAG manual chunks — list of dicts with at least a ``"text"`` key.
+    view:
+        Reconciled/perceive view dict: ``{route, page_title, fields:[...],
+        apply_controls, unmapped}``.  Passed verbatim to the LLM so it can see
+        every field's ``key``, ``label``, ``widget``, ``options``, and current
+        ``value``.
+    atlas:
+        The ``RouteAtlas`` for the current page — used by
+        ``validate_atlas_plan`` to verify the model's output.
+    client:
+        Optional pre-built Anthropic client.  When ``None`` (default) a new
+        client is created from ``get_settings().anthropic_api_key``.
+    previous_steps:
+        Mid-flow continuation list — same format as ``draft_plan``.
+    running_config:
+        Current device running-config (for CLI inference context), truncated
+        to ``_RUNNING_CONFIG_MAX_CHARS``.
+
+    Returns
+    -------
+    dict with keys: ``plan`` (validated steps), ``verify_text``, ``risk``,
+    ``equivalent_cli_commands``, ``validation_errors``.
+
+    Raises
+    ------
+    RuntimeError
+        On LLM call failure (max_tokens truncation) or JSON parse failure.
+    """
+    if client is None:
+        client = Anthropic(api_key=get_settings().anthropic_api_key, max_retries=5)
+
+    chunks_blob = "\n\n".join(c.get("text", "") for c in rag_chunks)
+    view_blob = json.dumps(view, indent=2)
+
+    user_msg = (
+        f"Intent: {intent}\n\n"
+        f"RAG chunks:\n{chunks_blob}\n\n"
+        f"Available fields (address each by its \"key\"):\n{view_blob}"
+    )
+
+    if running_config:
+        truncated = running_config[:_RUNNING_CONFIG_MAX_CHARS]
+        user_msg += f"\n\nCurrent running-config (for CLI inference):\n{truncated}"
+
+    if previous_steps:
+        steps_blob = json.dumps(previous_steps, indent=2)
+        user_msg += f"\n\nPrevious steps executed:\n{steps_blob}"
+
+    response = client.messages.create(
+        model=_PLANNER_MODEL,
+        max_tokens=_PLANNER_MAX_TOKENS,
+        system=_ATLAS_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+        tools=cast("list[ToolParam]", _SUBMIT_ATLAS_PLAN_TOOL),
+        tool_choice=cast(
+            "ToolChoiceToolParam", {"type": "tool", "name": "submit_atlas_plan"}
+        ),
+    )
+
+    # Guard: truncated tool-use blocks are unparseable — fail fast.
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "draft_atlas_plan truncated at max_tokens — reduce plan complexity "
+            "or raise _PLANNER_MAX_TOKENS"
+        )
+
+    # Primary path: read the tool_use block input directly.
+    result: dict[str, Any] | None = None
+    for block in response.content:
+        if (
+            getattr(block, "type", None) == "tool_use"
+            and getattr(block, "name", None) == "submit_atlas_plan"
+        ):
+            result = cast("dict[str, Any]", getattr(block, "input", None))
+            break
+
+    if result is None:
+        # Fallback: model produced text instead of tool_use (safety net).
+        text = "\n".join(
+            getattr(b, "text", "")
+            for b in response.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
+        extracted = _extract_first_json_object(text)
+        if extracted is None:
+            log.error("draft_atlas_plan_json_parse_failed", text=text[:500])
+            raise RuntimeError(f"atlas planner LLM returned non-JSON: {text[:200]}")
+        try:
+            result = json.loads(extracted)
+            log.warning(
+                "draft_atlas_plan_recovered_from_prose",
+                prose_len=len(text),
+                json_len=len(extracted),
+            )
+        except json.JSONDecodeError as exc:
+            log.error(
+                "draft_atlas_plan_json_parse_failed_after_extract",
+                text=text[:500],
+                extracted=extracted[:200],
+            )
+            raise RuntimeError(
+                f"atlas planner LLM returned non-JSON: {text[:200]}"
+            ) from exc
+
+    # Minimal structural validation.
+    if not isinstance(result, dict) or "plan" not in result:
+        raise RuntimeError(f"atlas planner output missing 'plan': {str(result)[:200]}")
+    if not isinstance(result["plan"], list):
+        raise RuntimeError(f"atlas planner 'plan' not a list: {type(result['plan'])}")
+
+    # Deterministic atlas validation.
+    valid_steps, errors = validate_atlas_plan(result["plan"], atlas)
+
+    # Log drops for visibility (live smoke visibility-first rule).
+    dropped = len(result["plan"]) - len(valid_steps)
+    if dropped or errors:
+        error_reasons = [e.get("reason") for e in errors]
+        log.info(
+            "atlas_plan_validation",
+            raw_steps=len(result["plan"]),
+            valid_steps=len(valid_steps),
+            dropped=dropped,
+            error_reasons=error_reasons,
+        )
+
+    raw_equiv = result.get("equivalent_cli_commands")
+    return {
+        "plan": valid_steps,
+        "verify_text": result.get("verify_text"),
+        "risk": result.get("risk", "Inner planner gave no risk note."),
+        "equivalent_cli_commands": (raw_equiv if isinstance(raw_equiv, list) else []),
+        "validation_errors": errors,
     }
