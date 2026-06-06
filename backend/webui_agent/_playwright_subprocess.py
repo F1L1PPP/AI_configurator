@@ -1520,14 +1520,19 @@ def _settle_explicit(page: Any, expect_locator: Any = None, timeout_ms: int = 20
             _time.sleep(0.15)
 
 
-def _value_already_set(current: Any, target: Any) -> bool:
+def _value_already_set(current: Any, target: Any, widget: str | None = None) -> bool:
     """True if a field's current read-back already equals the target value.
 
-    Bool widgets (checkbox/radio) compare as booleans against the usual truthy
+    Radio is a value-selector: the field locator points at the option's radio and
+    apply() just checks it, so "already set" means that radio is already checked —
+    the option label (e.g. "IPv4") is NOT a boolean token and must not be run
+    through the truthy test. Checkbox compares as a boolean against the truthy
     set; everything else compares as case-insensitive, trimmed strings. Used for
     the idempotent-skip so acting is a no-op when the field already holds the
     requested value.
     """
+    if widget == "radio":
+        return current is True
     if isinstance(current, bool):
         return current == (target in (True, "true", "1", "yes", "on"))
     return str(current).strip().lower() == str(target or "").strip().lower()
@@ -1601,7 +1606,7 @@ def _do_act_by_field(
     # apply path.
     with contextlib.suppress(Exception):
         _current = adapter.read_back(page, field)
-        if _current is not None and _value_already_set(_current, value):
+        if _current is not None and _value_already_set(_current, value, field.widget):
             return {
                 "ok": True,
                 "field_key": field_key,
@@ -1619,8 +1624,20 @@ def _do_act_by_field(
             if rb is not None:
                 # Bool widgets: compare bool.
                 if isinstance(rb, bool):
-                    intended_bool = value in (True, "true", "1", "yes", "on")
-                    if rb != intended_bool:
+                    # Checkbox: `value` is a boolean token → compare directly.
+                    # Radio: `value` is an OPTION LABEL (e.g. "IPv4") and apply()
+                    # selects the radio matching that option, so success is simply
+                    # "the targeted radio is now checked". Running an option label
+                    # through the truthy-token test always yields False and would
+                    # false-fail a correctly-selected radio (e.g. IP Type=IPv4,
+                    # the already-selected default). The post-Apply verify_text is
+                    # the real backstop, mirroring the kendo_combobox read-back.
+                    if field.widget == "radio":
+                        mismatch = rb is False
+                    else:
+                        intended_bool = value in (True, "true", "1", "yes", "on")
+                        mismatch = rb != intended_bool
+                    if mismatch:
                         return {
                             "ok": False,
                             "failure_reason": "verify_mismatch",

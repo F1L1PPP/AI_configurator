@@ -228,6 +228,60 @@ class TestDoActByField:
         )
         assert result["ok"] is True
 
+    def _radio_atlas(self) -> RouteAtlas:
+        radio_field = FieldSpec(
+            key="iptype",
+            label="IP Type",
+            role="radio",
+            widget="radio",
+            locator=LocatorSpec(strategy="name", value="iptype"),
+        )
+        return RouteAtlas(route="#/staticrouting", device_fingerprint="fp", fields=[radio_field])
+
+    def test_radio_value_selector_checked_is_success(self):
+        """Radio is a value-selector: apply() checks the radio matching the
+        requested option, so a checked read-back (True) is success even though
+        the option label ("IPv4") is not a boolean token. Regression for the
+        2026-06-06 static-route smoke where IP Type=IPv4 (the already-selected
+        default) false-failed verify_mismatch via the boolean-token branch."""
+        adapter = MagicMock()
+        # skip-check sees not-already-set (False), post-apply read-back checked (True)
+        adapter.read_back.side_effect = [False, True]
+        result = self._call(
+            {"field_key": "iptype", "value": "IPv4"},
+            atlas=self._radio_atlas(),
+            fake_adapter=adapter,
+        )
+        assert result["ok"] is True
+
+    def test_radio_not_checked_is_verify_mismatch(self):
+        """Radio: if the targeted radio is NOT checked after apply (read_back
+        False), that is a genuine failure — the lenient path must still catch it."""
+        adapter = MagicMock()
+        adapter.read_back.side_effect = [False, False]
+        result = self._call(
+            {"field_key": "iptype", "value": "IPv4"},
+            atlas=self._radio_atlas(),
+            fake_adapter=adapter,
+        )
+        assert result["ok"] is False
+        assert result["failure_reason"] == "verify_mismatch"
+
+    def test_radio_already_checked_skips(self):
+        """An already-checked radio (e.g. IP Type defaulting to IPv4) is
+        idempotent — skip without re-clicking. The boolean-token compare used to
+        misjudge this (it never skipped a checked radio, then false-failed verify)."""
+        adapter = MagicMock()
+        adapter.read_back.return_value = True  # already checked
+        result = self._call(
+            {"field_key": "iptype", "value": "IPv4"},
+            atlas=self._radio_atlas(),
+            fake_adapter=adapter,
+        )
+        assert result["ok"] is True
+        assert result.get("skipped") == "already_set"
+        adapter.apply.assert_not_called()
+
     # --- PlaywrightTimeoutError: retry once ---
 
     def test_timeout_retries_once_then_succeeds(self):
