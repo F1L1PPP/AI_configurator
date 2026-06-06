@@ -156,9 +156,12 @@ def _build_digest(running_config: str) -> str:
                 if name_m:
                     current_vlan_name = name_m.group(1).strip()
 
-            if current_iface is not None:
-                # Match primary ip address only (no "secondary" keyword).
-                ip_m = re.match(r"^ip address\s+(\S+\s+\S+)(?!\s+secondary)", stripped)
+            if current_iface is not None and "secondary" not in stripped:
+                # Match primary ip address only. Skip "secondary" lines up
+                # front: the old negative-lookahead form backtracked and
+                # captured a truncated mask (e.g. "255.255.255.") on
+                # `ip address X Y secondary` lines.
+                ip_m = re.match(r"^ip address\s+(\S+\s+\S+)", stripped)
                 if ip_m and current_iface_ip is None:
                     current_iface_ip = ip_m.group(1)
 

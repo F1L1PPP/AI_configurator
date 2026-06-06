@@ -18,6 +18,7 @@ and surfaces failures as exceptions the caller can deal with.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -343,7 +344,10 @@ class WebUISession:
                     proc.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=2.0)
+                    # Wedged even after kill — nothing more to do. Keep
+                    # close() idempotent and non-raising.
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2.0)
         finally:
             log.info("webui_session_closed", action_id=self.action_id)
 
@@ -381,12 +385,14 @@ class WebUISession:
         assert self._proc.stdout is not None
         proc = self._proc
         result: list[str | None] = [None]
+        reader_error: list[BaseException | None] = [None]
 
         def _reader() -> None:
             try:
                 assert proc.stdout is not None
                 result[0] = proc.stdout.readline()
-            except (OSError, ValueError):
+            except Exception as exc:  # noqa: BLE001 — surface, don't mask as EOF
+                reader_error[0] = exc
                 result[0] = ""
 
         t = threading.Thread(target=_reader, daemon=True)
@@ -402,6 +408,17 @@ class WebUISession:
                 flow="webui_session",
                 error=f"timed out after {timeout_s}s waiting for child reply",
                 exc_type="Timeout",
+                stderr="",
+            )
+
+        if reader_error[0] is not None:
+            # A non-EOF error in the reader thread (previously swallowed and
+            # misreported as UnexpectedEOF). Surface the real cause.
+            self._proc = None
+            raise SubprocessFlowError(
+                flow="webui_session",
+                error=f"reader thread failed: {reader_error[0]!s}",
+                exc_type=type(reader_error[0]).__name__,
                 stderr="",
             )
 

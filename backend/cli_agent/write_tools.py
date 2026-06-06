@@ -753,6 +753,13 @@ def cli_configure(
 
     mark_executed(action_id)
 
+    # An approved config block can include prompt-affecting commands (the
+    # denylist permits `hostname`). Drop the pooled connection so the next
+    # caller reconnects against the current prompt instead of a stale cached
+    # base_prompt. Mirrors set_hostname's invalidate.
+    s = get_settings()
+    pool.invalidate(s.router_host, s.router_ssh_user)
+
     log.info(
         "tool_call",
         tool="cli_configure",

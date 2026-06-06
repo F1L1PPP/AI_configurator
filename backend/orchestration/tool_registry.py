@@ -2506,8 +2506,12 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
     apply_key: str | None = params.get("apply_key")
 
     if not plan or not session_id:
-        mark_failed(action_id)
-        return {"error": "bad_action_params", "message": "action missing plan or session_id"}
+        bad_params_result = {
+            "error": "bad_action_params",
+            "message": "action missing plan or session_id",
+        }
+        mark_failed(action_id, bad_params_result)
+        return bad_params_result
 
     # Separate field-fill steps from the trailing apply step
     field_steps = [s for s in plan if s.get("field_key")]
@@ -2596,16 +2600,7 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
             )
 
             if _step_failure_counts[_failure_key] >= 2:
-                mark_failed(action_id)
-                close_all_sessions()
-                log.error(
-                    "webui_configure_atlas_no_progress",
-                    action_id=action_id,
-                    field_key=fk,
-                    failure_reason=failure_reason,
-                    failure_count=_step_failure_counts[_failure_key],
-                )
-                return {
+                no_progress_result = {
                     "error": "no_progress",
                     "message": (
                         f"Field '{fk}' failed with '{failure_reason}' "
@@ -2617,6 +2612,18 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
                     "failure_count": _step_failure_counts[_failure_key],
                     "completed_steps": executed_steps,
                 }
+                # Pass the failure context so debug_sweep can do a focused
+                # diagnosis instead of falling back to a generic sweep.
+                mark_failed(action_id, no_progress_result)
+                close_all_sessions()
+                log.error(
+                    "webui_configure_atlas_no_progress",
+                    action_id=action_id,
+                    field_key=fk,
+                    failure_reason=failure_reason,
+                    failure_count=_step_failure_counts[_failure_key],
+                )
+                return no_progress_result
 
             # Record the first failure encountered (for the step_failed path).
             if first_failure is None:

@@ -456,6 +456,10 @@ def _extract_first_json_object_local(text: str) -> str | None:
             depth -= 1
             if depth == 0 and start >= 0:
                 return text[start : i + 1]
+            if depth < 0:
+                # Unmatched closing brace before any opening — bail.
+                # Mirrors configure_planner._extract_first_json_object.
+                return None
     return None
 
 

@@ -99,12 +99,17 @@ def search_docs(query: str, top_k: int = 5) -> dict[str, Any]:
         include=["documents", "metadatas", "distances"],
     )
 
-    documents = raw.get("documents", [[]])[0]
-    metadatas = raw.get("metadatas", [[]])[0]
-    distances = raw.get("distances", [[]])[0]
+    # Chroma may return {"documents": None} (key present, value None) when a
+    # field is empty — `.get(key, [[]])` would NOT apply the default in that
+    # case and `[0]` would raise TypeError. `or [[]]` handles both missing and
+    # None. strict=True surfaces a parallel-array length mismatch loudly
+    # instead of silently dropping rows.
+    documents = (raw.get("documents") or [[]])[0]
+    metadatas = (raw.get("metadatas") or [[]])[0]
+    distances = (raw.get("distances") or [[]])[0]
 
     results = []
-    for doc, meta, dist in zip(documents, metadatas, distances, strict=False):
+    for doc, meta, dist in zip(documents, metadatas, distances, strict=True):
         source = (meta or {}).get("source", "")
         section = (meta or {}).get("section", "")
         source_attr = html.escape(source, quote=True)
