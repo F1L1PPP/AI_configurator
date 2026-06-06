@@ -61,19 +61,25 @@ a **read-back verify**. Failure taxonomy in `_do_act_by_field`:
 | `webui_act_field_soft_failure failure_reason=element_intercepted` | fell through to the popup click and it timed out |
 | `failure_reason=verify_mismatch` | apply ran but read-back disagreed (for radios: the value-selector-as-boolean bug, FIXED) |
 
-## What's been tried (2026-06-06) and the OPEN bug
+## What's been tried (2026-06-06) and the FIX — ✅ RESOLVED (commit `2e0f62b`)
 Four attempts, each confirmed from the log (`docs/today-2026-06-06-summary.md` §3 has the table):
 1. reorder hidden-select before popup → still used a blind 6-level walk → `backing select not found`.
 2. locate by captured `kendo_select_name` (`select[name=…]`) → **strict-mode** on duplicate names.
-3. (v3, **uncommitted in `adapters.py`**) anchor on the visible widget + `querySelectorAll`-pick →
-   **picker returns null** (`no active backing <select>`).
+3. (v3) anchor on the visible widget + `querySelectorAll`-pick → **picker returns null**
+   (`no active backing <select>`).
 
-**OPEN BUG in `pickActiveSelect` (the precise next fix):**
-- Branch 2 (container visibility) walks up starting at the `<select>` itself, which is **always
-  `display:none`**, so it returns false for *every* candidate. → start the walk at
-  `select.parentElement` and check the **ancestor form/section** visibility.
-- Branch 1 (Kendo wrapper match) relies on `window.jQuery`, which is unavailable/ineffective on this
-  page. → don't depend on it; rely on container-visibility, or resolve via the AngularJS scope.
+**THE FIX (one line, page-agnostic):** in `pickActiveSelect` Branch 2 (container visibility), start
+the walk at **`select.parentElement`**, not the `<select>` itself — Kendo always renders the backing
+select `display:none`, so testing the select rejected *every* candidate on iteration 0. Walking from
+the parent tests the **ancestor container**: the Basic/template duplicate sits in an
+`ng-hide`/`display:none` section, the active copy is rendered → unambiguous pick. Container-visibility
+alone disambiguated the two same-name selects; the dead `window.jQuery` Branch 1 was **not needed**
+(left in place as a harmless guarded no-op).
+
+**Live-green:** DHCP pool LABPOOL, non-default subnet mask `255.255.255.128` (/25), set + applied to
+device (`act_20260606_66d275caec7a44898b9ad50c3ffc35c8`). First non-default Kendo dropdown write to
+pass live. **If a future dropdown still fails** (both copies rendered visible → container-visibility
+can't disambiguate), escalate to the fallbacks below in order.
 
 ## Fallback approaches (if container-visibility can't disambiguate)
 From the 8-agent Opus analysis (all in this session's workflow output):
