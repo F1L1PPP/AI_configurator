@@ -118,7 +118,10 @@ def propose_action(tool: str, params: dict, preview_meta: dict | None = None) ->
     # propose. Cheap O(N) scan under the lock; no scheduler needed.
     purge_terminal_actions_older_than()
     now = _now()
-    action_id = f"act_{datetime.now(UTC).strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}"
+    # Full 128-bit uuid4 hex (not [:6]) so action_ids are unguessable: the
+    # approve/execute endpoints are keyed only on this id, so a short random
+    # suffix would be brute-forceable. The date prefix stays for readability.
+    action_id = f"act_{datetime.now(UTC).strftime('%Y%m%d')}_{uuid.uuid4().hex}"
     with _lock:
         _actions[action_id] = {
             "action_id": action_id,
