@@ -1,6 +1,6 @@
-# Cisco AI Config — Frontend Prototype
+# Cisco AI Config — Frontend
 
-A static, click-through prototype for the AI-driven Cisco router configurator UI. Pure HTML + React (via Babel in the browser) + CSS. **No backend — every interaction is scripted with mock data.** Use it as the visual + interaction reference when you wire the real frontend up.
+The live web UI for the AI-driven Cisco router configurator. Pure HTML + React (via Babel in the browser) + CSS — no bundler, no npm. In production it is served by the backend (FastAPI `StaticFiles`) and talks to the API through `api.jsx` (`/api/*` and `/ws/agent`). `mock-data.jsx` remains as an offline/demo fallback.
 
 ## How to view it
 

@@ -34,7 +34,7 @@ htmlcov/
 .coverage
 *.cover
 
-# Node / Next.js — wildcards cover frontend/, frontend-design-backup/, frontend-new/
+# Node / Next.js — wildcards cover the frontend/ static UI
 node_modules/
 **/.next/
 **/out/
