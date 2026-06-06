@@ -22,7 +22,7 @@ from anthropic import Anthropic
 
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
-from backend.orchestration.configure_planner import _extract_first_json_object
+from backend.orchestration.json_extract import extract_first_json_object
 
 log = get_logger(__name__)
 
@@ -130,7 +130,7 @@ def _parse_json_result(text: str, context: str) -> dict[str, Any]:
     try:
         result = json.loads(text)
     except json.JSONDecodeError:
-        extracted = _extract_first_json_object(text)
+        extracted = extract_first_json_object(text)
         if extracted is None:
             log.warning(
                 "debug_planner_json_parse_failed",

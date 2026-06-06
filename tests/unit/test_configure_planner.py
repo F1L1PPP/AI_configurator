@@ -10,9 +10,9 @@ import pytest
 from backend.orchestration.configure_planner import (
     _INNER_SYSTEM_PROMPT,
     _PLANNER_MODEL,
-    _extract_first_json_object,
     draft_plan,
 )
+from backend.orchestration.json_extract import extract_first_json_object
 
 
 def _make_mock_client(text: str) -> MagicMock:
@@ -147,31 +147,30 @@ def test_planner_model_is_haiku():
 
 
 def test_extract_first_json_object_extracts_clean_json():
-    assert _extract_first_json_object('{"a": 1}') == '{"a": 1}'
+    assert extract_first_json_object('{"a": 1}') == '{"a": 1}'
 
 
 def test_extract_first_json_object_extracts_from_prose():
     assert (
-        _extract_first_json_object('Here is my plan: {"plan": []} hope this helps')
-        == '{"plan": []}'
+        extract_first_json_object('Here is my plan: {"plan": []} hope this helps') == '{"plan": []}'
     )
 
 
 def test_extract_first_json_object_handles_nested():
     text = 'prelude {"plan": [{"nested": true}], "risk": "x"} epilogue'
-    result = _extract_first_json_object(text)
+    result = extract_first_json_object(text)
     assert result == '{"plan": [{"nested": true}], "risk": "x"}'
 
 
 def test_extract_first_json_object_handles_braces_in_strings():
     """Braces inside JSON string literals must not confuse the depth counter."""
     text = '{"text": "a } in string {"}'
-    result = _extract_first_json_object(text)
+    result = extract_first_json_object(text)
     assert result == '{"text": "a } in string {"}'
 
 
 def test_extract_first_json_object_returns_none_for_no_json():
-    assert _extract_first_json_object("just prose no json") is None
+    assert extract_first_json_object("just prose no json") is None
 
 
 # ---------------------------------------------------------------------------

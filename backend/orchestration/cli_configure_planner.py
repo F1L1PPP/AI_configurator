@@ -15,7 +15,7 @@ from anthropic import Anthropic
 
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
-from backend.orchestration.configure_planner import _extract_first_json_object
+from backend.orchestration.json_extract import extract_first_json_object
 
 log = get_logger(__name__)
 
@@ -229,7 +229,7 @@ def draft_cli_plan(
     except json.JSONDecodeError as exc:
         # Inner LLM narrated around the JSON instead of returning it
         # clean. Reuse the WebUI planner's brace-balanced extractor.
-        extracted = _extract_first_json_object(text)
+        extracted = extract_first_json_object(text)
         if extracted is None:
             log.error("cli_draft_plan_json_parse_failed", text=text[:500], error=str(exc))
             raise RuntimeError(f"inner LLM returned non-JSON: {text[:200]}") from exc

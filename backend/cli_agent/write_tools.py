@@ -309,18 +309,24 @@ def _emit_cli_commands(
         )
 
 
+def _extract_device_errors(output: str | None) -> list[str]:
+    """Return IOS XE error lines (those starting with '%') from device output.
+
+    IOS XE marks rejected commands with a leading '%' (e.g. "% Router-ID
+    10.0.0.1 in use by ospf process 2"). Single source of truth for surfacing
+    silent config rejections across the fast-path and AI-drafted write paths.
+    """
+    return [line.strip() for line in (output or "").splitlines() if line.strip().startswith("%")]
+
+
 def _check_netmiko_output_for_errors(output: str) -> None:
     """Raise WriteRejectedError if Netmiko config output contains IOS XE
     error markers ('%' line prefix). IOS XE returns from the SSH session
     cleanly even when individual config commands are rejected — so a clean
     `send_config_set` return is NOT proof the change landed. Scan the
     buffered output to surface silent rejections.
-
-    Mirrors the `%`-line extraction in `cli_configure` so the same family
-    of failure (e.g. router-id-in-use, ip-on-switchport, malformed param)
-    surfaces consistently across fast-path and AI-drafted writes.
     """
-    errors = [line.strip() for line in (output or "").splitlines() if line.strip().startswith("%")]
+    errors = _extract_device_errors(output)
     if errors:
         raise WriteRejectedError(
             "device rejected one or more config commands: " + " | ".join(errors)
@@ -700,11 +706,7 @@ def cli_configure(
         # 10.0.0.1 in use by ospf process 2"). Pull these out so the
         # operator sees WHY verify missed — config silently rejected is a
         # common pattern with router-id / IP / VLAN conflicts.
-        device_errors = [
-            line.strip()
-            for line in (config_output or "").splitlines()
-            if line.strip().startswith("%")
-        ]
+        device_errors = _extract_device_errors(config_output)
         log.error(
             "cli_configure_verify_failed",
             action_id=action_id,

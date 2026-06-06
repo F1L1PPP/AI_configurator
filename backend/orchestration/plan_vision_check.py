@@ -39,6 +39,7 @@ from typing import Any, Literal, TypedDict
 from anthropic import Anthropic
 
 from backend.core.logging import get_logger
+from backend.orchestration.json_extract import extract_first_json_object
 from backend.webui_agent.vision_fallback import _hash_page_url  # reuse URL normalizer
 
 log = get_logger(__name__)
@@ -430,45 +431,12 @@ def _call_haiku_plan_vision(
     return (first_block.text if hasattr(first_block, "text") else "") or ""
 
 
-def _extract_first_json_object_local(text: str) -> str | None:
-    """Brace-balanced JSON extraction from raw text. Mirrors configure_planner."""
-    depth = 0
-    in_string = False
-    escape = False
-    start = -1
-    for i, ch in enumerate(text):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_string:
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                return text[start : i + 1]
-            if depth < 0:
-                # Unmatched closing brace before any opening — bail.
-                # Mirrors configure_planner._extract_first_json_object.
-                return None
-    return None
-
-
 def _parse_vision_response(raw: str) -> dict[str, Any] | None:
     """Try strict JSON parse; fall back to brace-extraction."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        extracted = _extract_first_json_object_local(raw)
+        extracted = extract_first_json_object(raw)
         if extracted:
             with suppress(json.JSONDecodeError):
                 return json.loads(extracted)

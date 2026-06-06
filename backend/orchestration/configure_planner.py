@@ -15,6 +15,7 @@ from anthropic.types import ToolChoiceToolParam, ToolParam
 
 from backend.core.logging import get_logger
 from backend.core.settings import get_settings
+from backend.orchestration.json_extract import extract_first_json_object
 from backend.webui_agent.atlas.schema import RouteAtlas
 
 log = get_logger(__name__)
@@ -231,47 +232,6 @@ Rules for the continuation case:
   check verify"` so the caller can re-verify and finish."""
 
 
-def _extract_first_json_object(text: str) -> str | None:
-    """Find the first brace-balanced JSON object in ``text``.
-
-    Walks character by character tracking brace depth (ignoring braces
-    inside string literals). Returns the substring `{...}` of the first
-    complete object, or None if no balanced object found.
-
-    A simpler regex `r'\\{[\\s\\S]*\\}'` would over-grab if there are
-    multiple objects or trailing braces; this version stops at the first
-    matched closing brace.
-    """
-    depth = 0
-    in_string = False
-    escape = False
-    start = -1
-    for i, ch in enumerate(text):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_string:
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start != -1:
-                return text[start : i + 1]
-            if depth < 0:
-                # Unmatched closing brace before any opening — bail.
-                return None
-    return None
-
-
 _RUNNING_CONFIG_MAX_CHARS = 32_000
 
 
@@ -405,7 +365,7 @@ def draft_plan(
         text = "\n".join(
             getattr(b, "text", "") for b in response.content if getattr(b, "type", None) == "text"
         ).strip()
-        extracted = _extract_first_json_object(text)
+        extracted = extract_first_json_object(text)
         if extracted is None:
             log.error("draft_plan_json_parse_failed", text=text[:500])
             raise RuntimeError(f"inner LLM returned non-JSON: {text[:200]}")
@@ -787,7 +747,7 @@ def draft_atlas_plan(
         text = "\n".join(
             getattr(b, "text", "") for b in response.content if getattr(b, "type", None) == "text"
         ).strip()
-        extracted = _extract_first_json_object(text)
+        extracted = extract_first_json_object(text)
         if extracted is None:
             log.error("draft_atlas_plan_json_parse_failed", text=text[:500])
             raise RuntimeError(f"atlas planner LLM returned non-JSON: {text[:200]}")
