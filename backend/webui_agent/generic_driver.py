@@ -900,7 +900,7 @@ def webui_open_form_for_planning(
     """Perform a single form-opening click in a propose-time session WITHOUT an approval gate.
 
     SECURITY RATIONALE — why this is safe without ``is_approved``:
-      - This helper is ONLY called during ``_propose_webui_configure``, before
+      - This helper is ONLY called during ``_propose_webui_configure_atlas``, before
         any ``action_id`` exists (``propose_action`` has not run yet).
       - It is intentionally constrained to a SINGLE CLICK that opens a modal
         or form on the current page — it must never be used for fills, selects,
@@ -913,12 +913,12 @@ def webui_open_form_for_planning(
         are gated by the full ``propose_action → approve → execute`` flow.
       - This function MUST NOT be exposed as a public tool and MUST NOT be
         called from any HITL-approved execute path.  Its sole purpose is to
-        reveal the real form so ``draft_plan`` plans against actual field names
+        reveal the real form so ``draft_atlas_plan`` plans against actual field names
         instead of hallucinating them from the list-view.
 
     Args:
         session_id: The live session opened by ``webui_open`` inside
-            ``_propose_webui_configure``.  Must already be alive.
+            ``_propose_webui_configure_atlas``.  Must already be alive.
         intent: Dict with keys ``role``, ``name``, ``action`` (must be
             ``"click"``), and optionally ``value`` (ignored for clicks).
 

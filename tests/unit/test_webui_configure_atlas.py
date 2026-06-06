@@ -699,7 +699,6 @@ def test_webui_configure_atlas_happy_path(monkeypatch):
     executed_ids: list[str] = []
     snapshot_calls: list[tuple] = []
     draft_atlas_plan_calls: list = []
-    draft_plan_calls: list = []
 
     def _fake_act_field(session_id, field_key, value, action_id):
         act_field_calls.append({"field_key": field_key, "value": value})
@@ -722,9 +721,8 @@ def test_webui_configure_atlas_happy_path(monkeypatch):
     monkeypatch.setattr(tr, "webui_verify_a11y", _fake_verify_a11y)
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
-    # Intercept draft_atlas_plan and draft_plan — must NOT be called at execute
+    # Intercept draft_atlas_plan — must NOT be called at execute
     monkeypatch.setattr(tr, "draft_atlas_plan", lambda *a, **kw: draft_atlas_plan_calls.append(1) or {})
-    monkeypatch.setattr(tr, "draft_plan", lambda *a, **kw: draft_plan_calls.append(1) or {})
 
     import backend.cli_agent.snapshots as snaps
     import backend.orchestration.confirmations as confs
@@ -766,7 +764,6 @@ def test_webui_configure_atlas_happy_path(monkeypatch):
 
     # NO re-plan — the inner_plan_empty regression lock
     assert draft_atlas_plan_calls == [], "draft_atlas_plan must NOT be called at execute time"
-    assert draft_plan_calls == [], "draft_plan must NOT be called at execute time"
 
 
 def test_webui_configure_atlas_pre_snapshot_failure_is_best_effort(monkeypatch):
