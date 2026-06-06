@@ -53,6 +53,7 @@ from backend.webui_agent.generic_driver import (
     webui_open,
     webui_open_form_for_planning,
     webui_perceive,
+    webui_reload_for_planning,
     webui_verify_a11y,
 )
 
@@ -1200,6 +1201,14 @@ def _atlas_from_view(view: dict[str, Any]) -> Any:  # returns RouteAtlas
     )
 
 
+# Bounded open-form retries: the Cisco WebUI SPA occasionally loads with its
+# AngularJS controllers unbound, so the Add-button click times out and the plan
+# comes back empty.  A page reload re-bootstraps Angular; this caps how many
+# reload-and-retry rounds the propose path makes before giving up (so a
+# deterministically-broken page still fails fast rather than looping).
+_OPEN_FORM_MAX_ATTEMPTS = 3
+
+
 def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
     """Atlas-path propose: perceive (one a11y snapshot) → draft_atlas_plan
     (typed, validated) → propose_action.  Returns the same awaiting_approval
@@ -1308,8 +1317,27 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
             "name": _trigger_label,
             "action": "click",
         }
-        try:
-            _form_result = webui_open_form_for_planning(session_id, _open_intent)
+        # The Cisco WebUI AngularJS SPA occasionally loads with its controllers
+        # unbound (browser_pageerror "reading 'controller'/'service'"): the page
+        # renders no form and the Add button never becomes actionable, so the
+        # open-form click times out (click_timeout_unsafe_retry) and the plan
+        # comes back empty -> the planner then mis-advises a CLI fallback.  A
+        # page reload re-bootstraps Angular; both the reload and the open-form
+        # click are READ-ONLY (no router write), so retrying after a reload is
+        # safe.  Bounded by _OPEN_FORM_MAX_ATTEMPTS so a deterministically-broken
+        # page still fails fast.
+        for _attempt in range(1, _OPEN_FORM_MAX_ATTEMPTS + 1):
+            try:
+                _form_result = webui_open_form_for_planning(session_id, _open_intent)
+            except Exception as _open_exc:  # noqa: BLE001
+                log.warning(
+                    "propose_webui_configure_atlas_form_open_exception",
+                    intent=intent,
+                    attempt=_attempt,
+                    error=str(_open_exc),
+                )
+                _form_result = {"ok": False, "failure_reason": "open_form_exception"}
+
             if _form_result.get("ok"):
                 _form_perceive = webui_perceive(
                     session_id=session_id,
@@ -1323,25 +1351,48 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
                         "propose_webui_configure_atlas_opened_form",
                         intent=intent,
                         trigger_label=_trigger_label,
+                        attempt=_attempt,
                     )
-                else:
-                    log.warning(
-                        "propose_webui_configure_atlas_reperceive_after_form_open_failed",
-                        intent=intent,
-                        error=_form_perceive.get("message"),
-                    )
+                    break
+                log.warning(
+                    "propose_webui_configure_atlas_reperceive_after_form_open_failed",
+                    intent=intent,
+                    attempt=_attempt,
+                    error=_form_perceive.get("message"),
+                )
             else:
                 log.warning(
                     "propose_webui_configure_atlas_form_open_click_failed",
                     intent=intent,
+                    attempt=_attempt,
                     failure_reason=_form_result.get("failure_reason"),
                 )
-        except Exception as _open_exc:  # noqa: BLE001
-            log.warning(
-                "propose_webui_configure_atlas_form_open_exception",
-                intent=intent,
-                error=str(_open_exc),
-            )
+
+            # Open-form didn't take this round.  If attempts remain, reload the
+            # page (read-only re-navigation re-bootstraps the SPA) + re-perceive,
+            # then retry the open-form click against the fresh page.
+            if _attempt < _OPEN_FORM_MAX_ATTEMPTS:
+                _reload = webui_reload_for_planning(session_id, webui_path)
+                if "error" in _reload:
+                    log.warning(
+                        "propose_webui_configure_atlas_reload_failed",
+                        intent=intent,
+                        attempt=_attempt,
+                        error=_reload.get("message") or _reload.get("error"),
+                    )
+                    break
+                _reperceive = webui_perceive(
+                    session_id=session_id,
+                    route=webui_path,
+                    device_fingerprint=fp,
+                )
+                if "error" not in _reperceive:
+                    view = _reperceive["view"]
+                log.info(
+                    "propose_webui_configure_atlas_form_open_retry_after_reload",
+                    intent=intent,
+                    attempt=_attempt,
+                )
 
     # 6. Running-config for conflict detection (soft-fail)
     running_config = ""

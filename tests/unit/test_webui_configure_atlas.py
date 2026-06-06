@@ -420,6 +420,125 @@ def test_propose_atlas_skips_add_when_apply_present(monkeypatch):
     assert open_form_calls == [], "Add must not be clicked when an Apply control is already visible"
 
 
+def test_propose_atlas_reloads_and_retries_form_open_on_spa_break(monkeypatch):
+    """A transient Cisco SPA bootstrap failure makes the first open-form click
+    fail (click_timeout_unsafe_retry); the propose path must RELOAD the page and
+    retry the click — not give up with an empty plan (the WebUI->CLI mis-advice
+    regression of 2026-06-06).
+    """
+    _stub_basics(monkeypatch)
+    list_view = {
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [],
+        "open_form_control": {"key": "add", "label": "Add", "role": "button"},
+    }
+    calls = {"perceive": 0, "open_form": 0, "reload": 0}
+
+    def _perceive(**kw):
+        calls["perceive"] += 1
+        # Form fields appear only after the Add click finally succeeds (3rd perceive:
+        # initial list, post-reload list, post-success form).
+        view = _PERCEIVE_VIEW if calls["perceive"] >= 3 else list_view
+        return {"view": view, "session_id": "sess_atlas_001"}
+
+    monkeypatch.setattr(tr, "webui_perceive", _perceive)
+
+    def _open_form(session_id, intent):
+        calls["open_form"] += 1
+        # Fail the first attempt (SPA unbootstrapped); succeed after the reload.
+        if calls["open_form"] == 1:
+            return {"ok": False, "failure_reason": "click_timeout_unsafe_retry"}
+        return {"ok": True, "view": _PERCEIVE_VIEW, "session_id": session_id}
+
+    monkeypatch.setattr(tr, "webui_open_form_for_planning", _open_form)
+
+    def _reload(session_id, path):
+        calls["reload"] += 1
+        return {"ok": True, "view": list_view, "session_id": session_id}
+
+    monkeypatch.setattr(tr, "webui_reload_for_planning", _reload)
+    monkeypatch.setattr(
+        tr,
+        "draft_atlas_plan",
+        lambda *a, **kw: {
+            "plan": [{"field_key": "dhcp.pool_name", "value": "MYPOOL"}],
+            "verify_text": "MYPOOL",
+            "risk": "Adds DHCP pool MYPOOL.",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        },
+    )
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add DHCP pool MYPOOL", "webui_path": "/webui/#/dhcp"},
+    )
+
+    assert result["status"] == "awaiting_approval"
+    assert calls["open_form"] == 2, "open-form click retried after the reload"
+    assert calls["reload"] == 1, "page reloaded once between the two open-form attempts"
+    # perceive: initial list, post-reload list, post-success form.
+    assert calls["perceive"] == 3
+
+
+def test_propose_atlas_form_open_fails_all_attempts_then_empty_plan(monkeypatch):
+    """If the SPA stays broken across every retry, the propose path exhausts the
+    bounded reload-retries and falls back to the empty-plan breadcrumb — it does
+    NOT loop forever.
+    """
+    _stub_basics(monkeypatch)
+    list_view = {
+        "route": "/webui/#/dhcp",
+        "page_title": "DHCP",
+        "fields": [],
+        "apply_controls": [],
+        "unmapped": [],
+        "open_form_control": {"key": "add", "label": "Add", "role": "button"},
+    }
+    calls = {"open_form": 0, "reload": 0}
+
+    monkeypatch.setattr(
+        tr,
+        "webui_perceive",
+        lambda **kw: {"view": list_view, "session_id": "sess_atlas_001"},
+    )
+
+    def _open_form(session_id, intent):
+        calls["open_form"] += 1
+        return {"ok": False, "failure_reason": "click_timeout_unsafe_retry"}
+
+    monkeypatch.setattr(tr, "webui_open_form_for_planning", _open_form)
+
+    def _reload(session_id, path):
+        calls["reload"] += 1
+        return {"ok": True, "view": list_view, "session_id": session_id}
+
+    monkeypatch.setattr(tr, "webui_reload_for_planning", _reload)
+    monkeypatch.setattr(
+        tr,
+        "draft_atlas_plan",
+        lambda *a, **kw: {
+            "plan": [],
+            "verify_text": None,
+            "risk": "No matching fields found.",
+            "equivalent_cli_commands": [],
+            "validation_errors": [],
+        },
+    )
+
+    result = tr.execute_tool(
+        "propose_webui_configure",
+        {"intent": "add DHCP pool MYPOOL", "webui_path": "/webui/#/dhcp"},
+    )
+
+    assert result["error"] == "intent_not_mappable"
+    assert calls["open_form"] == 3, "bounded to _OPEN_FORM_MAX_ATTEMPTS open-form attempts"
+    assert calls["reload"] == 2, "reloaded between attempts, but not after the last"
+
+
 def test_propose_atlas_empty_plan_returns_intent_not_mappable(monkeypatch):
     """draft_atlas_plan returns empty plan → error: intent_not_mappable.
 

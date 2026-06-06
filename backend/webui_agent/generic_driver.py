@@ -991,3 +991,67 @@ def webui_open_form_for_planning(
         "view": reply.get("view"),
         "session_id": session_id,
     }
+
+
+def webui_reload_for_planning(
+    session_id: str,
+    path: str,
+) -> dict[str, Any]:
+    """Re-navigate an EXISTING propose-time session to ``path`` to re-bootstrap
+    the SPA, WITHOUT a pre-snapshot or approval gate.
+
+    SAFETY RATIONALE — why this is safe without ``is_approved``:
+      - Like ``webui_open_form_for_planning``, this is ONLY called during
+        ``_propose_webui_configure_atlas`` (no ``action_id`` exists yet).
+      - It issues the SAME read-only ``open`` op as ``webui_open`` — a
+        ``page.goto`` re-navigation that commits NO router config (the device
+        writes remain gated plan steps).  Unlike ``webui_open`` it takes NO SSH
+        pre-snapshot: this is a throwaway propose-time reload, not a tracked
+        action.
+      - Purpose: the Cisco WebUI AngularJS SPA occasionally loads with its
+        controllers/services unbound (``browser_pageerror`` "reading
+        'controller'/'service'") — the page renders no form and buttons never
+        become actionable, so the open-form click times out and the plan comes
+        back empty.  A reload re-bootstraps Angular.
+
+    Reuses the live session (no new browser / no re-login).  Returns
+    ``{"ok": True, "view": ...}`` on success or ``{"error": ...}`` otherwise —
+    the caller should soft-fail and continue.
+    """
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+    if sess is None or not sess.is_alive():
+        return _session_not_found(session_id)
+
+    log.info("webui_reload_for_planning", session_id=session_id, path=path)
+
+    try:
+        reply = sess.send({"op": "open", "path": path})
+    except SubprocessFlowError as exc:
+        _close_session(session_id)
+        log.error(
+            "webui_reload_for_planning_subprocess_error",
+            session_id=session_id,
+            exc_type=exc.exc_type,
+            error=exc.error,
+        )
+        return {
+            "error": "reload_subprocess_error",
+            "message": exc.error,
+            "exc_type": exc.exc_type,
+            "session_id": session_id,
+        }
+
+    if not reply.get("ok"):
+        log.warning("webui_reload_for_planning_failed", session_id=session_id)
+        return {
+            "error": "reload_failed",
+            "view": reply.get("view"),
+            "session_id": session_id,
+        }
+
+    return {
+        "ok": True,
+        "view": reply.get("view"),
+        "session_id": session_id,
+    }
