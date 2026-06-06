@@ -114,18 +114,30 @@ _JS_PICK_FN = """
         ));
         if (cands.length === 0) return null;
         if (cands.length === 1) return cands[0];
-        const anchorWidget = (anchorEl && anchorEl.closest) ? anchorEl.closest('.k-widget') : null;
-        // 1) the select whose Kendo widget wrapper IS this visible widget.
-        for (const s of cands) {
-            try {
-                const w = window.jQuery && (window.jQuery(s).data('kendoDropDownList')
-                    || window.jQuery(s).data('kendoComboBox'));
-                const wrap = w && w.wrapper && w.wrapper[0];
-                if (wrap && (wrap === anchorEl || wrap === anchorWidget
-                        || wrap.contains(anchorEl) || (anchorEl && anchorEl.contains && anchorEl.contains(wrap)))) {
-                    return s;
+        // 1) anchor DOM-proximity (deterministic, no jQuery): the active
+        //    <select> shares a NEAR common ancestor with its visible Kendo
+        //    widget (Kendo renders the widget right beside the select it owns),
+        //    while the hidden Basic/template copy lives in a far-off section.
+        //    Score each candidate by its lowest-common-ancestor distance to the
+        //    anchor; take the closest ONLY if it is close (combined LCA depth
+        //    <= 10, i.e. not joined merely via <body>/<form>) AND a strict
+        //    winner — otherwise defer to the visibility check below. This is the
+        //    deterministic primary and it also survives the both-containers-
+        //    visible case (two rendered tabs) that visibility alone cannot.
+        if (anchorEl) {
+            const anchorChain = [];
+            for (let a = anchorEl; a; a = a.parentElement) anchorChain.push(a);
+            const scored = cands.map(function (s) {
+                for (let n = s, d = 0; n && d < 40; n = n.parentElement, d++) {
+                    const idx = anchorChain.indexOf(n);
+                    if (idx !== -1) return {sel: s, dist: d + idx};
                 }
-            } catch (e) { /* keep looking */ }
+                return {sel: s, dist: Infinity};
+            }).sort(function (a, b) { return a.dist - b.dist; });
+            if (scored.length && scored[0].dist <= 10
+                    && (scored.length === 1 || scored[1].dist > scored[0].dist)) {
+                return scored[0].sel;
+            }
         }
         // 2) the first whose ancestor container is rendered (the hidden
         //    Basic/template copy lives in a display:none / ng-hide container).
