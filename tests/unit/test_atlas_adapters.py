@@ -509,7 +509,74 @@ class TestKendoComboboxAdapter:
         # click and set_checked must NOT have been called
         loc.click.assert_not_called()
 
-    # --- Strategy 2: aria-controls scoping ---
+    # --- Strategy 2: hidden-select (preferred over the popup click) ---
+
+    def test_kendo_combobox_hidden_select_resolves_before_popup_click(self) -> None:
+        """Regression (2026-06-06 DHCP /25 smoke): the widget API matches by VALUE
+        only and misses a subnet mask whose display text differs from the option
+        value, but the hidden-select strategy matches by display text and succeeds
+        WITHOUT opening the interception-prone popup. The popup DOM click (now the
+        last resort) must NOT run — that click is what timed out -> element_intercepted."""
+        adapter = KendoComboboxAdapter()
+        loc = _mock_loc(count=1)
+
+        calls: list[str] = []
+
+        def _evaluate(js: str, arg: object = None) -> dict:
+            if "pickActiveSelect" in js:  # Strategy 2 — select-from-widget, succeeds
+                calls.append("hidden_select")
+                return {
+                    "ok": True,
+                    "selected": "25",
+                    "widget_value": "25",
+                    "matched_value": "25",
+                    "select_name": "subnetmaskOptions",
+                    "select_id": "subnetmaskOptionsDHCP",
+                    "candidate_count": 2,
+                }
+            calls.append("widget_api")  # Strategy 1 — widget API, misses by value
+            return {"ok": False, "reason": "value_not_in_options"}
+
+        loc.evaluate.side_effect = _evaluate
+
+        page = self._make_kendo_page(loc)
+        field = self._make_kendo_field(kendo_select_name="subnetmaskOptions")
+        adapter.apply(page, field, "255.255.255.128")
+
+        assert calls == ["widget_api", "hidden_select"]  # S2 ran, before any popup
+        loc.click.assert_not_called()  # popup never opened → cannot be intercepted
+
+    def test_kendo_combobox_hidden_select_not_stuck_falls_through_to_popup(self) -> None:
+        """Silent-wrong-value guard: if the backing-select write does not take
+        (JS returns ok=False because the re-read value disagrees), Strategy 2 must
+        NOT report success — it falls through to the popup DOM click (Strategy 3)."""
+        adapter = KendoComboboxAdapter()
+        loc = _mock_loc(count=1)
+        loc.get_attribute.return_value = None  # aria-expanded/aria-controls absent
+
+        def _evaluate(js: str, arg: object = None) -> dict:
+            if "pickActiveSelect" in js:  # Strategy 2 — set did not stick
+                return {"ok": False, "selected": "24", "matched_value": "25"}
+            return {"ok": False, "reason": "widget_instance_failed"}  # Strategy 1
+
+        loc.evaluate.side_effect = _evaluate
+
+        # Strategy 3: body-wide popup li click succeeds.
+        li_loc = MagicMock()
+        li_first = MagicMock()
+        li_loc.first = li_first
+
+        page = MagicMock()
+        page.get_by_role.return_value = loc
+        page.locator.return_value = li_loc  # popup body-wide locator
+
+        field = self._make_kendo_field(kendo_select_name="subnetmaskOptions")
+        adapter.apply(page, field, "255.255.255.128")
+
+        loc.click.assert_called_once()  # S2 failed → popup opened (Strategy 3)
+        li_first.click.assert_called_once()  # popup li clicked
+
+    # --- Strategy 3 (last resort): aria-controls scoping ---
 
     def test_kendo_combobox_opens_then_clicks_li_by_aria_controls(self) -> None:
         """Strategy 1 non-ok → strategy 2 opens widget and clicks scoped li."""
@@ -637,28 +704,24 @@ class TestKendoComboboxAdapter:
     # --- Strategy 3 ValueError on value-not-in-options ---
 
     def test_kendo_combobox_value_not_in_options_raises_valueerror(self) -> None:
-        """All 3 strategies exhaust → ValueError raised."""
+        """All strategies exhaust → ValueError. Order is now widget-API (s1) →
+        hidden-select (s2) → DOM popup click (s3, last resort); the DOM click is
+        the final dead-end after s1 + s2 both miss the value."""
         adapter = KendoComboboxAdapter()
 
         loc = _mock_loc(count=1)
 
-        call_count: list[int] = [0]
-
         def _evaluate(js: str, val: str) -> dict:
-            call_count[0] += 1
-            if call_count[0] == 1:
-                # Strategy 1
-                return {"ok": False, "reason": "kendo_unavailable"}
-            # Strategy 3
+            # Both JS strategies miss the value: widget API (s1) by value,
+            # hidden-select (s2) by value-or-text.
+            if "widgetInstance" in js:
+                return {"ok": False, "reason": "value_not_in_options"}
             return {"ok": False, "error": "value not in options. available: A, B"}
 
         loc.evaluate.side_effect = _evaluate
-
-        # Strategy 2 fails with a structural error (not a timeout) so it
-        # falls through to strategy 3.
         loc.get_attribute.return_value = None  # aria-expanded/aria-controls absent
 
-        # The body-wide locator chain for strategy 2 raises a non-timeout error via .first.click().
+        # The last-resort DOM click raises a non-timeout error → ValueError dead-end.
         li_loc = MagicMock()
         li_first = MagicMock()
         li_first.click.side_effect = Exception("element detached from DOM")
@@ -670,26 +733,28 @@ class TestKendoComboboxAdapter:
 
         field = self._make_kendo_field()
 
-        with pytest.raises(ValueError, match="value not in options"):
+        with pytest.raises(ValueError, match="kendo_select failed"):
             adapter.apply(page, field, "BOGUS")
 
     # --- read_back via kendo_select_name ---
 
     def test_read_back_via_kendo_select_name(self) -> None:
-        """read_back uses the backing select when kendo_select_name is set."""
+        """read_back resolves the active backing select via the visible widget
+        anchor + querySelectorAll-pick (not a global select[name=...] that would
+        strict-fail on Cisco's duplicate same-name selects) and returns its value."""
         adapter = KendoComboboxAdapter()
 
-        backing_loc = MagicMock()
-        backing_loc.input_value.return_value = "255.255.0.0"
+        loc = _mock_loc(count=1)
+        loc.evaluate.return_value = "255.255.0.0"
 
         page = MagicMock()
-        page.locator.return_value = backing_loc
+        page.get_by_role.return_value = loc
 
         field = self._make_kendo_field(kendo_select_name="subnetMask")
         result = adapter.read_back(page, field)
 
-        page.locator.assert_called_once_with("select[name='subnetMask']")
-        backing_loc.input_value.assert_called_once_with(timeout=FORM_TIMEOUT_MS)
+        loc.evaluate.assert_called_once()
+        assert "pickActiveSelect" in loc.evaluate.call_args[0][0]  # the read picker JS
         assert result == "255.255.0.0"
 
     def test_read_back_no_kendo_select_name_uses_inner_text(self) -> None:

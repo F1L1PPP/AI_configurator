@@ -101,44 +101,145 @@ _JS_WIDGET_API = """
 }
 """
 
-_JS_HIDDEN_SELECT = """
-(listboxEl, targetValue) => {
-    // Walk up the DOM to find a hidden <select> in the same Kendo wrapper.
-    let node = listboxEl;
-    let select = null;
-    for (let i = 0; i < 6; i++) {
-        if (!node || !node.parentElement) break;
-        node = node.parentElement;
-        select = node.querySelector('select');
-        if (select) break;
+# Shared JS picker: from the VISIBLE widget anchor, resolve the ONE backing
+# <select> that widget owns. Cisco renders duplicate same-name selects
+# (Basic/Advanced/template copies) so a global select[name=...] matches >1 and
+# Playwright strict-mode-fails. querySelectorAll never throws; we then pick the
+# select whose Kendo widget wrapper IS this anchor (deterministic), else the one
+# in a visible container, else give up (never silently write a hidden copy).
+_JS_PICK_FN = """
+    function pickActiveSelect(anchorEl, selectName) {
+        const cands = Array.from(document.querySelectorAll(
+            "select[name='" + selectName + "'], select[id='" + selectName + "']"
+        ));
+        if (cands.length === 0) return null;
+        if (cands.length === 1) return cands[0];
+        const anchorWidget = (anchorEl && anchorEl.closest) ? anchorEl.closest('.k-widget') : null;
+        // 1) the select whose Kendo widget wrapper IS this visible widget.
+        for (const s of cands) {
+            try {
+                const w = window.jQuery && (window.jQuery(s).data('kendoDropDownList')
+                    || window.jQuery(s).data('kendoComboBox'));
+                const wrap = w && w.wrapper && w.wrapper[0];
+                if (wrap && (wrap === anchorEl || wrap === anchorWidget
+                        || wrap.contains(anchorEl) || (anchorEl && anchorEl.contains && anchorEl.contains(wrap)))) {
+                    return s;
+                }
+            } catch (e) { /* keep looking */ }
+        }
+        // 2) the first whose ancestor container is rendered (the hidden
+        //    Basic/template copy lives in a display:none / ng-hide container).
+        //    Start the walk at parentElement, NOT the <select>: Kendo always
+        //    renders the backing select itself display:none, so testing the
+        //    select would reject every candidate on iteration 0. The container
+        //    is what reflects the active-vs-hidden state.
+        for (const s of cands) {
+            let n = s.parentElement, vis = true;
+            for (let i = 0; i < 12 && n; i++) {
+                const cs = window.getComputedStyle(n);
+                if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) { vis = false; break; }
+                if (n.getAttribute && n.getAttribute('aria-hidden') === 'true') { vis = false; break; }
+                if (n.classList && n.classList.contains('ng-hide')) { vis = false; break; }
+                n = n.parentElement;
+            }
+            if (vis) return s;
+        }
+        // 3) give up rather than silently writing a hidden copy.
+        return null;
     }
-    if (!select) {
-        return {ok: false, error: 'backing select not found (walked 6 levels)'};
+"""
+
+_JS_SELECT_FROM_WIDGET = (
+    "(anchorEl, arg) => {"
+    + _JS_PICK_FN
+    + """
+    const selectName = arg.selectName;
+    const targetValue = arg.value;
+    if (!selectName) return {ok: false, error: 'no_kendo_select_name'};
+    const selectEl = pickActiveSelect(anchorEl, selectName);
+    if (!selectEl) {
+        return {ok: false, error: 'no active backing <select> for name ' + selectName};
     }
-    // Find the matching option by value or visible text, case-insensitive
-    // and trimmed (the planner may pass "IPv4" while the option text is
-    // "IPV4" and the value is "ipv4").
-    let found = false;
+    // Match the option by value OR visible text, case-insensitive and trimmed
+    // (the planner passes display text like "255.255.255.128" while the option
+    // value may be "25"; or "IPv4" vs value "ipv4").
     const tv = String(targetValue).trim().toLowerCase();
-    for (const opt of select.options) {
+    let matched = null;
+    for (const opt of selectEl.options) {
         if (opt.value.trim().toLowerCase() === tv || opt.text.trim().toLowerCase() === tv) {
-            select.value = opt.value;
-            found = true;
+            matched = opt;
             break;
         }
     }
-    if (!found) {
-        const available = Array.from(select.options).map(o => o.text).join(', ');
+    if (!matched) {
+        const available = Array.from(selectEl.options).map(o => o.text).join(', ');
         return {ok: false, error: 'value not in options. available: ' + available};
     }
-    // Dispatch change event so Kendo/AngularJS model updates.
-    select.dispatchEvent(new Event('change', {bubbles: true}));
-    // Also dispatch input event for Angular 1.x watchers.
-    select.dispatchEvent(new Event('input', {bubbles: true}));
-    const selectName = select.getAttribute('name') || select.getAttribute('id') || '(unnamed)';
-    return {ok: true, selected: select.value, select_name: selectName};
-}
-"""
+    selectEl.value = matched.value;
+    // Native events for AngularJS ng-model / input watchers.
+    selectEl.dispatchEvent(new Event('change', {bubbles: true}));
+    selectEl.dispatchEvent(new Event('input', {bubbles: true}));
+    // Drive the Kendo widget bound to THIS <select> so its visible value +
+    // dataSource update — a raw select mutation alone can be re-synced away by
+    // Kendo on the next interaction (the silent-wrong-value risk).
+    let widgetVal = null;
+    try {
+        if (typeof kendo !== 'undefined') {
+            let w = null;
+            if (window.jQuery) {
+                w = window.jQuery(selectEl).data('kendoDropDownList')
+                    || window.jQuery(selectEl).data('kendoComboBox') || null;
+            }
+            if (!w) {
+                try { w = kendo.widgetInstance(selectEl); } catch (e) { w = null; }
+            }
+            if (w && typeof w.value === 'function') {
+                w.value(matched.value);
+                if (typeof w.trigger === 'function') w.trigger('change');
+                widgetVal = w.value();
+            }
+        }
+    } catch (e) {
+        widgetVal = '__widget_err__';
+    }
+    // AngularJS 1.x digest so ng-model commits before the Apply submit.
+    try {
+        if (window.angular) {
+            const scope = window.angular.element(selectEl).scope();
+            if (scope && typeof scope.$applyAsync === 'function') scope.$applyAsync();
+        }
+    } catch (e) { /* best-effort */ }
+    // Verify the value actually took (no silent-wrong-value): the native select
+    // must hold the chosen option AND the Kendo widget (if resolved) must agree.
+    const finalVal = selectEl.value;
+    const ok = finalVal === matched.value
+        && (widgetVal === null || widgetVal === '__widget_err__'
+            || String(widgetVal) === String(matched.value));
+    return {
+        ok: ok,
+        selected: finalVal,
+        widget_value: widgetVal,
+        matched_value: matched.value,
+        select_name: selectEl.getAttribute('name') || selectEl.getAttribute('id') || '(unnamed)',
+        select_id: selectEl.getAttribute('id') || '(none)',
+        candidate_count: document.querySelectorAll(
+            "select[name='" + selectName + "'], select[id='" + selectName + "']"
+        ).length
+    };
+}"""
+)
+
+# Read variant: resolve the same active <select> and return its current value
+# (the value attr, matching the prior read_back semantics).
+_JS_READ_FROM_WIDGET = (
+    "(anchorEl, selectName) => {"
+    + _JS_PICK_FN
+    + """
+    if (!selectName) return null;
+    const selectEl = pickActiveSelect(anchorEl, selectName);
+    return selectEl ? selectEl.value : null;
+}"""
+)
 
 # ---------------------------------------------------------------------------
 # Locator resolution helpers
@@ -320,21 +421,31 @@ class ButtonAdapter:
 class KendoComboboxAdapter:
     """Kendo UI dropdown / combobox.
 
-    Three strategies are tried in order — ported verbatim from
-    ``_playwright_subprocess._kendo_select``:
+    Three strategies are tried in order:
 
     1. Widget JS API — ``kendo.widgetInstance(wrapper).value(target)``.
-       Cleanest path; skipped when the ``kendo`` global is absent.
-    2. Real DOM — click to open popup, then click the matching ``li.k-item``.
-       Scoped to the listbox identified by ``aria-controls``/``aria-owns``
-       when available; falls back to body-wide ``ul.k-list li.k-item``.
-    3. Hidden-select — walk up to the backing ``<select>`` and set its value
-       case-insensitively, then dispatch ``change``/``input`` events.
+       Cleanest path; skipped when the ``kendo`` global is absent. Matches by
+       VALUE only, so it misses options whose value differs from the display
+       text (e.g. a subnet mask shown "255.255.255.128" with value "25").
+    2. Backing ``<select>`` from the widget — pass the VISIBLE widget element as
+       anchor and ``querySelectorAll``-pick the ONE backing ``<select>`` that
+       widget owns (the select whose Kendo wrapper IS this anchor, else a
+       visible-container one), match by value OR display text, set it, drive the
+       Kendo widget + AngularJS model, and verify the value took. No popup →
+       cannot be intercepted; the robust path for non-default values. (Evolved
+       over the 2026-06-06 DHCP /25 smoke: a 6-level DOM walk missed the
+       ``display:none`` select; a global ``select[name=...]`` then strict-mode-failed
+       because Cisco renders duplicate same-name selects — so we resolve from the
+       widget anchor instead.)
+    3. Real DOM (LAST RESORT) — click to open the popup, then click the matching
+       ``li.k-item`` (scoped by ``aria-controls``/``aria-owns`` when available;
+       else body-wide ``ul.k-list li.k-item``). Interception-prone; only runs
+       when the backing select can't satisfy the request.
 
-    EXCEPTION CONTRACT (mirrors _kendo_select exactly):
-    - ``PlaywrightTimeoutError`` → always propagates (never swallowed).
-    - ``ValueError`` → dead-end (value not in options / evaluate failure) →
-      propagates, NOT retried.
+    EXCEPTION CONTRACT:
+    - ``PlaywrightTimeoutError`` → always propagates (never swallowed); from the
+      last-resort DOM click the act path classifies it as ``element_intercepted``.
+    - ``ValueError`` → dead-end (all strategies exhausted) → propagates, NOT retried.
     - JS errors that are not timeouts → caught, log, fall through to next strategy.
     """
 
@@ -378,7 +489,61 @@ class KendoComboboxAdapter:
             )
 
         # -------------------------------------------------------------------
-        # Strategy 2 — Real DOM via Playwright
+        # Strategy 2 — Backing <select> resolved FROM the visible widget anchor.
+        # The robust path for non-default values. Cisco renders duplicate
+        # same-name <select>s (Basic/Advanced/template), so a global
+        # select[name=...] matches >1 and Playwright strict-mode-fails (which is
+        # what knocked this strategy out and dropped us to the popup click). We
+        # pass the VISIBLE widget `loc` (single element, narrowed by
+        # _first_visible) as the anchor and let the JS querySelectorAll-pick the
+        # ONE select that widget owns, then set + drive Kendo/AngularJS + verify.
+        # No popup → cannot be intercepted. Skipped (→ Strategy 3) when no name.
+        # -------------------------------------------------------------------
+        if field.kendo_select_name:
+            try:
+                result2 = loc.evaluate(
+                    _JS_SELECT_FROM_WIDGET,
+                    {"value": target_value, "selectName": field.kendo_select_name},
+                )
+                if isinstance(result2, dict) and result2.get("ok"):
+                    logger.info(
+                        "kendo_select_success",
+                        strategy="hidden_select",
+                        select_name=result2.get("select_name"),
+                        select_id=result2.get("select_id"),
+                        candidate_count=result2.get("candidate_count"),
+                        selected=result2.get("selected"),
+                        widget_value=result2.get("widget_value"),
+                        requested_value=target_value,
+                    )
+                    return
+                logger.info(
+                    "kendo_select_strategy_hidden_unavailable",
+                    reason=(result2.get("error") if isinstance(result2, dict) else repr(result2)),
+                    widget_value=(
+                        result2.get("widget_value") if isinstance(result2, dict) else None
+                    ),
+                    requested_value=target_value,
+                )
+            except PlaywrightTimeoutError:
+                raise  # propagate
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "kendo_select_strategy_hidden_error",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    requested_value=target_value,
+                )
+        else:
+            logger.info(
+                "kendo_select_strategy_hidden_unavailable",
+                reason="no_kendo_select_name",
+                requested_value=target_value,
+            )
+
+        # -------------------------------------------------------------------
+        # Strategy 3 — Real DOM popup click (LAST RESORT; interception-prone).
+        # Only reached when the backing select couldn't satisfy the request.
         # -------------------------------------------------------------------
         try:
             # Guard: skip the open-click if the widget is already expanded.
@@ -417,7 +582,7 @@ class KendoComboboxAdapter:
                     raise  # propagate — bounded retry classification
                 except Exception as exc:  # noqa: BLE001
                     # Scoped click failed structurally (bad id, detached) — fall
-                    # through to the body-wide path instead of abandoning to s3.
+                    # through to the body-wide path.
                     logger.info(
                         "kendo_select_scoped_click_fell_through",
                         error=str(exc),
@@ -438,45 +603,19 @@ class KendoComboboxAdapter:
             )
             return
         except PlaywrightTimeoutError:
-            raise  # propagate
+            raise  # propagate — last resort; act path classifies as element_intercepted
         except Exception as exc:  # noqa: BLE001
-            logger.info(
-                "kendo_select_strategy2_error",
-                error=str(exc),
-                error_type=type(exc).__name__,
-                requested_value=target_value,
-            )
-
-        # -------------------------------------------------------------------
-        # Strategy 3 — Hidden-select + change/input dispatch
-        # -------------------------------------------------------------------
-        try:
-            result3 = loc.evaluate(_JS_HIDDEN_SELECT, target_value)
-        except PlaywrightTimeoutError:
-            raise  # propagate
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(
-                f"kendo_select failed (all strategies): evaluate error: {exc}"
-            ) from exc
-
-        if not isinstance(result3, dict) or not result3.get("ok"):
-            error_detail = (
-                result3.get("error", "unknown") if isinstance(result3, dict) else repr(result3)
-            )
-            raise ValueError(f"kendo_select failed (all strategies): {error_detail}")
-
-        logger.info(
-            "kendo_select_success",
-            strategy="hidden_select",
-            select_name=result3.get("select_name"),
-            selected=result3.get("selected"),
-            requested_value=target_value,
-        )
+            raise ValueError(f"kendo_select failed (all strategies): {exc}") from exc
 
     def read_back(self, page: Page, field: FieldSpec) -> str | None:
         if field.kendo_select_name:
-            loc = page.locator(f"select[name='{field.kendo_select_name}']")
-            return loc.input_value(timeout=FORM_TIMEOUT_MS)
+            # Resolve the SAME active backing <select> apply() targets — via the
+            # visible widget anchor + querySelectorAll-pick. A global
+            # select[name=...] strict-mode-fails on Cisco's duplicate same-name
+            # selects (that throw used to be silently swallowed by the
+            # idempotent-skip's suppress, so read-back never actually ran).
+            loc = locate(page, field)
+            return loc.evaluate(_JS_READ_FROM_WIDGET, field.kendo_select_name)
         loc = locate(page, field)
         # Bounded timeout — a bare inner_text() would use Playwright's 30 s
         # default and reintroduce the stalls this rebuild exists to remove.

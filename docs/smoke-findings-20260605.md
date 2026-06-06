@@ -106,3 +106,24 @@ Building blocks (Phase G — AFTER the core atlas driver C3/C4 is green):
 7. **Proactive Advanced discovery + suggestion.** When a page's atlas has an Advanced tab/section, the agent tells the user it exists and SUGGESTS what could be added there, sourced from the captured Advanced fields — e.g. after the Basic DHCP pool: *"Done. The Advanced section also offers Default Router (gateway), DNS server, Lease time, and DHCP options — want to set any?"* Generalized: any page whose atlas captured an Advanced variant surfaces its extra capabilities as suggestions. This also catches the B2a gateway case — instead of cramming gateway into Starting ip, the agent says "gateway isn't on Basic; it's the Default Router on Advanced — add it?"
 
 **Depends on:** C3/C4 (working single-page atlas act path) first. Then FEAT-SMART = tab capture (extends B/E) + resolver (new, small) + clarification/suggestion turn (orchestration + reuse the proposal/HITL channel) + atlas navigation.
+
+---
+
+## Group C findings (2026-06-06 — breadth smokes: the generic atlas engine on NEW sections)
+
+### C1 — Static route — ✅ GREEN (after a page-agnostic radio fix)
+- **Prompt:** `add a static route to 10.50.0.0/24 via 192.168.10.254`. First attempt (`act_20260606_c79eb5`) false-failed on the **"IP Type" radio** with `verify_mismatch`: a radio used as a value-selector ("IP Type"=IPv4) was checked as a boolean, so the option label was run through the truthy-token test and a correctly-selected radio (the IPv4 default) was rejected → step_failed → never clicked Apply.
+- **Fix (commit `429bc27`, page-agnostic):** a radio's "set" state = the targeted radio is checked — in BOTH the read-back verify and `_value_already_set` idempotent-skip. +3 regression tests. Re-smoke (`act_20260606_dd95e5`) **GREEN** — route configured end-to-end through the one generic engine. Proves a brand-new section needs no per-section code.
+
+### C2 — Standard ACL form — ❌ Kendo dropdowns `element_intercepted` — **DEFER (HIGH effort, Director call 2026-06-06)**
+- **Prompt:** `create a standard ACL named LAB-ACL that permits 10.0.0.0/8` (`act_20260606_63e50ccb`).
+- **Result:** `step_failed: element_intercepted`. The **textboxes filled fine** (`aclname`=LAB-ACL ✓, `sequence`=10 ✓) but **both Kendo dropdowns failed**: `acl-name` (ACL type = "IPv4 Standard") and `source-type` (= "Network") → `element_intercepted` (Playwright timeout after 2 attempts — a popup/overlay covering the control).
+- **Why it's the worst case for the current driver:** (1) multiple stacked Kendo dropdowns (the open→click fragility); (2) a **dependent/dynamic form** — choosing Source Type=Network reveals the source-IP + wildcard fields that don't exist in the page until then; (3) a same-label collision — the name textbox and the type listbox are both "ACL Name" (captured as `aclname` vs `acl-name`).
+- **Depends on (not per-section):** the **Kendo WRITE path** hardening (prefer hidden `<select>` / scope popup by `aria-controls` — kills the `element_intercepted`), plus **dependent-field re-perceive** (re-capture after a select reveals new fields), plus **same-label disambiguation**. All three are general engine gaps already on the roadmap.
+- **For now:** ACLs are CLI-only. Re-smoke ACL after the Kendo write-path fix lands.
+
+### C3 — DHCP pool, NON-default subnet mask (Kendo write path) — ✅ GREEN (2026-06-06)
+- **Prompt:** `via web ui add a DHCP pool named LABPOOL for network 172.16.50.0 with subnet mask 255.255.255.128` (`act_20260606_66d275caec7a44898b9ad50c3ffc35c8`).
+- **Result:** ✅ end-to-end. `fill DHCP Pool Name=LABPOOL` · `fill Network=172.16.50.0` · **`select Subnet Mask=255.255.255.128` (/25, the non-default Kendo combobox)** · `click Apply to Device` → Approved → Executed, snapshot captured. This is the first time the **non-default Kendo dropdown write** has gone green live (prior /24 only passed via the idempotent-skip; see `docs/today-2026-06-06-summary.md` §3b).
+- **Root-cause fix (page-agnostic):** `pickActiveSelect` in `backend/webui_agent/atlas/adapters.py` walked container visibility starting **at the `<select>` itself**, which Kendo always renders `display:none` → every candidate rejected on iteration 0 → fell through to the interception-prone popup click. Fix: start the walk at `select.parentElement` so it tests the **ancestor container** (the Basic/template copy lives in an `ng-hide`/`display:none` section; the active copy is rendered). ~1 line. Container-visibility (Branch 2) alone disambiguated the two same-name selects — the dead `window.jQuery` Branch 1 was not needed.
+- **Unblocks C2 (ACL):** the `element_intercepted` on the ACL `acl-name` / `source-type` dropdowns is the same Kendo write path. Re-smoke ACL next (still also needs dependent-field re-perceive + same-label disambiguation per C2).
