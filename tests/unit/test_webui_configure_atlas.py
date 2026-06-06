@@ -92,7 +92,9 @@ def _stub_basics(monkeypatch) -> None:
 
 def test_device_fingerprint_returns_unknown_on_error(monkeypatch):
     """When show_version raises, the helper must return 'unknown__unknown'."""
-    monkeypatch.setattr(tr.read_tools, "show_version", lambda: (_ for _ in ()).throw(OSError("ssh down")))
+    monkeypatch.setattr(
+        tr.read_tools, "show_version", lambda: (_ for _ in ()).throw(OSError("ssh down"))
+    )
     result = tr._device_fingerprint_for_session()
     assert result == "unknown__unknown"
 
@@ -379,9 +381,7 @@ def test_propose_atlas_skips_add_when_apply_present(monkeypatch):
                 "options": None,
             }
         ],
-        "apply_controls": [
-            {"key": "apply", "label": "Apply to Device", "role": "button"}
-        ],
+        "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
         "unmapped": [],
         "open_form_control": {"key": "add", "label": "Add", "role": "button"},
     }
@@ -454,8 +454,7 @@ def test_propose_atlas_empty_plan_returns_intent_not_mappable(monkeypatch):
     assert result["error"] == "intent_not_mappable"
 
     empty_plan_warnings = [
-        kw for (event, kw) in warn_events
-        if event == "propose_webui_configure_atlas_empty_plan"
+        kw for (event, kw) in warn_events if event == "propose_webui_configure_atlas_empty_plan"
     ]
     assert len(empty_plan_warnings) == 1, "empty-plan WARNING breadcrumb must be emitted"
     breadcrumb = empty_plan_warnings[0]
@@ -722,7 +721,9 @@ def test_webui_configure_atlas_happy_path(monkeypatch):
     monkeypatch.setattr(tr, "close_all_sessions", lambda: None)
 
     # Intercept draft_atlas_plan — must NOT be called at execute
-    monkeypatch.setattr(tr, "draft_atlas_plan", lambda *a, **kw: draft_atlas_plan_calls.append(1) or {})
+    monkeypatch.setattr(
+        tr, "draft_atlas_plan", lambda *a, **kw: draft_atlas_plan_calls.append(1) or {}
+    )
 
     import backend.cli_agent.snapshots as snaps
     import backend.orchestration.confirmations as confs
@@ -958,8 +959,11 @@ def test_webui_configure_atlas_apply_click_timeout_unsafe_retry(monkeypatch):
     result = tr.execute_tool("webui_configure", {"action_id": action_id})
 
     assert result["error"] == "apply_failed"
-    assert "click_timeout_unsafe_retry" in result.get("failure_reason", "") or \
-           "click_timeout_unsafe_retry" in str(result.get("apply_result", {}).get("failure_reason", ""))
+    assert "click_timeout_unsafe_retry" in result.get(
+        "failure_reason", ""
+    ) or "click_timeout_unsafe_retry" in str(
+        result.get("apply_result", {}).get("failure_reason", "")
+    )
     # apply called exactly once — NOT retried
     assert apply_call_count[0] == 1
     assert len(failed_ids) == 1
@@ -1093,9 +1097,7 @@ def _make_atlas_action_with_signal(
 def test_execute_verify_falls_back_to_success_signal(monkeypatch):
     """P1-verify-fallback: verify_text=None but success_signal_contains='success'
     → verify_a11y is called with contains='success' (not skipped)."""
-    action_id = _make_atlas_action_with_signal(
-        verify_text=None, success_signal_contains="success"
-    )
+    action_id = _make_atlas_action_with_signal(verify_text=None, success_signal_contains="success")
 
     verify_calls: list[dict] = []
     executed_ids: list[str] = []
@@ -1134,9 +1136,7 @@ def test_execute_unverified_flag_when_no_target(monkeypatch):
     """P1-verify-fallback: verify_text=None AND no success_signal_contains →
     mark_executed (apply succeeded) BUT result.verified is False and a
     webui_configure_atlas_unverified WARNING is emitted."""
-    action_id = _make_atlas_action_with_signal(
-        verify_text=None, success_signal_contains=None
-    )
+    action_id = _make_atlas_action_with_signal(verify_text=None, success_signal_contains=None)
 
     executed_ids: list[str] = []
     verify_calls: list = []

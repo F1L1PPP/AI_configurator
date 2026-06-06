@@ -1580,9 +1580,7 @@ def test_invoke_action_kendo_select_exception_propagates():
     loc.page = page
     # _is_kendo_listbox reads get_attribute("role") → "listbox"; strategy 2 reads
     # get_attribute("aria-expanded") → None.
-    loc.get_attribute.side_effect = lambda name, **kw: (
-        "listbox" if name == "role" else None
-    )
+    loc.get_attribute.side_effect = lambda name, **kw: ("listbox" if name == "role" else None)
     # Strategy 1: kendo_unavailable → fall through. Strategy 3: ok=False → ValueError.
     loc.evaluate.side_effect = [
         {"ok": False, "reason": "kendo_unavailable"},
@@ -1603,9 +1601,7 @@ def test_do_act_kendo_select_classifies_value_error_as_unknown_error():
     loc = _make_locator_for_act()
     # Drive a genuine dead-end: strategy 1 unavailable → strategy 2 structural
     # (non-timeout) error → strategy 3 ok=False → ValueError → unknown_error.
-    loc.get_attribute.side_effect = lambda name, **kw: (
-        "listbox" if name == "role" else None
-    )
+    loc.get_attribute.side_effect = lambda name, **kw: ("listbox" if name == "role" else None)
     loc.evaluate.side_effect = [
         {"ok": False, "reason": "kendo_unavailable"},
         {"ok": False, "error": "value not in options"},
@@ -1931,7 +1927,13 @@ def test_eid_for_intent_bridge_respects_role():
 
     view = _view_with(
         # Role mismatch: link not textbox.
-        {"eid": "e_003", "role": "link", "name": "networkIp", "enabled": True, "field_key": "networkIp"},
+        {
+            "eid": "e_003",
+            "role": "link",
+            "name": "networkIp",
+            "enabled": True,
+            "field_key": "networkIp",
+        },
     )
     # Intent asks for textbox; only a link is available — no bridge.
     assert _eid_for_intent(view, "textbox", "Network") is None

@@ -249,15 +249,11 @@ def test_validate_combobox_int_option_no_crash():
     dropped cleanly as value_not_in_options."""
     atlas = _make_atlas(_combobox_field("lease.days", [7, 30]))  # type: ignore[list-item]
 
-    valid_ok, errors_ok = validate_atlas_plan(
-        [{"field_key": "lease.days", "value": 7}], atlas
-    )
+    valid_ok, errors_ok = validate_atlas_plan([{"field_key": "lease.days", "value": 7}], atlas)
     assert len(valid_ok) == 1
     assert valid_ok[0]["value"] == 7
 
-    valid_bad, errors_bad = validate_atlas_plan(
-        [{"field_key": "lease.days", "value": 99}], atlas
-    )
+    valid_bad, errors_bad = validate_atlas_plan([{"field_key": "lease.days", "value": 99}], atlas)
     assert valid_bad == []
     assert errors_bad[0]["reason"] == "value_not_in_options"
 
@@ -296,10 +292,24 @@ def test_draft_atlas_plan_emits_field_key_plan():
         "route": "routing/static",
         "page_title": "Static Routing",
         "fields": [
-            {"key": "route.prefix", "label": "Prefix", "widget": "input", "role": "textbox",
-             "required": False, "value": "", "options": None},
-            {"key": "route.nexthop", "label": "Next Hop", "widget": "input", "role": "textbox",
-             "required": False, "value": "", "options": None},
+            {
+                "key": "route.prefix",
+                "label": "Prefix",
+                "widget": "input",
+                "role": "textbox",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
+            {
+                "key": "route.nexthop",
+                "label": "Next Hop",
+                "widget": "input",
+                "role": "textbox",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
         ],
     }
     tool_payload = {
@@ -327,9 +337,7 @@ def test_draft_atlas_plan_emits_field_key_plan():
     assert result["plan"][1]["field_key"] == "route.nexthop"
     assert result["verify_text"] == "10.99.99.0"
     assert result["risk"] == "Adds static route."
-    assert result["equivalent_cli_commands"] == [
-        "ip route 10.99.99.0 255.255.255.0 192.168.1.1"
-    ]
+    assert result["equivalent_cli_commands"] == ["ip route 10.99.99.0 255.255.255.0 192.168.1.1"]
     assert "validation_errors" in result
 
 
@@ -340,13 +348,20 @@ def test_draft_atlas_plan_drops_invalid_step_via_validation():
     view = {
         "route": "routing/static",
         "fields": [
-            {"key": "route.prefix", "label": "Prefix", "widget": "input", "role": "textbox",
-             "required": False, "value": "", "options": None},
+            {
+                "key": "route.prefix",
+                "label": "Prefix",
+                "widget": "input",
+                "role": "textbox",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
         ],
     }
     tool_payload = {
         "plan": [
-            {"field_key": "hallucinated.key", "value": "bad"},   # unknown key
+            {"field_key": "hallucinated.key", "value": "bad"},  # unknown key
             {"field_key": "route.prefix", "value": "10.0.0.0"},  # valid
         ],
         "verify_text": None,
@@ -541,9 +556,7 @@ def test_draft_atlas_plan_passes_null_verify_text_through():
     }
     client = _make_atlas_tool_use_client(tool_payload)
 
-    result = draft_atlas_plan(
-        intent="enable x", rag_chunks=[], view={}, atlas=atlas, client=client
-    )
+    result = draft_atlas_plan(intent="enable x", rag_chunks=[], view={}, atlas=atlas, client=client)
 
     assert result["verify_text"] is None
 

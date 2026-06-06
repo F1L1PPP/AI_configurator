@@ -181,9 +181,7 @@ class TestLocate:
         page = MagicMock()
         page.locator.return_value = loc
 
-        field = _make_field(
-            locspec=_make_locspec(strategy="css", value="[name='processID']")
-        )
+        field = _make_field(locspec=_make_locspec(strategy="css", value="[name='processID']"))
         result = locate(page, field)
         assert result is nth1  # first visible match
 
@@ -750,9 +748,7 @@ class TestGetAdapter:
             ("kendo_grid", KendoGridAdapter),
         ],
     )
-    def test_known_widgets_return_correct_adapter(
-        self, widget: str, expected_cls: type
-    ) -> None:
+    def test_known_widgets_return_correct_adapter(self, widget: str, expected_cls: type) -> None:
         adapter = get_adapter(widget)
         assert isinstance(adapter, expected_cls)
 

@@ -229,9 +229,7 @@ def test_perceive_no_accessibility_snapshot_call(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_subnet_mask_desc("255.255.255.0")]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     # accessibility.snapshot must NOT have been called.
@@ -247,9 +245,7 @@ def test_perceive_field_keyed_by_dom_name(tmp_path: Path):
         _canned_process_id_desc("1"),
     ]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     assert isinstance(result, PerceiveResult)
@@ -267,9 +263,7 @@ def test_perceive_field_carries_dom_value(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_process_id_desc(value="42")]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     fields = result.view.get("fields", [])
@@ -284,9 +278,7 @@ def test_perceive_subnet_mask_field_labeled_correctly(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_subnet_mask_desc("255.255.255.0")]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     fields = result.view.get("fields", [])
@@ -303,12 +295,11 @@ def test_perceive_saves_atlas_to_store(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_process_id_desc()]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     from backend.webui_agent.atlas.fingerprint import route_slug
+
     atlas_path = tmp_path / "atlas" / _FP / "routes" / f"{route_slug('#/ospf')}.json"
     assert atlas_path.exists(), f"atlas file not found at {atlas_path}"
 
@@ -319,9 +310,7 @@ def test_perceive_returns_perceive_result(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_subnet_mask_desc()]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     assert isinstance(result, PerceiveResult)
@@ -363,9 +352,7 @@ def test_perceive_missing_required_detected(tmp_path: Path):
     # Process ID is required, value is empty string → missing
     descriptors = [_canned_process_id_desc(value="")]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     assert "processid" in result.missing_required
@@ -377,9 +364,7 @@ def test_perceive_not_missing_when_value_present(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_process_id_desc(value="1")]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     assert "processid" not in result.missing_required
@@ -391,9 +376,7 @@ def test_perceive_open_form_control_from_add_button(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_add_button_desc(), _canned_process_id_desc()]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     ofc = result.view.get("open_form_control")
@@ -407,9 +390,7 @@ def test_perceive_apply_control_detected(tmp_path: Path):
     page = _make_mock_page()
     descriptors = [_canned_apply_button_desc(), _canned_process_id_desc()]
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=descriptors
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=descriptors):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     apply_controls = result.view.get("apply_controls", [])
@@ -423,9 +404,7 @@ def test_perceive_drift_always_false(tmp_path: Path):
     store = _make_store(tmp_path)
     page = _make_mock_page()
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=[]
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=[]):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     assert result.drift is False
@@ -436,9 +415,7 @@ def test_perceive_captured_always_true(tmp_path: Path):
     store = _make_store(tmp_path)
     page = _make_mock_page()
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=[]
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=[]):
         result = perceive_page(page, store, device_fingerprint=_FP, route="#/ospf")
 
     assert result.captured is True
@@ -449,9 +426,7 @@ def test_perceive_route_from_url_when_not_supplied(tmp_path: Path):
     store = _make_store(tmp_path)
     page = _make_mock_page(url="https://r/webui/#/dhcp")
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=[]
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=[]):
         result = perceive_page(page, store, device_fingerprint=_FP)
 
     assert result.view["route"] == "#/dhcp"
@@ -464,9 +439,7 @@ def test_perceive_route_unknown_when_url_empty(tmp_path: Path):
     page.evaluate.side_effect = RuntimeError("page closed")
     page.title.return_value = ""
 
-    with patch(
-        "backend.webui_agent.perceive.extract_descriptors", return_value=[]
-    ):
+    with patch("backend.webui_agent.perceive.extract_descriptors", return_value=[]):
         result = perceive_page(page, store, device_fingerprint=_FP)
 
     assert result.view["route"] == "unknown"

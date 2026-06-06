@@ -247,9 +247,7 @@ class RouteAtlas:
             ),
             fields=[FieldSpec.from_dict(f) for f in d.get("fields", [])],
             apply_controls=[ControlSpec.from_dict(c) for c in d.get("apply_controls", [])],
-            success_signal=(
-                SuccessSignal.from_dict(success_d) if success_d is not None else None
-            ),
+            success_signal=(SuccessSignal.from_dict(success_d) if success_d is not None else None),
             schema_version=d.get("schema_version", SCHEMA_VERSION),
             captured_at=d.get("captured_at", ""),
             captured_by=d.get("captured_by", ""),

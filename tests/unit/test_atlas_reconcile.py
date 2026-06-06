@@ -88,10 +88,7 @@ class TestFlattenInteractive:
         assert len(result) == 1
 
     def test_all_interactive_roles_captured(self):
-        children = [
-            {"role": role, "name": f"node_{role}"}
-            for role in INTERACTIVE_ROLES
-        ]
+        children = [{"role": role, "name": f"node_{role}"} for role in INTERACTIVE_ROLES]
         snapshot = {"role": "document", "children": children}
         result = flatten_interactive(snapshot)
         assert len(result) == len(INTERACTIVE_ROLES)
@@ -384,9 +381,7 @@ class TestViewStructure:
             device_fingerprint="fp",
             page_title="DHCP",
             fields=[],
-            apply_controls=[
-                ControlSpec(key="apply", label="Apply to Device", role="button")
-            ],
+            apply_controls=[ControlSpec(key="apply", label="Apply to Device", role="button")],
         )
         result = reconcile(atlas, [])
 
@@ -431,9 +426,7 @@ class TestViewStructure:
         atlas = RouteAtlas(
             route="#/dhcp",
             device_fingerprint="fp",
-            apply_controls=[
-                ControlSpec(key="apply", label="Apply to Device", role="button")
-            ],
+            apply_controls=[ControlSpec(key="apply", label="Apply to Device", role="button")],
         )
         result = reconcile(atlas, [])
         ac = result.view["apply_controls"]

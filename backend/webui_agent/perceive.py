@@ -116,7 +116,11 @@ def _has_real_controls(descriptors: list[dict]) -> bool:
         role = _classify_role(desc)
         if widget == "button" and (is_apply_control(desc) or is_open_form_control(desc)):
             return True
-        if widget in _FORM_FIELD_WIDGETS and _is_form_control(desc, role) and _has_stable_identity(desc):
+        if (
+            widget in _FORM_FIELD_WIDGETS
+            and _is_form_control(desc, role)
+            and _has_stable_identity(desc)
+        ):
             return True
     return False
 
@@ -193,9 +197,7 @@ def perceive_page(
         f["key"]: (f.get("value") or "") for f in view.get("fields", [])
     }
     missing_required = [
-        fs.key
-        for fs in atlas.fields
-        if fs.required and not view_field_values.get(fs.key, "")
+        fs.key for fs in atlas.fields if fs.required and not view_field_values.get(fs.key, "")
     ]
 
     field_keys = [f["key"] for f in view.get("fields", [])]

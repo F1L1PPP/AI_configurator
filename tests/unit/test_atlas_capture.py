@@ -709,9 +709,7 @@ def test_build_locator_primary_is_css_name():
     d = _desc(tag="input", itype="text", name_attr="ospfProcessId", aria_label="Process ID")
     locator = build_locator(d, "textbox", "Process ID")
 
-    assert locator.strategy == "css", (
-        f"Expected primary strategy 'css', got {locator.strategy!r}"
-    )
+    assert locator.strategy == "css", f"Expected primary strategy 'css', got {locator.strategy!r}"
     assert locator.value == "[name='ospfProcessId']"
     # get_by_role must appear as a fallback
     fb_strategies = [fb.strategy for fb in locator.fallbacks]
@@ -733,8 +731,12 @@ def test_build_locator_primary_role_loose_when_no_stable_id():
     """When neither name_attr nor ng_model is set, primary is role_loose
     (lenient substring match — Cisco labels carry icons/whitespace). exact
     get_by_role is retained as a fallback."""
-    d = _desc(tag="span", role="listbox", kendo_select_name="subnetmaskOptions",
-              spatial_label="Subnet Mask")
+    d = _desc(
+        tag="span",
+        role="listbox",
+        kendo_select_name="subnetmaskOptions",
+        spatial_label="Subnet Mask",
+    )
     locator = build_locator(d, "listbox", "Subnet Mask")
 
     # No name_attr or ng_model → primary is lenient role match.
@@ -757,9 +759,9 @@ def test_build_locator_button_role_loose_plus_has_text_fallback():
     locator = build_locator(d, "button", "Apply to Device")
     assert locator.strategy == "role_loose"
     css_fallbacks = [fb.value for fb in locator.fallbacks if fb.strategy == "css"]
-    assert any(
-        "has-text" in (v or "") and "Apply to Device" in (v or "") for v in css_fallbacks
-    ), f"text-based css fallback not found in {css_fallbacks}"
+    assert any("has-text" in (v or "") and "Apply to Device" in (v or "") for v in css_fallbacks), (
+        f"text-based css fallback not found in {css_fallbacks}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +977,9 @@ def test_build_atlas_keeps_grid_combobox_with_select_name():
     descs = [grid_combobox]
 
     atlas = build_atlas(descs, route="#/dhcp", device_fingerprint="fp", page_title="DHCP")
-    assert len(atlas.fields) == 1, f"grid widget with backing select must be kept; got {atlas.fields}"
+    assert len(atlas.fields) == 1, (
+        f"grid widget with backing select must be kept; got {atlas.fields}"
+    )
     # Its locator must point at the backing select so the adapter can resolve it.
     fb_values = [atlas.fields[0].locator.value] + [
         fb.value for fb in atlas.fields[0].locator.fallbacks
@@ -985,4 +989,6 @@ def test_build_atlas_keeps_grid_combobox_with_select_name():
     )
 
     view = view_from_descriptors(descs, route="#/dhcp", device_fingerprint="fp", page_title="DHCP")
-    assert len(view["fields"]) == 1, f"grid widget with backing select kept in view; got {view['fields']}"
+    assert len(view["fields"]) == 1, (
+        f"grid widget with backing select kept in view; got {view['fields']}"
+    )

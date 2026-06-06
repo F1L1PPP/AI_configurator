@@ -100,6 +100,7 @@ def _is_form_control(desc: dict, role: str) -> bool:
     # visible wrapper's role is unusual.
     return bool(desc.get("kendo_select_name"))
 
+
 # ---------------------------------------------------------------------------
 # _CAPTURE_JS — single evaluate call that returns all element descriptors.
 # ---------------------------------------------------------------------------
@@ -601,7 +602,9 @@ def build_locator(desc: dict, role: str, label: str) -> LocatorSpec:
     name_is_unique = name_count <= 1
 
     get_by_role_spec = LocatorSpec(strategy="get_by_role", role=role, name=label)
-    css_name_spec = LocatorSpec(strategy="css", value=f"[name='{name_attr}']") if name_attr else None
+    css_name_spec = (
+        LocatorSpec(strategy="css", value=f"[name='{name_attr}']") if name_attr else None
+    )
     ng_model_css_spec = (
         LocatorSpec(strategy="css", value=f"[ng-model='{ng_model}']") if ng_model else None
     )

@@ -374,9 +374,7 @@ def draft_plan(
         system=_INNER_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
         tools=cast("list[ToolParam]", _SUBMIT_PLAN_TOOL),
-        tool_choice=cast(
-            "ToolChoiceToolParam", {"type": "tool", "name": "submit_plan"}
-        ),
+        tool_choice=cast("ToolChoiceToolParam", {"type": "tool", "name": "submit_plan"}),
     )
 
     # Guard: forced tool-use plans can truncate silently when stop_reason is
@@ -392,7 +390,10 @@ def draft_plan(
     # obeys the forced tool_choice — i.e., the normal production path.
     result: dict[str, Any] | None = None
     for block in response.content:
-        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "submit_plan":
+        if (
+            getattr(block, "type", None) == "tool_use"
+            and getattr(block, "name", None) == "submit_plan"
+        ):
             result = cast("dict[str, Any]", getattr(block, "input", None))
             break
 
@@ -402,9 +403,7 @@ def draft_plan(
         # function never silently swallows output). Attempt brace-extraction
         # from any text blocks, then raise if nothing parseable is found.
         text = "\n".join(
-            getattr(b, "text", "")
-            for b in response.content
-            if getattr(b, "type", None) == "text"
+            getattr(b, "text", "") for b in response.content if getattr(b, "type", None) == "text"
         ).strip()
         extracted = _extract_first_json_object(text)
         if extracted is None:
@@ -658,9 +657,7 @@ def validate_atlas_plan(
             continue
 
         # --- Combobox options membership check ---
-        is_combobox = (
-            field.widget in _COMBOBOX_WIDGETS or field.role in _COMBOBOX_ROLES
-        )
+        is_combobox = field.widget in _COMBOBOX_WIDGETS or field.role in _COMBOBOX_ROLES
         if is_combobox and field.options:
             # Normalise: str, trimmed, case-insensitive comparison.  Options are
             # str()-coerced defensively — capture may store numeric options for
@@ -748,7 +745,7 @@ def draft_atlas_plan(
     user_msg = (
         f"Intent: {intent}\n\n"
         f"RAG chunks:\n{chunks_blob}\n\n"
-        f"Available fields (address each by its \"key\"):\n{view_blob}"
+        f'Available fields (address each by its "key"):\n{view_blob}'
     )
 
     if running_config:
@@ -765,9 +762,7 @@ def draft_atlas_plan(
         system=_ATLAS_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
         tools=cast("list[ToolParam]", _SUBMIT_ATLAS_PLAN_TOOL),
-        tool_choice=cast(
-            "ToolChoiceToolParam", {"type": "tool", "name": "submit_atlas_plan"}
-        ),
+        tool_choice=cast("ToolChoiceToolParam", {"type": "tool", "name": "submit_atlas_plan"}),
     )
 
     # Guard: truncated tool-use blocks are unparseable — fail fast.
@@ -790,9 +785,7 @@ def draft_atlas_plan(
     if result is None:
         # Fallback: model produced text instead of tool_use (safety net).
         text = "\n".join(
-            getattr(b, "text", "")
-            for b in response.content
-            if getattr(b, "type", None) == "text"
+            getattr(b, "text", "") for b in response.content if getattr(b, "type", None) == "text"
         ).strip()
         extracted = _extract_first_json_object(text)
         if extracted is None:
@@ -811,9 +804,7 @@ def draft_atlas_plan(
                 text=text[:500],
                 extracted=extracted[:200],
             )
-            raise RuntimeError(
-                f"atlas planner LLM returned non-JSON: {text[:200]}"
-            ) from exc
+            raise RuntimeError(f"atlas planner LLM returned non-JSON: {text[:200]}") from exc
 
     # Minimal structural validation.
     if not isinstance(result, dict) or "plan" not in result:

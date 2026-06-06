@@ -259,9 +259,7 @@ def test_overrides_patch_success_signal(tmp_path: Path):
 
     overrides = {
         "dhcp": {
-            "page": {
-                "success_signal": {"kind": "a11y_text", "contains": "overridden signal"}
-            },
+            "page": {"success_signal": {"kind": "a11y_text", "contains": "overridden signal"}},
         }
     }
     store._overrides_path.parent.mkdir(parents=True, exist_ok=True)

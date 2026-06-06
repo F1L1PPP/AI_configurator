@@ -399,9 +399,7 @@ def test_draft_plan_prose_fallback_still_parses():
     (should not happen with forced tool_choice, but the safety net must
     still extract JSON from prose and return a valid dict.)"""
     payload = {
-        "plan": [
-            {"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None}
-        ],
+        "plan": [{"action": "click", "intent": {"role": "button", "name": "Apply"}, "value": None}],
         "verify_text": "Applied",
         "risk": "Low.",
         "equivalent_cli_commands": [],

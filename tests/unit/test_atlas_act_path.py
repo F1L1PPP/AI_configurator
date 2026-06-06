@@ -182,9 +182,7 @@ class TestDoActByField:
             kendo_select_name="subnetMask",
             locator=LocatorSpec(strategy="name", value="subnetMask"),
         )
-        atlas = RouteAtlas(
-            route="#/dhcp", device_fingerprint="fp", fields=[combo_field]
-        )
+        atlas = RouteAtlas(route="#/dhcp", device_fingerprint="fp", fields=[combo_field])
         adapter = MagicMock()
         adapter.read_back.return_value = "24"  # value attr != display text
         result = self._call(
@@ -591,9 +589,7 @@ class TestWebuiActField:
         assert result["error"] == "not_approved"
 
     def test_approved_success(self):
-        fake_sess = _make_fake_session(
-            {"ok": True, "field_key": "hostname", "attempts": 0}
-        )
+        fake_sess = _make_fake_session({"ok": True, "field_key": "hostname", "attempts": 0})
         generic_driver._sessions["sess_AF2"] = fake_sess
 
         with (

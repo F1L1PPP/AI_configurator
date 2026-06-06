@@ -156,9 +156,10 @@ def reconcile(atlas: RouteAtlas, live_nodes: list[dict]) -> ReconcileResult:
         for idx, node in enumerate(live_nodes):
             if idx in consumed:
                 continue
-            if roles_equivalent(fs.role, node.get("role", "")) and normalize_name(
-                node.get("name")
-            ) == norm_label:
+            if (
+                roles_equivalent(fs.role, node.get("role", ""))
+                and normalize_name(node.get("name")) == norm_label
+            ):
                 found_idx = idx
                 break
         if found_idx is not None:
@@ -171,9 +172,7 @@ def reconcile(atlas: RouteAtlas, live_nodes: list[dict]) -> ReconcileResult:
     # Condition: exactly one unmatched combobox-family atlas field AND
     #            exactly one unconsumed combobox/listbox live node.
     _COMBO_FAMILY = {"combobox", "listbox"}
-    unmatched_combo_fields = [
-        fs for fs in unmatched_fields if fs.role in _COMBO_FAMILY
-    ]
+    unmatched_combo_fields = [fs for fs in unmatched_fields if fs.role in _COMBO_FAMILY]
     unconsumed_combo_nodes = [
         (idx, node)
         for idx, node in enumerate(live_nodes)
@@ -202,9 +201,7 @@ def reconcile(atlas: RouteAtlas, live_nodes: list[dict]) -> ReconcileResult:
             }
         )
 
-    view_apply = [
-        {"key": c.key, "label": c.label, "role": c.role} for c in atlas.apply_controls
-    ]
+    view_apply = [{"key": c.key, "label": c.label, "role": c.role} for c in atlas.apply_controls]
 
     unmapped_keys = [fs.key for fs in unmatched_fields]
     # Surface the open-form control (e.g. the "Add"/"Create" button on a list

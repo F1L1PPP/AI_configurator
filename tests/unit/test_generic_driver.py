@@ -880,7 +880,10 @@ def _make_form_open_session(reply: dict) -> MagicMock:
 
 def test_open_form_for_planning_happy_path():
     """Click lands, op=act_by_intent is sent, view returned."""
-    post_view = {"view_id": "form_open_view", "elements": [{"role": "textbox", "name": "Pool Name"}]}
+    post_view = {
+        "view_id": "form_open_view",
+        "elements": [{"role": "textbox", "name": "Pool Name"}],
+    }
     sess = _make_form_open_session({"ok": True, "view": post_view})
     generic_driver._sessions["sess_plan"] = sess
 

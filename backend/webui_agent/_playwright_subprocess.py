@@ -372,8 +372,7 @@ def _a11y_text_present(page: Any, contains: str) -> bool:
         snap = page.accessibility.snapshot(interesting_only=True)
         nodes = flatten_interactive(snap)
         interactive_hit = any(
-            needle
-            in (str(n.get("name", "")) + " " + str(n.get("value", ""))).lower()
+            needle in (str(n.get("name", "")) + " " + str(n.get("value", ""))).lower()
             for n in nodes
         )
     except Exception:  # noqa: BLE001
@@ -648,9 +647,7 @@ def _kendo_select(locator: Any, value: str) -> None:
 
         # Click the matching list item. The popup may be body-level (Kendo appends
         # the <ul role="listbox"> to <body>); the has_text filter narrows it.
-        page.locator("ul.k-list li.k-item", has_text=value).click(
-            timeout=_ACT_TIMEOUT_FORM_MS
-        )
+        page.locator("ul.k-list li.k-item", has_text=value).click(timeout=_ACT_TIMEOUT_FORM_MS)
         _log.info(
             "kendo_select_success",
             strategy="dom_click",
@@ -1573,7 +1570,11 @@ def _do_act_by_field(
         + " "
         + str(value).lower()
         + " "
-        + (atlas.field_by_key(field_key).label.lower() if atlas and atlas.field_by_key(field_key) else "")
+        + (
+            atlas.field_by_key(field_key).label.lower()
+            if atlas and atlas.field_by_key(field_key)
+            else ""
+        )
     )
     for phrase in _SENSITIVE_DENY_LIST:
         if phrase in deny_target:

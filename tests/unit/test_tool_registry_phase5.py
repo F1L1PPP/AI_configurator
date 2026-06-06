@@ -69,8 +69,15 @@ def test_propose_webui_configure_happy_path(monkeypatch):
         "route": "/webui/#/routing/ospf",
         "page_title": "OSPF",
         "fields": [
-            {"key": "ospf.process_id", "label": "Process ID", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "ospf.process_id",
+                "label": "Process ID",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Add Process", "role": "button"}],
         "unmapped": [],
@@ -192,9 +199,7 @@ def test_propose_webui_configure_closes_session_on_draft_failed(monkeypatch):
         "_search_docs",
         lambda **kw: {"results": [{"text": "x", "source": "s", "section": "S"}]},
     )
-    monkeypatch.setattr(
-        tr, "webui_open", lambda **kw: {"session_id": "sess_draft_fail"}
-    )
+    monkeypatch.setattr(tr, "webui_open", lambda **kw: {"session_id": "sess_draft_fail"})
     monkeypatch.setattr(
         tr,
         "webui_perceive",
@@ -203,7 +208,9 @@ def test_propose_webui_configure_closes_session_on_draft_failed(monkeypatch):
     monkeypatch.setattr(
         tr,
         "draft_atlas_plan",
-        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("atlas planner LLM returned non-JSON: ...")),
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("atlas planner LLM returned non-JSON: ...")
+        ),
     )
     monkeypatch.setattr(tr.read_tools, "show_running_config", lambda: "")
     monkeypatch.setattr(tr.read_tools, "show_version", lambda: {})
@@ -508,8 +515,15 @@ def test_propose_webui_configure_attaches_conflict_when_equivalent_cli_matches(m
         "route": "/webui/#/vlan",
         "page_title": "VLAN",
         "fields": [
-            {"key": "vlan.id", "label": "VLAN ID", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "vlan.id",
+                "label": "VLAN ID",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Save", "role": "button"}],
         "unmapped": [],
@@ -572,8 +586,15 @@ def test_propose_webui_configure_skips_detector_when_equivalent_cli_empty(monkey
         "route": "/webui/#/vlan",
         "page_title": "VLAN",
         "fields": [
-            {"key": "vlan.id", "label": "VLAN ID", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "vlan.id",
+                "label": "VLAN ID",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Save", "role": "button"}],
         "unmapped": [],
@@ -778,17 +799,51 @@ def test_propose_opens_form_and_drafts_against_real_fields(monkeypatch):
         "route": "/webui/#/dhcp",
         "page_title": "DHCP Add",
         "fields": [
-            {"key": "dhcp.pool_name", "label": "Pool Name", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
-            {"key": "dhcp.network", "label": "Network", "role": "textbox", "widget": "input",
-             "required": False, "value": "", "options": None},
-            {"key": "dhcp.subnet", "label": "Subnet Mask", "role": "combobox",
-             "widget": "kendo_combobox", "required": False, "value": "",
-             "options": ["/24", "/25"]},
-            {"key": "dhcp.start", "label": "Starting ip", "role": "textbox", "widget": "input",
-             "required": False, "value": "", "options": None},
-            {"key": "dhcp.end", "label": "Ending ip", "role": "textbox", "widget": "input",
-             "required": False, "value": "", "options": None},
+            {
+                "key": "dhcp.pool_name",
+                "label": "Pool Name",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
+            {
+                "key": "dhcp.network",
+                "label": "Network",
+                "role": "textbox",
+                "widget": "input",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
+            {
+                "key": "dhcp.subnet",
+                "label": "Subnet Mask",
+                "role": "combobox",
+                "widget": "kendo_combobox",
+                "required": False,
+                "value": "",
+                "options": ["/24", "/25"],
+            },
+            {
+                "key": "dhcp.start",
+                "label": "Starting ip",
+                "role": "textbox",
+                "widget": "input",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
+            {
+                "key": "dhcp.end",
+                "label": "Ending ip",
+                "role": "textbox",
+                "widget": "input",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
         "unmapped": [],
@@ -866,8 +921,15 @@ def test_propose_skips_form_open_when_plan_already_has_fills(monkeypatch):
         "route": "/webui/#/general",
         "page_title": "General",
         "fields": [
-            {"key": "general.hostname", "label": "Hostname", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "general.hostname",
+                "label": "Hostname",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Apply", "role": "button"}],
         "unmapped": [],
@@ -908,7 +970,9 @@ def test_propose_skips_form_open_when_plan_already_has_fills(monkeypatch):
 
     assert result["status"] == "awaiting_approval"
     # Form-open helper must NOT be called when the view already has fields.
-    assert form_open_calls == [], "webui_open_form_for_planning must not be called when form is already open"
+    assert form_open_calls == [], (
+        "webui_open_form_for_planning must not be called when form is already open"
+    )
     # draft_atlas_plan is called ONCE only.
     assert len(draft_calls) == 1
 
@@ -982,8 +1046,15 @@ def test_propose_form_open_helper_receives_click_action(monkeypatch):
         "route": "/webui/#/x",
         "page_title": "X",
         "fields": [
-            {"key": "x.name", "label": "Name", "role": "textbox", "widget": "input",
-             "required": False, "value": "", "options": None},
+            {
+                "key": "x.name",
+                "label": "Name",
+                "role": "textbox",
+                "widget": "input",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Save", "role": "button"}],
         "unmapped": [],
@@ -1050,8 +1121,15 @@ def test_heuristic_fires_for_list_page_with_add_button(monkeypatch):
         "route": "/webui/#/dhcp",
         "page_title": "DHCP Add",
         "fields": [
-            {"key": "dhcp.pool_name", "label": "Pool Name", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "dhcp.pool_name",
+                "label": "Pool Name",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
         "unmapped": [],
@@ -1135,10 +1213,24 @@ def test_heuristic_fires_for_list_page_with_search_textbox(monkeypatch):
         "route": "/webui/#/dhcp",
         "page_title": "DHCP Add",
         "fields": [
-            {"key": "dhcp.pool_name", "label": "Pool Name", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
-            {"key": "dhcp.network", "label": "Network", "role": "textbox", "widget": "input",
-             "required": False, "value": "", "options": None},
+            {
+                "key": "dhcp.pool_name",
+                "label": "Pool Name",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
+            {
+                "key": "dhcp.network",
+                "label": "Network",
+                "role": "textbox",
+                "widget": "input",
+                "required": False,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
         "unmapped": [],
@@ -1205,8 +1297,15 @@ def test_heuristic_skips_when_submit_button_present(monkeypatch):
         "route": "/webui/#/interface",
         "page_title": "Interface",
         "fields": [
-            {"key": "iface.ip", "label": "IP Address", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "iface.ip",
+                "label": "IP Address",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "Apply to Device", "role": "button"}],
         "unmapped": [{"key": "add_btn", "label": "Add", "role": "button"}],
@@ -1227,9 +1326,7 @@ def test_heuristic_skips_when_submit_button_present(monkeypatch):
         }
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(
-        tr, "webui_perceive", lambda **kw: {"view": form_view_open}
-    )
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": form_view_open})
     monkeypatch.setattr(
         tr,
         "webui_open_form_for_planning",
@@ -1274,9 +1371,7 @@ def test_heuristic_skips_when_no_trigger_button(monkeypatch):
     draft_calls: list = []
 
     _stub_basics(monkeypatch)
-    monkeypatch.setattr(
-        tr, "webui_perceive", lambda **kw: {"view": no_trigger_view}
-    )
+    monkeypatch.setattr(tr, "webui_perceive", lambda **kw: {"view": no_trigger_view})
     monkeypatch.setattr(
         tr,
         "webui_open_form_for_planning",
@@ -1285,7 +1380,8 @@ def test_heuristic_skips_when_no_trigger_button(monkeypatch):
     monkeypatch.setattr(
         tr,
         "draft_atlas_plan",
-        lambda *a, **kw: draft_calls.append(1) or {
+        lambda *a, **kw: draft_calls.append(1)
+        or {
             "plan": a_plan,
             "verify_text": "ok",
             "risk": "low",
@@ -1302,7 +1398,9 @@ def test_heuristic_skips_when_no_trigger_button(monkeypatch):
 
     assert result["status"] == "awaiting_approval"
     # Save button is in apply_controls + is a submit → heuristic does not fire.
-    assert form_open_calls == [], "webui_open_form_for_planning must NOT be called without a trigger"
+    assert form_open_calls == [], (
+        "webui_open_form_for_planning must NOT be called without a trigger"
+    )
     assert len(draft_calls) == 1
 
 
@@ -1322,8 +1420,15 @@ def test_heuristic_add_process_in_trigger_set(monkeypatch):
         "route": "/webui/#/routing/ospf",
         "page_title": "OSPF Add",
         "fields": [
-            {"key": "ospf.process_id", "label": "Process ID", "role": "textbox", "widget": "input",
-             "required": True, "value": "", "options": None},
+            {
+                "key": "ospf.process_id",
+                "label": "Process ID",
+                "role": "textbox",
+                "widget": "input",
+                "required": True,
+                "value": "",
+                "options": None,
+            },
         ],
         "apply_controls": [{"key": "apply", "label": "OK", "role": "button"}],
         "unmapped": [],

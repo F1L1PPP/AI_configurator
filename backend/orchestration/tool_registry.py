@@ -1270,8 +1270,7 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
     _open_form_ctrl = view.get("open_form_control")
 
     _has_submit = any(
-        str(_c.get("label") or _c.get("name") or "").strip().lower()
-        in _FORM_SUBMIT_NAMES_LOWER
+        str(_c.get("label") or _c.get("name") or "").strip().lower() in _FORM_SUBMIT_NAMES_LOWER
         for _c in _view_apply
     )
     _trigger_key: str | None = None
@@ -1298,9 +1297,7 @@ def _propose_webui_configure_atlas(**kwargs: Any) -> dict:
                 _crole = str(_cand.get("role") or "").lower()
                 if _cname in _FORM_TRIGGER_NAMES_LOWER and _crole in ("button", "link", ""):
                     _trigger_key = str(_cand.get("key") or "").strip() or None
-                    _trigger_label = str(
-                        _cand.get("label") or _cand.get("name") or ""
-                    ).strip()
+                    _trigger_label = str(_cand.get("label") or _cand.get("name") or "").strip()
                     _trigger_role = str(_cand.get("role") or "button").strip()
                     break
 
@@ -1699,8 +1696,7 @@ def _webui_configure_atlas(**kwargs: Any) -> dict:
         return {
             "error": "step_failed",
             "message": (
-                f"Field '{first_failure['field_key']}' failed: "
-                f"{first_failure['failure_reason']}"
+                f"Field '{first_failure['field_key']}' failed: {first_failure['failure_reason']}"
             ),
             "failed_step": first_failure,
             "completed_steps": executed_steps,

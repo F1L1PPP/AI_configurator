@@ -28,9 +28,7 @@ def test_locator_spec_round_trip_simple():
 
 def test_locator_spec_round_trip_with_fallbacks():
     fallback = LocatorSpec(strategy="css", value="input#hostname")
-    loc = LocatorSpec(
-        strategy="get_by_role", role="textbox", name="Hostname", fallbacks=[fallback]
-    )
+    loc = LocatorSpec(strategy="get_by_role", role="textbox", name="Hostname", fallbacks=[fallback])
     restored = LocatorSpec.from_dict(loc.to_dict())
     assert restored == loc
     assert len(restored.fallbacks) == 1
